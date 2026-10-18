@@ -144,14 +144,14 @@ jobs:
           python-version: "3.12"
       - run: uv sync --all-extras --group integration --locked
       - run: uv run --no-sync python scripts/verify_release.py extensions --integration
+      # moto's standalone server is a disposable S3-compatible endpoint; it accepts
+      # the synthetic credentials and needs no container registry.
       - name: Start disposable S3-compatible object store
-        run: >-
-          docker run -d --name qavf-minio -p 9000:9000
-          -e MINIO_ROOT_USER=qavf-integration
-          -e MINIO_ROOT_PASSWORD=local-integration-secret
-          minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+        run: |
+          nohup uvx --from "moto[server]==5.2.3" moto_server -H 127.0.0.1 -p 9000 > moto.log 2>&1 &
+          echo $! > moto.pid
       - name: Wait for object store readiness
-        run: curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://127.0.0.1:9000/minio/health/ready
+        run: curl --fail --silent --retry 20 --retry-all-errors --retry-delay 2 -o /dev/null http://127.0.0.1:9000/moto-api/
       - name: Run required live integrations
         run: uv run --no-sync python scripts/verify_release.py test --integration --id integrations --output evidence/integrations.json tests/integration
       - uses: actions/upload-artifact@v4
@@ -162,7 +162,7 @@ jobs:
           if-no-files-found: error
       - name: Stop disposable object store
         if: always()
-        run: docker rm -f qavf-minio
+        run: kill "$(cat moto.pid)" 2>/dev/null || true
 
   release-assurance:
     name: Required release assurance
@@ -189,3 +189,85 @@ jobs:
           name: release-assurance
           path: release-assurance.json
           if-no-files-found: error
+
+  # Publishing runs only for v* tags, after every required job and the strict
+  # aggregate passed. It ships the exact distributions those jobs verified.
+  publish-pypi:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release-assurance
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/qavf/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: qavf-distributions-3.12
+          path: dist
+      - name: Require the tag to match the verified package version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          test -f "dist/qavf-${TAG#v}-py3-none-any.whl"
+          test -f "dist/qavf-${TAG#v}.tar.gz"
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: GitHub release
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: qavf-distributions-3.12
+          path: dist
+      - name: Create the release with distributions and SHA-256 hashes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "QAVF ${TAG#v}" --generate-notes --verify-tag
+
+  container:
+    name: Container image
+    needs: publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: qavf-distributions-3.12
+          path: dist
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/ahmedaredah/qavf
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

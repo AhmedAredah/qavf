@@ -42,8 +42,8 @@ QAVF_INTEGRATION_MODE=required uv run --no-sync python -m pytest tests/integrati
 ```
 
 For the complete live suite, start disposable PostgreSQL and S3-compatible
-services and supply their endpoints. The CI workflow provisions PostgreSQL and
-MinIO with synthetic local credentials; it does not need personal cloud accounts.
+services and supply their endpoints. The CI workflow provisions PostgreSQL and a
+[moto](https://github.com/getmoto/moto) S3 server with synthetic local credentials; it does not need personal cloud accounts.
 
 | Variable | Requirement |
 | --- | --- |
@@ -67,7 +67,7 @@ validation. The loopback HTTP server closes and joins its thread after the tests
 ## Scope of the evidence
 
 Passing loopback HTTP tests does not certify PostgreSQL or S3. Passing against
-MinIO establishes the tested S3-compatible behavior, not all Amazon S3 account
+moto's S3 server establishes the tested S3-compatible behavior, not all Amazon S3 account
 policies, authentication modes, or storage services. The current live suite does
 not qualify MySQL/MariaDB, presigned-URL authentication, production TLS policies,
 or database consistency guarantees beyond the exercised paths. Results must

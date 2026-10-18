@@ -1,7 +1,8 @@
 # Distribution verification
 
-QAVF is unreleased. This repository builds source and wheel distributions; the
-verification workflow does not publish them.
+Releases are cut from `v*` tags. The release workflow (`.github/workflows/verify.yml`)
+verifies the source and the built distributions on every supported platform, then
+publishes those exact files.
 
 Before distributing an update:
 
@@ -37,8 +38,18 @@ requires the build/verification scripts in the sdist, and rejects bytecode cache
 `uv build --clear` removes stale artifacts before rebuilding. Never reuse an old
 wheel because its filename happens to match the source version.
 
-Publishing to a registry is a separate maintainer decision. No automated publishing
-configuration or credentials are included.
+Push the tag (`git tag v0.4.0 && git push origin v0.4.0`). When every required job
+and the release-assurance aggregate pass, the workflow:
+
+- requires the tag to match the verified distribution version;
+- publishes to [PyPI](https://pypi.org/project/qavf/) through trusted publishing
+  (OpenID Connect, no stored token; the `pypi` environment accepts `v*` tags only);
+- creates the GitHub release with the distributions and their `SHA256SUMS`;
+- pushes the `linux/amd64` and `linux/arm64` image `ghcr.io/ahmedaredah/qavf`
+  (version, `major.minor` and `latest` tags), built from the verified wheel.
+
+The conda-forge feedstock and the Homebrew tap (`AhmedAredah/homebrew-tap`) follow
+each PyPI release; conda-forge's bot opens the update pull request automatically.
 
 Performance measurements are separate from correctness gates. See
 [performance benchmarks](performance_benchmarks.md) for

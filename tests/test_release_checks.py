@@ -224,10 +224,19 @@ def test_real_pytest_exit_and_record_are_fail_closed(tmp_path, body, passed):
     test_file = tmp_path / "test_gate_probe.py"
     test_file.write_text(body + "\n")
     output = tmp_path / "results.json"
+    # Pin the probe's root and configuration to its own directory. Otherwise pytest
+    # roots it at the common ancestor of the project and the temporary directory
+    # (/tmp), and collection walks unrelated, possibly unreadable directories.
+    config = tmp_path / "pytest.ini"
+    config.write_text("[pytest]\n")
     command = [
         sys.executable,
         "-m",
         "pytest",
+        "-c",
+        str(config),
+        "--rootdir",
+        str(tmp_path),
         "-p",
         "scripts.release_checks.pytest_plugin",
         "--release-results",

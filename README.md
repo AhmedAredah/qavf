@@ -1,6 +1,7 @@
 # QAVF
 
 [![CI](https://github.com/AhmedAredah/qavf/actions/workflows/ci.yml/badge.svg)](https://github.com/AhmedAredah/qavf/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/qavf)](https://pypi.org/project/qavf/)
 [![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/AhmedAredah/qavf/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/AhmedAredah/qavf/blob/main/LICENSE)
 
@@ -24,11 +25,13 @@ pass for a check it could not assess.
 ## Install
 
 ```bash
-pip install "qavf[stats] @ git+https://github.com/AhmedAredah/qavf"
+pip install "qavf[stats]"                                     # or: uv tool install "qavf[stats]"
+docker run --rm -v "$PWD:/work" ghcr.io/ahmedaredah/qavf run -c qavf.yaml
 ```
 
 Python 3.12 or newer on Linux, macOS or Windows. The `stats` extra adds SciPy-based
-tests; `pandas` adds pandas adapters; `all` installs both.
+tests; `pandas` adds pandas adapters; `all` installs both. In GitHub Actions, use
+[`AhmedAredah/qavf-action`](https://github.com/AhmedAredah/qavf-action).
 
 ## Quick start
 

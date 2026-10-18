@@ -58,8 +58,13 @@ def float_observations(values: npt.ArrayLike) -> npt.NDArray[np.float64]:
     with np.errstate(over="ignore", invalid="ignore"):
         converted = np.asarray(raw, dtype=np.float64)
         if raw.dtype.kind in "iu":
-            restored = converted.astype(raw.dtype)
-            if not np.array_equal(raw, restored):
+            # A value that rounds to the integer type's limit is not exact, and the
+            # out-of-range cast back is architecture dependent (x86 wraps, ARM
+            # saturates to the original value), so reject it before casting.
+            limit = 2.0 ** (raw.dtype.itemsize * 8 - (raw.dtype.kind == "i"))
+            if np.any(converted >= limit) or not np.array_equal(
+                raw, converted.astype(raw.dtype)
+            ):
                 raise ValueError("integer observations cannot be represented exactly as Float64")
         elif raw.dtype.itemsize > 8 and np.any(np.isfinite(raw) & (raw != converted)):
             raise ValueError("observations cannot be represented exactly as Float64")
