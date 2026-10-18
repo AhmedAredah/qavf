@@ -48,8 +48,14 @@ and the release-assurance aggregate pass, the workflow:
 - pushes the `linux/amd64` and `linux/arm64` image `ghcr.io/ahmedaredah/qavf`
   (version, `major.minor` and `latest` tags), built from the verified wheel.
 
-The conda-forge feedstock and the Homebrew tap (`AhmedAredah/homebrew-tap`) follow
-each PyPI release; conda-forge's bot opens the update pull request automatically.
+Downstream channels follow each PyPI release without manual steps:
+
+- the Homebrew tap (`AhmedAredah/homebrew-tap`) checks PyPI every six hours and
+  commits the new sdist URL and SHA-256 itself (or run its *Update formula* workflow);
+- conda-forge's bot opens the feedstock update pull request, merged automatically
+  once its builds pass;
+- `AhmedAredah/qavf-action` installs the latest release unless a workflow pins
+  `version`.
 
 Performance measurements are separate from correctness gates. See
 [performance benchmarks](performance_benchmarks.md) for
