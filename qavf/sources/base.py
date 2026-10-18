@@ -44,7 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from qavf.redaction import exception_details, redact_text
 
 if TYPE_CHECKING:
-    from qavf.settings import ConnectionSpec
+    from qavf.settings import ConnectionSpec, SecretSpec
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,8 @@ class SourceEnvironment:
     """Directory that relative paths resolve against (the configuration's directory)."""
     connections: Mapping[str, ConnectionSpec] = field(default_factory=dict)
     """Named database connections from the configuration."""
+    secrets: Mapping[str, SecretSpec] = field(default_factory=dict)
+    """Cloud storage secrets created on every connection and used for remote reads."""
     threads: int | None = None
     """DuckDB worker threads per connection; ``None`` for DuckDB's default (all cores).
     Set when rules run in parallel so the two levels of parallelism share the CPUs."""

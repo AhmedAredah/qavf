@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - Unreleased
+
+- Add a `secrets` configuration section for cloud storage: AWS S3 and S3-compatible
+  services (Cloudflare R2, MinIO, Wasabi, GCS interoperability) and Azure Blob/ADLS,
+  with static keys or the platform credential chain. Secrets apply to DuckDB reads and
+  to remote Parquet read through Polars, and are masked in reports and logs.
+- Mask `key_id`, `connection_string`, account keys and SAS tokens wherever settings
+  or messages are redacted.
+- Include the `aws` and `azure` DuckDB extensions in the container image.
+
 ## [0.4.0] - 2026-10-18
 
 First public release.

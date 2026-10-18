@@ -64,6 +64,7 @@ qavf = "qavf.cli:main"
 
 [dependency-groups]
 integration = [
+    "azure-storage-blob>=12.26",
     "boto3>=1.35",
     "psycopg[binary]>=3.2",
 ]

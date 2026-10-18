@@ -56,7 +56,7 @@ def extension(name: str) -> None:
     """Load a preinstalled extension; installation belongs to environment setup."""
     import duckdb
 
-    if name not in {"httpfs", "postgres"}:
+    if name not in {"httpfs", "postgres", "azure"}:
         raise ValueError("unsupported integration extension")
     try:
         with duckdb.connect() as connection:

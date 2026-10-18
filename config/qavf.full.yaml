@@ -101,6 +101,21 @@ connections:
   archive: {type: sqlite, path: data/archive.db}
 
 # ---------------------------------------------------------------------------
+# secrets: cloud storage credentials for s3:// and az:// / abfss:// paths
+# (docs/cloud_storage.md). Values are masked in reports and logs. Each secret
+# loads its DuckDB extension, so configure only the storage you read.
+# ---------------------------------------------------------------------------
+# secrets:
+#   lake:
+#     type: s3                          # s3 (AWS and S3-compatible) | azure
+#     provider: credential_chain        # config (keys below) | credential_chain
+#     region: us-east-1
+#     scope: [s3://my-lake]             # URL prefixes; omit for every s3:// URL
+#   minio: {type: s3, key_id: "${MINIO_KEY}", secret: "${MINIO_SECRET}",
+#           endpoint: "minio.internal:9000", url_style: path, use_ssl: false}
+#   blob:  {type: azure, connection_string: "${AZURE_STORAGE_CONNECTION_STRING}"}
+
+# ---------------------------------------------------------------------------
 # assertions: SQL returning offending rows (INP-007); datasets are tables
 # ---------------------------------------------------------------------------
 assertions:

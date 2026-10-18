@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from collections.abc import Iterable, Mapping
@@ -15,6 +16,9 @@ from qavf.sources.base import ConnectionBudget, SourceEnvironment, SourceError, 
 from qavf.sources.errors import redacted_error
 from qavf.sources.memory import reservation_is_stricter
 from qavf.sources.sql import sql_literal, validate_query
+from qavf.sources.storage import create_secret_statements
+
+logger = logging.getLogger(__name__)
 
 
 class OwnedConnection:
@@ -100,6 +104,27 @@ def connect(
             con.execute(f"SET temp_directory = {sql_literal(str(location))}")
         if spill_bytes is not None:
             con.execute(f"SET max_temp_directory_size = {sql_literal(str(spill_bytes) + 'B')}")
+        for name, secret in env.secrets.items():
+            try:
+                for statement in create_secret_statements(name, secret):
+                    con.execute(statement)
+            except duckdb.Error as exc:
+                # The statement carries credentials: report only the redacted
+                # native error, never the SQL that failed.
+                error = redacted_error(exc)
+                if secret.provider == "credential_chain":
+                    # Newer DuckDB validates the chain on creation. Without
+                    # credentials, only reads that need this secret can fail;
+                    # unrelated local datasets on the connection still load.
+                    logger.warning(
+                        "storage secret %r found no usable credentials: %s",
+                        redact_text(name),
+                        error,
+                    )
+                    continue
+                raise SourceError(
+                    f"could not create storage secret {redact_text(name)!r}: {error}"
+                ) from None
         for name in dict.fromkeys(attach):
             spec = env.connections.get(name)
             if spec is None:

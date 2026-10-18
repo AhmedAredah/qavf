@@ -85,6 +85,22 @@ assertions:
 documents every option. Paths are relative to the configuration file, and any string
 may use `${ENV_VAR}` so credentials stay out of the file.
 
+## Cloud storage
+
+Read `s3://`, `az://` and `abfss://` URLs with credentials configured once. AWS
+roles, Azure identity and GitHub OIDC logins work without stored keys:
+
+```yaml
+secrets:
+  lake: {type: s3, provider: credential_chain, region: us-east-1}
+  blob: {type: azure, connection_string: "${AZURE_STORAGE_CONNECTION_STRING}"}
+datasets:
+  orders: {path: "s3://my-lake/orders/*.parquet"}
+```
+
+S3-compatible stores (Cloudflare R2, MinIO, Wasabi) take an `endpoint`. See
+[cloud storage](https://github.com/AhmedAredah/qavf/blob/main/docs/cloud_storage.md).
+
 ## Python API
 
 ```python
@@ -193,6 +209,7 @@ resource error.
   [sources](https://github.com/AhmedAredah/qavf/blob/main/docs/sources.md)
 - [Rules reference](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md) and
   [writing plugins](https://github.com/AhmedAredah/qavf/blob/main/docs/plugins.md)
+- [Cloud storage](https://github.com/AhmedAredah/qavf/blob/main/docs/cloud_storage.md)
 - [Resource limits](https://github.com/AhmedAredah/qavf/blob/main/docs/resources.md) and
   [isolated execution](https://github.com/AhmedAredah/qavf/blob/main/docs/execution_limits.md)
 - [Numerical contracts](https://github.com/AhmedAredah/qavf/blob/main/docs/numerics.md) and

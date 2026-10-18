@@ -238,6 +238,7 @@ class DataContext:
         env = SourceEnvironment(
             base_dir=settings.base_dir,
             connections=settings.connections,
+            secrets=settings.secrets,
             threads=threads,
             memory_limit=settings.engine.duckdb_memory_limit,
             temp_directory=(

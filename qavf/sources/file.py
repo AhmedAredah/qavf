@@ -36,6 +36,7 @@ from qavf.sources.identity import sha256_file as _sha256
 from qavf.sources.native import budgeted, check_budget, connect, fetch
 from qavf.sources.parameters import FileParams
 from qavf.sources.sql import quote_identifier, sql_literal
+from qavf.sources.storage import storage_options
 from qavf.sources.typed import needs_typed_reader
 
 #: Matched files listed by name in a glob fingerprint (all are always counted).
@@ -235,6 +236,10 @@ class FileSource(DataSource[FileParams]):
         files = self._files()
         location = self._location() if files is None else [str(path) for path in files]
         kwargs: dict[str, Any] = {"glob": files is None}
+        if files is None:
+            options = storage_options(self._location(), self.env.secrets)
+            if options is not None:
+                kwargs["storage_options"] = options
         if "hive_partitioning" in params.options:
             kwargs["hive_partitioning"] = params.options["hive_partitioning"]
         filename = params.options.get("filename", False)

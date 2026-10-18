@@ -136,6 +136,8 @@ jobs:
       QAVF_S3_ENDPOINT: http://127.0.0.1:9000
       QAVF_S3_ACCESS_KEY: qavf-integration
       QAVF_S3_SECRET_KEY: local-integration-secret
+      # Azurite's documented development-storage account; not a credential.
+      QAVF_AZURE_CONNECTION_STRING: "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -150,8 +152,16 @@ jobs:
         run: |
           nohup uvx --from "moto[server]==5.2.3" moto_server -H 127.0.0.1 -p 9000 > moto.log 2>&1 &
           echo $! > moto.pid
+      - name: Start disposable Azure Blob emulator
+        run: >-
+          docker run -d --name qavf-azurite -p 10000:10000
+          mcr.microsoft.com/azure-storage/azurite:3.35.0
+          azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck --loose
       - name: Wait for object store readiness
-        run: curl --fail --silent --retry 20 --retry-all-errors --retry-delay 2 -o /dev/null http://127.0.0.1:9000/moto-api/
+        run: |
+          curl --fail --silent --retry 20 --retry-all-errors --retry-delay 2 -o /dev/null http://127.0.0.1:9000/moto-api/
+          # Azurite rejects anonymous requests; any HTTP response means it is listening.
+          curl --silent --retry 20 --retry-connrefused --retry-delay 2 -o /dev/null http://127.0.0.1:10000/
       - name: Run required live integrations
         run: uv run --no-sync python scripts/verify_release.py test --integration --id integrations --output evidence/integrations.json tests/integration
       - uses: actions/upload-artifact@v4
@@ -162,7 +172,9 @@ jobs:
           if-no-files-found: error
       - name: Stop disposable object store
         if: always()
-        run: kill "$(cat moto.pid)" 2>/dev/null || true
+        run: |
+          kill "$(cat moto.pid)" 2>/dev/null || true
+          docker rm -f qavf-azurite || true
 
   release-assurance:
     name: Required release assurance

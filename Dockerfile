@@ -17,7 +17,7 @@ RUN set -eu; \
 
 USER qavf
 # Pre-install the DuckDB extensions QAVF sources use, so runs need no network access.
-RUN python -c "import duckdb; c = duckdb.connect(); [c.execute(f'INSTALL {name}') for name in ('httpfs', 'excel', 'postgres', 'mysql', 'sqlite')]"
+RUN python -c "import duckdb; c = duckdb.connect(); [c.execute(f'INSTALL {name}') for name in ('httpfs', 'aws', 'azure', 'excel', 'postgres', 'mysql', 'sqlite')]"
 
 WORKDIR /work
 ENTRYPOINT ["qavf"]

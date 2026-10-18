@@ -180,6 +180,7 @@ def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, ob
     env = SourceEnvironment(
         base_dir=settings.base_dir,
         connections=settings.connections,
+        secrets=settings.secrets,
         threads=settings.engine.native_threads,
         memory_limit=settings.engine.duckdb_memory_limit,
     )

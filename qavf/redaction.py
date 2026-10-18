@@ -18,7 +18,9 @@ MASK = "***"
 #: Names (of settings keys, query parameters or ``key=value`` pairs) whose values are secret.
 _SECRET_NAME = re.compile(
     r"(?:^|[_\-.])(?:pass(?:word|wd)?|pwd|secret|token|api[_\-]?key|access[_\-]?key|"
-    r"private[_\-]?key|credentials?|auth(?:orization)?|sig(?:nature)?|session|"
+    r"private[_\-]?key|account[_\-]?key|key[_\-]?id|connection[_\-]?string|"
+    r"sas[_\-]?(?:key|token)|shared[_\-]?access[_\-]?signature|"
+    r"credentials?|auth(?:orization)?|sig(?:nature)?|session|"
     r"x-amz-(?:signature|credential|security-token)|x-goog-(?:signature|credential))"
     r"(?:$|[_\-.])",
     re.IGNORECASE,

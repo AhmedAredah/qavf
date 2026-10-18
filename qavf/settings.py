@@ -615,6 +615,86 @@ class ConnectionSpec(_Strict):
         return f"ATTACH {sql_literal(target)} AS {quote_identifier(name)}{suffix}"
 
 
+class SecretSpec(_Strict):
+    """Cloud storage credentials for remote files (``s3://``, ``az://``) and SQL reads.
+
+    Each secret becomes a DuckDB secret on every QAVF-owned connection and supplies
+    the matching ``storage_options`` for remote Parquet read through Polars. Use
+    ``${ENV}`` for credential values; reports and logs mask them.
+    """
+
+    type: Literal["s3", "azure"]
+    """``s3`` for AWS S3 and S3-compatible stores (Cloudflare R2, MinIO, Wasabi, GCS
+    interoperability); ``azure`` for Azure Blob Storage and ADLS Gen2."""
+    provider: Literal["config", "credential_chain"] = "config"
+    """``config`` uses the values given here; ``credential_chain`` uses the platform's
+    own credentials (environment, profile, instance or workload identity, CLI login)."""
+    scope: list[str] = Field(default_factory=list)
+    """URL prefixes this secret applies to (``s3://bucket/path``). Unscoped secrets
+    apply to every URL of their type; at most one per type may be unscoped."""
+    key_id: str | None = None
+    """S3 access key id (``config`` provider)."""
+    secret: str | None = None
+    """S3 secret access key (``config`` provider)."""
+    session_token: str | None = None
+    """Optional S3 session token for temporary credentials."""
+    region: str | None = None
+    """S3 region, e.g. ``us-east-1`` (``auto`` for Cloudflare R2)."""
+    endpoint: str | None = None
+    """S3-compatible endpoint as ``host[:port]`` without a scheme, e.g.
+    ``<account>.r2.cloudflarestorage.com`` or ``storage.googleapis.com``."""
+    url_style: Literal["vhost", "path"] | None = None
+    """S3 addressing; most S3-compatible servers need ``path``."""
+    use_ssl: bool = True
+    """Use HTTPS for a custom S3 endpoint."""
+    connection_string: str | None = None
+    """Azure storage connection string (``config`` provider)."""
+    account_name: str | None = None
+    """Azure storage account name (``credential_chain`` provider)."""
+    chain: str | None = None
+    """Credential sources to try for ``credential_chain``, e.g. ``env;config`` (S3) or
+    ``cli;managed_identity`` (Azure); omitted means the platform default order."""
+
+    @model_validator(mode="after")
+    def _complete(self) -> SecretSpec:
+        s3_only = ("key_id", "secret", "session_token", "region", "endpoint", "url_style")
+        azure_only = ("connection_string", "account_name")
+        # Judge by values, not by which fields were set: serialized settings (for
+        # example an isolated-worker request) state every field, defaults included.
+        foreign = sorted(
+            name
+            for name in (azure_only if self.type == "s3" else s3_only)
+            if getattr(self, name) is not None
+        )
+        if self.type == "azure" and not self.use_ssl:
+            foreign.append("use_ssl")
+        if foreign:
+            raise ValueError(f"a {self.type} secret does not take {', '.join(foreign)}")
+        chained = self.provider == "credential_chain"
+        if self.chain is not None and not chained:
+            raise ValueError("'chain' applies only to provider 'credential_chain'")
+        if self.type == "s3":
+            if chained and (self.key_id or self.secret or self.session_token):
+                raise ValueError("credential_chain secrets take no key_id, secret or session_token")
+            if not chained and not (self.key_id and self.secret):
+                raise ValueError("an s3 secret with provider 'config' needs key_id and secret")
+            if self.endpoint is not None and ("://" in self.endpoint or "/" in self.endpoint):
+                raise ValueError("endpoint is host[:port] without a scheme or path")
+        elif chained:
+            if self.connection_string:
+                raise ValueError(
+                    "credential_chain secrets take account_name, not connection_string"
+                )
+            if not self.account_name:
+                raise ValueError("an azure credential_chain secret needs account_name")
+        elif not self.connection_string:
+            raise ValueError("an azure secret with provider 'config' needs connection_string")
+        for prefix in self.scope:
+            if "://" not in prefix:
+                raise ValueError(f"secret scope {prefix!r} must be a URL prefix such as s3://bucket")
+        return self
+
+
 # --------------------------------------------------------------------- engine
 class RuleSettings(_Strict):
     """Per-rule overrides."""
@@ -774,6 +854,8 @@ class QAVFSettings(_Strict):
     project: str = "QA run"
     datasets: dict[str, DatasetSpec] = Field(default_factory=dict)
     connections: dict[str, ConnectionSpec] = Field(default_factory=dict)
+    secrets: dict[str, SecretSpec] = Field(default_factory=dict)
+    """Cloud storage credentials, keyed by a SQL-identifier name."""
     assertions: list[SqlAssertion] = Field(default_factory=list)
     rules: dict[str, RuleSettings] = Field(default_factory=dict)
     engine: EngineSettings = Field(default_factory=EngineSettings)
@@ -795,6 +877,18 @@ class QAVFSettings(_Strict):
     def _references_resolve(self) -> QAVFSettings:
         check_sql_names(self.datasets, "dataset")
         check_sql_names(self.connections, "connection")
+        check_sql_names(self.secrets, "secret")
+        unscoped: dict[str, str] = {}
+        for name, secret in self.secrets.items():
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                raise ValueError(f"secret name {name!r} must be a plain SQL identifier")
+            if not secret.scope:
+                other = unscoped.setdefault(secret.type, name)
+                if other != name:
+                    raise ValueError(
+                        f"secrets {other!r} and {name!r} are both unscoped {secret.type} "
+                        "secrets; give at least one a scope so each URL has one credential"
+                    )
         for name, spec in self.datasets.items():
             for fk in spec.foreign_keys:
                 if fk.ref_dataset not in self.datasets:
