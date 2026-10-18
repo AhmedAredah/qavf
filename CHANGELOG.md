@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.4.1] - Unreleased
+## [0.4.1] - 2026-10-18
 
 - Add a `secrets` configuration section for cloud storage: AWS S3 and S3-compatible
   services (Cloudflare R2, MinIO, Wasabi, GCS interoperability) and Azure Blob/ADLS,
@@ -13,6 +13,8 @@ All notable changes to this project are documented here. The format follows
 - Mask `key_id`, `connection_string`, account keys and SAS tokens wherever settings
   or messages are redacted.
 - Include the `aws` and `azure` DuckDB extensions in the container image.
+- Never stop an isolated worker before its wall-time deadline: on Windows a process
+  wait could wake a few nanoseconds early and end the worker before its allowance.
 
 ## [0.4.0] - 2026-10-18
 

@@ -161,7 +161,8 @@ jobs:
         run: |
           curl --fail --silent --retry 20 --retry-all-errors --retry-delay 2 -o /dev/null http://127.0.0.1:9000/moto-api/
           # Azurite rejects anonymous requests; any HTTP response means it is listening.
-          curl --silent --retry 20 --retry-connrefused --retry-delay 2 -o /dev/null http://127.0.0.1:10000/
+          # While starting, Docker's port proxy accepts and then resets connections.
+          curl --silent --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null http://127.0.0.1:10000/
       - name: Run required live integrations
         run: uv run --no-sync python scripts/verify_release.py test --integration --id integrations --output evidence/integrations.json tests/integration
       - uses: actions/upload-artifact@v4
