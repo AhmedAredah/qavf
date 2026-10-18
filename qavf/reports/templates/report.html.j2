@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · {{ metadata.project }}</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10);
+    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
+    --series: #2a78d6; --neutral: #c3c2b7; --wash: rgba(11,11,11,.035);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
+      --series: #3987e5; --neutral: #52514e; --wash: rgba(255,255,255,.04);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink);
+         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1120px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 26px; line-height: 1.2; margin: 0 0 4px; }
+  h2 { font-size: 18px; margin: 40px 0 12px; }
+  h3 { font-size: 15px; margin: 0; }
+  p { margin: 0 0 8px; }
+  code, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
+  .sub { color: var(--ink-2); }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); margin: 8px 0; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+
+  .verdict { display: flex; gap: 12px; align-items: center; margin: 20px 0;
+             border-left: 4px solid var(--good); }
+  .verdict.failed { border-left-color: var(--critical); }
+  .verdict.incomplete { border-left-color: var(--warning); }
+  .verdict .icon { font-size: 22px; line-height: 1; }
+  .verdict strong { font-size: 16px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .tile .figure { font-size: 28px; font-weight: 650; line-height: 1.15; }
+  .tile .caption { color: var(--ink-2); font-size: 12.5px; }
+
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; margin-top: 12px; }
+  .chart { width: 100%; height: auto; display: block; margin-top: 8px; }
+  .chart .label { fill: var(--ink-2); font-size: 12px; }
+  .chart .value { fill: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .chart .axis { stroke: var(--axis); stroke-width: 1; }
+  .chart .bar { stroke: var(--surface); stroke-width: 0; }
+  .s-pass, .dot.s-pass { fill: var(--good); background: var(--good); }
+  .s-fail, .sev-critical { fill: var(--critical); background: var(--critical); }
+  .s-error, .sev-error { fill: var(--serious); background: var(--serious); }
+  .s-skipped { fill: var(--neutral); background: var(--neutral); }
+  .sev-warning { fill: var(--warning); background: var(--warning); }
+  .sev-info, .time { fill: var(--series); background: var(--series); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 12px; color: var(--ink-2); }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px;
+          border: 1px solid var(--border); font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .chip .dot { margin: 0; border-radius: 50%; }
+
+  .finding { margin-bottom: 12px; }
+  .finding header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .finding .advice { background: var(--wash); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
+  .meta { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--ink-2); font-size: 12.5px; margin: 6px 0; }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
+
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  th { color: var(--ink-2); font-weight: 600; font-size: 12px; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  tbody tr:hover { background: var(--wash); }
+
+  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .filters button { font: inherit; font-size: 12.5px; color: var(--ink); background: var(--surface);
+                    border: 1px solid var(--border); border-radius: 999px; padding: 3px 12px; cursor: pointer; }
+  .filters button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+  ol.recs { margin: 0; padding-left: 20px; }
+  ol.recs li { margin-bottom: 10px; }
+  footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+{% macro status_chip(status) -%}
+  {%- set icons = {"PASS": "✓", "FAIL": "✕", "ERROR": "!", "SKIPPED": "–"} -%}
+  <span class="chip"><span class="dot s-{{ status.value | lower }}"></span>{{ icons[status.value] }} {{ status.value }}</span>
+{%- endmacro %}
+{% macro severity_chip(severity) -%}
+  <span class="chip"><span class="dot sev-{{ severity.value | lower }}"></span>{{ severity.value }}</span>
+{%- endmacro %}
+<main>
+  <h1>{{ title }}</h1>
+  <p class="sub">
+    {{ metadata.project }}{% for name, options in metadata.extensions.items() %} · {{ name }}{% for k, v in options.items() %} {{ k }}={{ v }}{% endfor %}{% endfor %} ·
+    {{ metadata.started_at.strftime("%Y-%m-%d %H:%M UTC") }} · run <span class="mono">{{ metadata.run_id }}</span>
+  </p>
+
+  <div class="card verdict {{ verdict }}">
+    <span class="icon" aria-hidden="true">{{ {"failed": "✕", "incomplete": "!"}.get(verdict, "✓") }}</span>
+    <div>
+      {% if verdict == "failed" %}
+        <strong>QA failed</strong>
+        <div class="sub">A failure meets the {{ fail_on.value }} threshold.{% if summary.errored %} In addition, {{ summary.errored }} configured check{{ "" if summary.errored == 1 else "s" }} could not be assessed.{% endif %}</div>
+      {% elif verdict == "incomplete" %}
+        <strong>QA incomplete</strong>
+        <div class="sub">
+          {% if summary.assessed == 0 %}No check assessed any data.{% else %}{{ summary.errored }} configured check{{ "" if summary.errored == 1 else "s" }} could not be assessed, so a pass cannot be certified.{% endif %}
+          {% if metadata.fail_on_incomplete %}The run fails until every configured check runs.{% else %}The run is configured not to fail on incomplete assessment.{% endif %}
+        </div>
+      {% elif summary.highest_severity %}
+        <strong>QA passed with findings</strong>
+        <div class="sub">Highest failure severity is {{ summary.highest_severity.value }}, below the {{ fail_on.value }} failure threshold.</div>
+      {% else %}
+        <strong>QA passed</strong>
+        <div class="sub">No rule reported a problem.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <section class="tiles" aria-label="Summary">
+    <div class="card tile"><div class="figure">{{ summary.total }}</div><div class="caption">results ({{ report.results | map(attribute="rule_id") | unique | list | length }} rules)</div></div>
+    <div class="card tile"><div class="figure">{{ summary.passed }}</div><div class="caption">passed</div></div>
+    <div class="card tile"><div class="figure">{{ summary.failed }}</div><div class="caption">failed</div></div>
+    <div class="card tile"><div class="figure">{{ summary.errored }}</div><div class="caption">could not run</div></div>
+    <div class="card tile"><div class="figure">{{ summary.skipped }}</div><div class="caption">skipped</div></div>
+    <div class="card tile">
+      <div class="figure">{% if summary.pass_rate is not none %}{{ "%.0f%%" | format(summary.pass_rate * 100) }}{% else %}—{% endif %}</div>
+      <div class="caption">pass rate of assessed rules</div>
+    </div>
+  </section>
+
+  <section class="charts">
+    <div class="card">
+      <h3>Results by category</h3>
+      {{ status_chart }}
+      <div class="legend">
+        {% for status in statuses %}<span><span class="dot s-{{ status.value | lower }}"></span>{{ status.value | title }}</span>{% endfor %}
+      </div>
+    </div>
+    <div class="card">
+      <h3>Failed rules by severity</h3>
+      {% if failures %}{{ severity_chart }}{% else %}<p class="empty">No failures.</p>{% endif %}
+    </div>
+    <div class="card">
+      <h3>Slowest rules</h3>
+      {{ timing_chart }}
+    </div>
+  </section>
+
+  <h2>Recommendations</h2>
+  {% if recommendations %}
+  <div class="card">
+    <ol class="recs">
+      {% for rec in recommendations %}
+      <li>{{ severity_chip(rec.severity) }} <strong>{{ rec.rule_id }} · {{ rec.name }}</strong>
+        {% if rec.checks %}<span class="muted">({{ rec.checks[:4] | join("; ") }}{% if rec.checks | length > 4 %}; and {{ rec.checks | length - 4 }} more{% endif %})</span>{% endif %}
+        <br>{{ rec.text }}</li>
+      {% endfor %}
+    </ol>
+  </div>
+  {% else %}
+  <p class="empty">Nothing to act on.</p>
+  {% endif %}
+
+  <h2>Failures ({{ failures | length }})</h2>
+  {% for result in failures %}
+  <article class="card finding" id="{{ result | anchor }}">
+    <header>
+      {{ status_chip(result.status) }} {{ severity_chip(result.severity) }}
+      <h3><span class="mono">{{ result.rule_id }}</span> · {{ result.name }}{% if result.check %} — <span class="mono">{{ result.check }}</span>{% endif %}</h3>
+    </header>
+    <p><strong>{{ result.message }}</strong></p>
+    <p class="sub">{{ result.description }}</p>
+    <div class="meta">
+      <span>Category: {{ result.category }}</span>
+      {% if result.datasets %}<span>Datasets: {{ result.datasets | join(", ") }}</span>{% endif %}
+      <span>Affected: {{ result | affected }}</span>
+      <span>Time: {{ result.execution_time_s | duration }}</span>
+    </div>
+    {% if result.recommendation %}<div class="advice"><strong>Recommendation.</strong> {{ result.recommendation }}</div>{% endif %}
+    {% if result.metrics %}<p><a href="#metrics-{{ result | anchor }}">Structured metrics and comparison identity</a></p>{% endif %}
+    {% if result.affected_records %}
+    <details {{ "open" if loop.index <= 3 else "" }}>
+      <summary>Affected records{% if result.affected_count > result.affected_records | length %} (showing {{ result.affected_records | length }} of {{ "{:,}".format(result.affected_count) }}{% if result.unit %} {{ result.unit }}{% endif %}){% endif %}</summary>
+      {% with records = result.affected_records %}{% include "records.html.j2" %}{% endwith %}
+    </details>
+    {% endif %}
+  </article>
+  {% else %}
+  <p class="empty">No rule failed.</p>
+  {% endfor %}
+
+  <h2>All results</h2>
+  <div class="filters" role="group" aria-label="Filter results by status">
+    <button type="button" data-filter="ALL" aria-pressed="true">All ({{ summary.total }})</button>
+    {% for status in statuses %}
+    <button type="button" data-filter="{{ status.value }}" aria-pressed="false">{{ status.value | title }}</button>
+    {% endfor %}
+  </div>
+  <div class="card scroll">
+    <table id="results">
+      <thead>
+        <tr><th>Rule</th><th>Name</th><th>Category</th><th>Status</th><th>Severity</th><th>Message</th><th class="num">Affected</th><th class="num">Time</th></tr>
+      </thead>
+      <tbody>
+      {% for result in report.results %}
+        <tr data-status="{{ result.status.value }}">
+          <td class="mono">{% if result.failed %}<a href="#{{ result | anchor }}">{{ result.rule_id }}</a>{% else %}{{ result.rule_id }}{% endif %}</td>
+          <td>{{ result.name }}{% if result.check %}<br><span class="mono muted">{{ result.check }}</span>{% endif %}</td>
+          <td>{{ result.category }}</td>
+          <td>{{ status_chip(result.status) }}</td>
+          <td>{{ severity_chip(result.severity) }}</td>
+          <td>{{ result.message }}</td>
+          <td class="num">{% if result.affected_count %}{{ "{:,}".format(result.affected_count) }}{% if result.unit %} <span class="muted">{{ result.unit }}</span>{% endif %}{% else %}—{% endif %}</td>
+          <td class="num">{{ result.execution_time_s | duration }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Datasets</h2>
+  {% if metadata.datasets %}
+  <div class="card scroll">
+    <table>
+      <thead><tr><th>Dataset</th><th class="num">Rows</th><th class="num">Columns</th><th>Source</th></tr></thead>
+      <tbody>
+      {% for dataset in metadata.datasets %}
+        <tr>
+          <td class="mono">{{ dataset.name }}</td>
+          <td class="num">{{ "{:,}".format(dataset.rows) if dataset.rows is not none else "not materialized" }}</td>
+          <td class="num">{{ dataset.columns | length }}</td>
+          <td class="muted">{{ dataset.source or "in memory" }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No dataset was loaded.</p>
+  {% endif %}
+  {% if metadata.unavailable_datasets %}
+  <p class="sub">Unavailable: {% for name, reason in metadata.unavailable_datasets.items() %}<span class="mono">{{ name }}</span> ({{ reason }}){{ "; " if not loop.last else "" }}{% endfor %}</p>
+  {% endif %}
+  {% if metadata.excluded_rules %}
+  <p class="sub">Rules not run: {% for rule_id, reason in metadata.excluded_rules.items() %}<span class="mono">{{ rule_id }}</span> ({{ reason }}){{ "; " if not loop.last else "" }}{% endfor %}</p>
+  {% endif %}
+  {% if metadata.unused_datasets %}
+  <p class="sub">Configured but not needed by any rule (not loaded): {% for name in metadata.unused_datasets %}<span class="mono">{{ name }}</span>{{ ", " if not loop.last else "" }}{% endfor %}</p>
+  {% endif %}
+
+  <details class="card"><summary>Audit provenance and execution policy</summary>
+    <pre>{% for chunk in audit_chunks(metadata) %}{{ chunk }}{% endfor %}</pre>
+  </details>
+  <details class="card"><summary>Metrics for all assessed checks</summary>
+    {% for result in report.results %}{% if result.metrics %}
+      <h3 id="metrics-{{ result | anchor }}">{{ result.label }}</h3><pre>{% for chunk in audit_chunks(result.metrics) %}{{ chunk }}{% endfor %}</pre>
+    {% endif %}{% endfor %}
+  </details>
+  <footer>
+    Generated by QAVF {{ metadata.qavf_version }} in {{ metadata.duration_s | duration }}
+    ({{ metadata.max_workers }} worker{{ "" if metadata.max_workers == 1 else "s" }}){% if metadata.config_path %} · config <span class="mono">{{ metadata.config_path }}</span>{% endif %}{% if metadata.config_digest %} · settings digest <span class="mono" title="SHA-256 of the effective configuration">{{ metadata.config_digest[:12] }}</span>{% endif %}
+  </footer>
+</main>
+<script>
+  (function () {
+    var buttons = document.querySelectorAll(".filters button");
+    var rows = document.querySelectorAll("#results tbody tr");
+    buttons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var wanted = button.dataset.filter;
+        buttons.forEach(function (b) { b.setAttribute("aria-pressed", String(b === button)); });
+        rows.forEach(function (row) {
+          row.hidden = wanted !== "ALL" && row.dataset.status !== wanted;
+        });
+      });
+    });
+  })();
+</script>
+</body>
+</html>

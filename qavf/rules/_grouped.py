@@ -1,0 +1,338 @@
+"""Projected, missing-normalized relations and exact grouped reductions.
+
+Only reduced results and bounded samples cross the context collection boundary.
+Unsupported numerical kernels return ``None`` so callers retain their exact
+projected fallback rather than substitute an approximate backend reduction.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+
+import polars as pl
+
+from qavf.aggregation import checked_accumulator_dtype, narrow_integer
+from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
+from qavf.rules._execution import normalized_plan
+from qavf.rules.helpers import Aggregate, fresh_internal, missing_expr
+from qavf.sources.sql import quote_identifier
+
+
+@dataclass(frozen=True)
+class ProjectedRelation:
+    ctx: DataContext
+    dataset: str
+    schema: dict[str, pl.DataType]
+    lazy: pl.LazyFrame | None = None
+    sql: str | None = None
+    observation: Observation | None = None
+    collector: Callable[[pl.LazyFrame], pl.DataFrame] | None = None
+
+    def collect_plan(self, plan: pl.LazyFrame) -> pl.DataFrame:
+        return (
+            self.collector(plan)
+            if self.collector is not None
+            else self.ctx.collect(self.dataset, plan)
+        )
+
+    def collect(self) -> pl.DataFrame:
+        if self.sql is not None:
+            return self.ctx.sql(self.sql, datasets=(self.dataset,))
+        assert self.lazy is not None
+        return self.collect_plan(self.lazy)
+
+    def filter(self, predicate: pl.Expr, sql: str) -> ProjectedRelation:
+        if self.sql is not None:
+            return replace(self, sql=f"SELECT * FROM ({self.sql}) AS selected WHERE {sql}")
+        assert self.lazy is not None
+        return replace(self, lazy=self.lazy.filter(predicate))
+
+    def without_groups(
+        self, predicate: pl.Expr, sql: str, keys: Sequence[str]
+    ) -> ProjectedRelation:
+        """Exclude every group containing a selected row, with null-equal keys."""
+        if self.sql is not None:
+            joined = (
+                " AND ".join(
+                    f"good.{quote_identifier(key)} IS NOT DISTINCT FROM bad.{quote_identifier(key)}"
+                    for key in keys
+                )
+                or "TRUE"
+            )
+            return replace(
+                self,
+                sql=(
+                    f"WITH input AS MATERIALIZED ({self.sql}), "
+                    f"bad AS (SELECT * FROM input WHERE {sql}) "
+                    f"SELECT good.* FROM input AS good WHERE NOT EXISTS "
+                    f"(SELECT 1 FROM bad WHERE {joined})"
+                ),
+            )
+        assert self.lazy is not None
+        if not keys:
+            return replace(self, lazy=self.lazy.filter(~predicate.any()))
+        return replace(
+            self,
+            lazy=self.lazy.join(
+                self.lazy.filter(predicate).select(keys).unique(),
+                on=list(keys),
+                how="anti",
+                nulls_equal=True,
+            ),
+        )
+
+    def count_sample(self, limit: int) -> tuple[int, pl.DataFrame]:
+        """Count every selected row while collecting at most ``limit`` rows."""
+        if limit <= 0:
+            return self.count(), pl.DataFrame(schema=self.schema)
+        if self.sql is not None:
+            frame, count = self.ctx.sql_sample(self.sql, limit, ordered=True)
+            return count, frame
+        assert self.lazy is not None
+        name = fresh_internal("sample_count", self.schema)
+        frame = self.collect_plan(self.lazy.with_columns(pl.len().alias(name)).head(limit))
+        count = int(frame[name][0]) if frame.height else 0
+        return count, frame.drop(name)
+
+    def count(self) -> int:
+        if self.sql is not None:
+            return int(
+                self.ctx.sql(
+                    f"SELECT count(*) FROM ({self.sql}) AS selected", datasets=(self.dataset,)
+                ).item()
+            )
+        assert self.lazy is not None
+        return int(self.collect_plan(self.lazy.select(pl.len())).item())
+
+    def summary(self, expressions: Iterable[pl.Expr], sql: str) -> pl.DataFrame:
+        """Collect caller-specific scalar metadata under the same source policy."""
+        if self.sql is not None:
+            return self.ctx.sql(
+                f"SELECT {sql} FROM ({self.sql}) AS selected", datasets=(self.dataset,)
+            )
+        assert self.lazy is not None
+        return self.collect_plan(self.lazy.select(expressions))
+
+    def distinct(self, columns: Sequence[str]) -> ProjectedRelation:
+        schema = {name: self.schema[name] for name in columns}
+        if self.sql is not None:
+            projection = ", ".join(map(quote_identifier, columns))
+            return replace(
+                self,
+                schema=schema,
+                sql=f"SELECT DISTINCT {projection} FROM ({self.sql}) AS selected",
+            )
+        assert self.lazy is not None
+        return replace(
+            self, schema=schema, lazy=self.lazy.select(columns).unique(maintain_order=True)
+        )
+
+
+@contextmanager
+def scoped_relation(
+    ctx: DataContext, dataset: str, columns: Iterable[str]
+) -> Iterator[ProjectedRelation]:
+    """A coherent, normalized projected relation for exact multipass kernels."""
+    with ctx.observe(dataset, columns) as observation:
+        plan = normalized_plan(ctx, dataset, observation.scan())
+        yield ProjectedRelation(
+            ctx,
+            dataset,
+            dict(plan.collect_schema()),
+            lazy=plan,
+            observation=observation,
+            collector=observation.collect,
+        )
+
+
+def normalized_relation(
+    ctx: DataContext, dataset: str, columns: Iterable[str], *, require_repeatable: bool = True
+) -> ProjectedRelation | None:
+    """Build a selected relation, guarding multi-pass work against changing observations.
+
+    Arbitrary lazy/query/plugin plans retain their coherent projected fallback.
+    A caller performing exactly one reduction may disable the repeatability gate.
+    """
+    kind = ctx.execution_kind(dataset)
+    if kind not in {"lazy", "native_sql"}:
+        return None
+    if require_repeatable and not ctx.repeatable_scan(dataset):
+        return None
+    selected = list(dict.fromkeys(columns))
+    available = ctx.schema(dataset)
+    schema = {name: available[name] for name in selected}
+    if not selected:
+        marker = fresh_internal("counted_row", available)
+        schema = {marker: pl.UInt8()}
+        if kind == "native_sql":
+            return ProjectedRelation(
+                ctx,
+                dataset,
+                schema,
+                sql=(
+                    f"SELECT 1::UTINYINT AS {quote_identifier(marker)} "
+                    f"FROM {quote_identifier(dataset)}"
+                ),
+            )
+        return ProjectedRelation(
+            ctx,
+            dataset,
+            schema,
+            lazy=ctx.scan(dataset)
+            .with_columns(pl.lit(1, dtype=pl.UInt8).alias(marker))
+            .select(marker),
+        )
+    if kind == "native_sql":
+        projection = ctx.sql_missing_projection(dataset, schema)
+        return ProjectedRelation(
+            ctx, dataset, schema, sql=f"SELECT {projection} FROM {quote_identifier(dataset)}"
+        )
+    spec = ctx.specs.get(dataset)
+    contracts = spec.schema_spec.columns if spec is not None and spec.schema_spec else {}
+    empty = pl.DataFrame(schema=schema)
+    plan = (
+        ctx.scan(dataset)
+        .select(selected)
+        .with_columns(
+            pl.when(missing_expr(empty, name, contracts.get(name)))
+            .then(None)
+            .otherwise(pl.col(name))
+            .alias(name)
+            for name in selected
+        )
+    )
+    return ProjectedRelation(ctx, dataset, schema, lazy=plan)
+
+
+def duplicate_groups(relation: ProjectedRelation, keys: Sequence[str]) -> int:
+    """Count repeated groups without collecting their keys or member rows."""
+    if relation.sql is not None:
+        groups = ", ".join(map(quote_identifier, keys))
+        grouping = f" GROUP BY {groups}" if keys else ""
+        query = (
+            "SELECT count(*) FROM (SELECT count(*) AS n "
+            f"FROM ({relation.sql}) AS selected{grouping} HAVING count(*) > 1) AS repeated"
+        )
+        return int(relation.ctx.sql(query, datasets=(relation.dataset,)).item())
+    assert relation.lazy is not None
+    if not keys:
+        plan = relation.lazy.select((pl.len() > 1).cast(pl.UInt64))
+    else:
+        name = fresh_internal("group_count", relation.schema)
+        plan = (
+            relation.lazy.group_by(list(keys))
+            .agg(pl.len().alias(name))
+            .filter(pl.col(name) > 1)
+            .select(pl.len())
+        )
+    return int(relation.collect_plan(plan).item())
+
+
+def supports_grouped(relation: ProjectedRelation, value: str | None, how: Aggregate) -> bool:
+    """Whether the established numerical semantics have a reduced backend path."""
+    dtype = relation.schema[value] if value is not None else None
+    return how in {"sum", "count", "min", "max", "none"} and not (
+        how == "sum" and dtype is not None and dtype.is_float()
+    )
+
+
+def grouped_aggregate(
+    relation: ProjectedRelation,
+    keys: Sequence[str],
+    value: str | None,
+    alias: str,
+    how: Aggregate = "sum",
+    *,
+    presence_alias: str | None = None,
+    missing_alias: str | None = None,
+    bounds: tuple[object, object, int] | None = None,
+) -> pl.DataFrame | None:
+    """Reduce safe numeric kernels, retaining null-only and overflow semantics.
+
+    ``none`` requires the caller to reject duplicate groups first. Float sums,
+    means, weighted means, and ordered first/last use separate scoped reducers
+    at their callers. This helper does not approximate them.
+    """
+    dtype = relation.schema[value] if value is not None else None
+    if value is None and how != "count":
+        raise ValueError("an aggregate without a value must count rows")
+    if dtype is not None and not dtype.is_numeric() and dtype != pl.Null:
+        raise ValueError(f"aggregation requires numeric values, found {dtype}")
+    if not supports_grouped(relation, value, how):
+        return None
+    column = pl.col(value) if value is not None else pl.lit(1)
+    quoted = quote_identifier(value) if value is not None else "*"
+    if how == "sum" and dtype is not None and (dtype.is_integer() or dtype.is_decimal()):
+        if bounds is not None:
+            minimum, maximum, count = bounds
+        elif relation.sql is not None:
+            minimum, maximum, count = relation.ctx.sql(
+                f"SELECT min({quoted}), max({quoted}), count(*) FROM ({relation.sql}) AS selected",
+                datasets=(relation.dataset,),
+            ).row(0)
+        else:
+            assert relation.lazy is not None
+            minimum, maximum, count = relation.collect_plan(
+                relation.lazy.select(
+                    column.min().alias("minimum"), column.max().alias("maximum"), pl.len()
+                ),
+            ).row(0)
+        storage = checked_accumulator_dtype(dtype, minimum, maximum, int(count))
+        column = column.cast(storage)
+        sql_type = f"DECIMAL(38,{storage.scale})" if isinstance(storage, pl.Decimal) else "HUGEINT"
+        quoted = f"CAST({quoted} AS {sql_type})"
+    expressions = {
+        "sum": pl.when(column.count() > 0).then(column.sum()).otherwise(None),
+        "count": (column.count() if value is not None else pl.len()).cast(pl.UInt64),
+        "min": column.min(),
+        "max": column.max(),
+        "none": column.first(),
+    }
+    if relation.sql is not None:
+        reductions = {
+            "sum": f"CASE WHEN count({quoted}) > 0 THEN sum({quoted}) ELSE NULL END",
+            "count": f"count({quoted})::UBIGINT",
+            "min": f"min({quoted})",
+            "max": f"max({quoted})",
+            "none": f"first({quoted})",
+        }
+        selected = ", ".join(map(quote_identifier, keys))
+        projection = f"{selected}, " if keys else ""
+        grouping = f" GROUP BY {selected}" if keys else ""
+        presence = (
+            f", count(*)::UBIGINT AS {quote_identifier(presence_alias)}" if presence_alias else ""
+        )
+        if missing_alias:
+            presence += (
+                f", (count(*) - count({quoted}))::UBIGINT AS {quote_identifier(missing_alias)}"
+            )
+        result = relation.ctx.sql(
+            f"SELECT {projection}{reductions[how]} AS {quote_identifier(alias)}{presence} "
+            f"FROM ({relation.sql}) AS selected{grouping}",
+            datasets=(relation.dataset,),
+        )
+    else:
+        assert relation.lazy is not None
+        expression = [expressions[how].alias(alias)]
+        if presence_alias:
+            expression.append(pl.len().cast(pl.UInt64).alias(presence_alias))
+        if missing_alias:
+            expression.append(column.is_null().sum().cast(pl.UInt64).alias(missing_alias))
+        plan = (
+            relation.lazy.group_by(list(keys), maintain_order=True).agg(expression)
+            if keys
+            else relation.lazy.select(expression)
+        )
+        result = relation.collect_plan(plan)
+    if how == "sum" and dtype is not None and dtype.is_integer() and relation.sql is not None:
+        # DuckDB exposes HUGEINT through Arrow Decimal(38, 0); restore the
+        # established integer result before choosing its compact storage.
+        result = result.with_columns(pl.col(alias).cast(pl.Int128))
+    return (
+        narrow_integer(result, alias)
+        if how == "sum" and dtype is not None and dtype.is_integer()
+        else result
+    )

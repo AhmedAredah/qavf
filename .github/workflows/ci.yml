@@ -1,0 +1,61 @@
+name: CI
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.23"
+
+jobs:
+  test:
+    name: Lint, types and tests (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --all-extras --locked
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync mypy qavf scripts
+      - run: uv run --no-sync python scripts/generate_docs.py --check
+      - run: uv run --no-sync python -m pytest -q -p no:cacheprovider --ignore=tests/integration
+
+  platforms:
+    name: Platform-specific tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+      - run: uv sync --all-extras --locked
+      # Code paths that differ by operating system: isolation, locking, numerics,
+      # file identity and benchmark measurement. The full matrix runs on release tags.
+      - run: >-
+          uv run --no-sync python -m pytest -q -p no:cacheprovider
+          tests/test_isolated_supervisor.py tests/test_execution_isolation.py
+          tests/test_execution_policy.py tests/test_isolation_transport.py
+          tests/test_regression_exactness.py tests/test_statistical_rules.py
+          tests/test_scan_identity.py tests/test_loading_native_binding.py
+          tests/test_performance_metrics.py tests/test_performance_runner.py
+          tests/test_performance_process_tree.py

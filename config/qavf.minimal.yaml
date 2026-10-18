@@ -1,0 +1,11 @@
+# The smallest useful configuration: one file, a few QA limits.
+#   qavf run -c qavf.minimal.yaml
+datasets:
+  measurements:
+    path: data/measurements.csv
+    schema:
+      primary_key: [station, date]
+      columns:
+        station: {dtype: str, regex: '[A-Z]{3}\d{2}'}
+        date: {dtype: date, ge: 2020-01-01}
+        pm25: {dtype: float, ge: 0, checks: [{le: 500, severity: WARNING}]}

@@ -1,0 +1,193 @@
+# yaml-language-server: $schema=qavf.schema.json
+#
+# QAVF configuration reference: every section and option, annotated.
+# Generate a schema for editor autocompletion with:  qavf schema -o qavf.schema.json
+# Generate a starting configuration from your data:   qavf init -d data/file.csv
+#
+# Relative paths resolve against this file's directory.
+# Any string may use ${ENV_VAR} or ${ENV_VAR:-default}.
+
+project: Reference configuration
+
+# ---------------------------------------------------------------------------
+# datasets: name -> where the data comes from + what it must look like
+# ---------------------------------------------------------------------------
+datasets:
+
+  # Shorthand: a file (CSV, Parquet, JSON, NDJSON, Excel) or a glob of files.
+  readings:
+    path: data/readings/*.parquet
+    description: Hourly sensor readings.
+    required: true                    # INP-001 fails CRITICAL if it cannot load
+    rename: {Station_ID: station}     # applied after loading
+    schema:
+      primary_key: [station, timestamp]
+      strict: false                   # true: reject undeclared columns
+      min_rows: 1
+      max_rows: 50000000
+      columns:
+        station:
+          dtype: str                  # int | float | decimal | str | bool | date | datetime
+          regex: '[A-Z]{3}\d{2}'      # whole-value match
+          min_length: 5
+          max_length: 5
+        timestamp:
+          dtype: datetime
+          ge: 2020-01-01
+          le: 2030-12-31
+        value:
+          dtype: float
+          nullable: true              # nulls allowed ...
+          max_null_fraction: 0.02     # ... but at most 2 %
+          ge: 0                       # inline limits: graded at INP-003's severity
+          notin: [-999, -9999]        # sentinel values
+          checks:                     # extra checks, each with its own severity
+            - name: plausible maximum
+              le: 2000
+              severity: WARNING
+            - name: network level
+              mean: {ge: 5, le: 60}   # aggregates: min max mean median std sum distinct_count
+              severity: INFO
+        status:
+          dtype: str
+          isin: [valid, suspect, invalid]
+        serial:
+          dtype: int
+          unique: true
+    foreign_keys:
+      - {columns: [station], ref_dataset: stations, severity: CRITICAL}
+    expressions:                      # row-level DuckDB SQL; may query other datasets
+      - {name: valid rows have values, expr: "status <> 'valid' OR value IS NOT NULL"}
+      - {name: known station, expr: "station IN (SELECT station FROM stations)", severity: WARNING}
+
+  # A full source block: DuckDB SQL over files (and attached connections).
+  daily:
+    source:
+      type: query
+      sql: |
+        SELECT Station_ID AS station,
+               CAST(timestamp AS DATE) AS day,
+               date_diff('day', DATE '2020-01-01', CAST(timestamp AS DATE)) AS day_number,
+               avg(value) AS value
+        FROM read_parquet('data/readings/*.parquet')
+        GROUP BY ALL                  -- temporal rules need a numeric time: day_number
+
+  # A table (or query) in a database attached through `connections`.
+  stations:
+    source: {type: database, connection: warehouse, table: stations, schema: public}
+
+  # CSV with reader options (passed to DuckDB's read_csv).
+  calibrations:
+    source:
+      type: file
+      path: data/calibrations.csv
+      options: {delim: ';', header: true}
+      columns: [station, calibrated_on, factor]
+    required: false                   # absent is fine; failing to load is a WARNING
+
+  # Anything else: a Python function returning a DataFrame.
+  forecasts:
+    source: {type: python, callable: my_package.loaders:load_forecasts, kwargs: {horizon: 7}}
+    required: false
+
+# ---------------------------------------------------------------------------
+# connections: databases DuckDB attaches (duckdb | sqlite | postgres | mysql)
+# ---------------------------------------------------------------------------
+connections:
+  warehouse:
+    type: postgres
+    uri: host=${PGHOST:-localhost} dbname=air user=qa password=${PGPASSWORD:-}
+    read_only: true
+  archive: {type: sqlite, path: data/archive.db}
+
+# ---------------------------------------------------------------------------
+# assertions: SQL returning offending rows (INP-007); datasets are tables
+# ---------------------------------------------------------------------------
+assertions:
+  - name: every station reports
+    severity: WARNING
+    sql: SELECT station FROM stations WHERE station NOT IN (SELECT station FROM readings)
+
+# ---------------------------------------------------------------------------
+# rules: per-rule enabled / severity / params. Unlisted rules run with defaults.
+# `qavf list-rules` shows everything installed; `qavf init` writes all defaults.
+# ---------------------------------------------------------------------------
+rules:
+  INP-003: {severity: ERROR}          # default severity of inline column limits
+
+  TMP-001:
+    params:
+      max_change_rate: 0.30
+      series:
+        - {dataset: daily, value: value, group_by: [station], time_column: day_number,
+           aggregate: mean}           # sum (default) | mean | count | min | max | first | last
+                                      # (order_by) | weighted_mean (weight) | none
+
+  SPA-001:
+    params:
+      method: modified_zscore         # zscore | modified_zscore | iqr
+      threshold: 3.5
+      metrics:
+        - {dataset: daily, value: value, entity_column: station}
+
+  SPA-003:
+    params: {entity_column: station, reference_dataset: stations, datasets: [readings]}
+
+  STA-001:
+    params:
+      targets:
+        - {dataset: readings, value: value, group_by: [station], method: iqr, threshold: 3.0}
+
+  INP-008:                            # freshness of the newest value
+    params:
+      checks:
+        - {dataset: readings, column: timestamp, max_age: P3650D}
+
+  REG-001:
+    enabled: false
+    params:
+      baselines:
+        - dataset: daily
+          path: baselines/daily.parquet
+          keys: [station, day]
+          rtol: 1.0e-6
+          columns:                    # per-column tolerances
+            value: {atol: 0.01}
+            day_number: {exact: true}
+
+# ---------------------------------------------------------------------------
+engine:
+  parallel: true
+  max_workers: 4
+  run_unconfigured_rules: true
+  include_categories: null            # e.g. [input, temporal]
+  exclude_categories: []
+  max_affected_records: 50
+  max_evidence_bytes: 1048576         # per-result evidence/diagnostics; counts remain exact
+  max_report_bytes: 16777216          # fail explicitly if essential outcomes cannot fit
+  memory_budget_bytes: null          # planning/post-collection target, not an OS RSS cap
+  cache_max_bytes: 268435456          # tracked retained caches
+  spill_max_bytes: 1073741824         # run-owned temporary storage allocation
+  temp_directory: null               # optional parent directory for run temporary files
+  native_threads: null               # DuckDB thread allocation; Polars pool is process-global
+  rule_timeout_s: null               # cooperative; cannot kill arbitrary plugin threads
+  timeout_grace_s: 0.1
+  fail_on: ERROR                      # CLI exit code 1 at this severity or above
+  fail_on_incomplete: true            # also fail when a configured check was not assessed
+  require: [INP-001, INP-003]         # must be assessed: rule ids or RULE[check]
+  canonical_columns: []               # or 'package:LIST' provided by a plugin
+
+plugins:
+  packages: [qavf.rules]
+  modules: []                         # scanned for rules and sources
+  paths: []                           # .py files / directories scanned for rules
+  entry_points: true                  # load installed plugin packages
+
+report:
+  title: Air Quality QA
+  output_dir: qa_output
+  html: true
+  json: true
+  hash_inputs: false                  # also record SHA-256 of local input files
+
+extensions: {}                        # plugin settings, e.g. mypack: {version: 2}

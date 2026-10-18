@@ -1,0 +1,12 @@
+{% set table = evidence_table(records) %}
+<div class="scroll">
+  <table>
+    <thead><tr>{% for col in table.columns %}<th>{{ col }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in table.rows() %}
+      <tr>{% for value in row %}<td>{{ value | cell }}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if table.omitted %}<p class="muted">HTML evidence was shortened by its cell limit. The JSON report retains the original recorded evidence.</p>{% endif %}

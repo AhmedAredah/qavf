@@ -1,0 +1,121 @@
+[project]
+name = "qavf"
+dynamic = ["version"]
+description = "Configurable, plugin-based data QA/QC: column limits, SQL checks, temporal and spatial outliers, regression testing and HTML reports, over any source DuckDB can read."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ahmed Aredah", email = "Ahmed.Aredah@gmail.com" }]
+requires-python = ">=3.12"
+keywords = [
+    "data-quality",
+    "qa",
+    "qc",
+    "validation",
+    "data-validation",
+    "duckdb",
+    "polars",
+    "regression-testing",
+    "outlier-detection",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
+# Version floors are verified in the implementation validation report.
+# CI tests the committed lockfile and the installed distribution.
+dependencies = [
+    "duckdb>=1.2",
+    "jinja2>=3.1",
+    "markupsafe>=2.1",
+    "numpy>=1.26",
+    "polars>=1.32",
+    "pyarrow>=16",
+    "pydantic>=2.7",
+    "pyyaml>=6.0.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/AhmedAredah/qavf"
+Documentation = "https://github.com/AhmedAredah/qavf/tree/main/docs"
+Issues = "https://github.com/AhmedAredah/qavf/issues"
+Changelog = "https://github.com/AhmedAredah/qavf/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+# Optional p-values and distribution tests (Kendall, studentized residuals, KS).
+stats = ["scipy>=1.11.3"]
+pandas = ["pandas>=2.2"]
+all = ["qavf[stats,pandas]"]
+
+[project.scripts]
+qavf = "qavf.cli:main"
+
+[dependency-groups]
+integration = [
+    "boto3>=1.35",
+    "psycopg[binary]>=3.2",
+]
+dev = [
+    "hypothesis>=6.140",
+    "jsonschema>=4.21",
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "statsmodels>=0.14.1",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "qavf/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["qavf"]
+
+[tool.hatch.build.targets.sdist]
+include = ["qavf", "tests", "config", "docs", "scripts", ".github", ".gitattributes", "pyproject.toml", "uv.lock", "README.md", "CHANGELOG.md", "LICENSE"]
+exclude = ["**/__pycache__", "**/*.pyc", "**/.pytest_cache"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --import-mode=importlib"
+markers = [
+    "regression: compares generated outputs with stored baselines",
+    "assurance: generated, differential, and failure-boundary contracts",
+    "integration: requires explicitly configured live services",
+]
+xfail_strict = true
+
+[tool.coverage.run]
+source = ["qavf"]
+branch = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true

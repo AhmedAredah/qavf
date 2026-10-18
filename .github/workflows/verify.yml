@@ -1,0 +1,191 @@
+name: Release verification
+# Full platform, dependency-floor and live-service matrix; run for release tags only.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: read
+
+env:
+  # Keep service credentials synthetic and local to the disposable CI runner.
+  UV_VERSION: "0.12.23"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python }}
+      - run: uv sync --all-extras --locked
+      - run: uv run --no-sync python scripts/verify_release.py extensions
+      - run: uv run --no-sync python scripts/verify_release.py test ${{ matrix.python == '3.12' && '--coverage' || '' }} --id linux-${{ matrix.python }}-source --output evidence/linux-${{ matrix.python }}-source.json
+      - if: ${{ !cancelled() }}
+        run: uv run --no-sync python scripts/verify_release.py test --optimized --id linux-${{ matrix.python }}-source-optimized --output evidence/linux-${{ matrix.python }}-source-optimized.json
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync mypy qavf scripts
+      - run: uv run --no-sync python scripts/generate_docs.py --check
+      - run: uv build --clear
+      - run: uv run --no-sync python scripts/verify_dist.py
+      - run: uv run --no-sync python scripts/verify_release.py installed --id linux-${{ matrix.python }}-wheel --output-dir evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-linux-${{ matrix.python }}
+          path: evidence/*.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qavf-distributions-${{ matrix.python }}
+          path: dist/*
+          if-no-files-found: error
+
+  dependency-floors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+      - run: uv sync --all-extras --locked
+      - run: uv build --clear
+      - run: uv run --no-sync python scripts/verify_dist.py
+      - run: uv run --no-sync python scripts/verify_release.py installed --mode floors --id floors --output-dir evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-floors
+          path: evidence/*.json
+          if-no-files-found: error
+
+  platform-contracts:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+          - os: macos-latest
+            label: macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+      - run: uv sync --all-extras --locked
+      - run: uv run --no-sync python scripts/verify_release.py extensions
+      - run: uv run --no-sync python scripts/verify_release.py test --id ${{ matrix.label }}-3.12-source --output evidence/${{ matrix.label }}-3.12-source.json
+      - if: ${{ !cancelled() }}
+        run: uv run --no-sync python scripts/verify_release.py test --optimized --id ${{ matrix.label }}-3.12-source-optimized --output evidence/${{ matrix.label }}-3.12-source-optimized.json
+      - run: uv build --clear
+      - run: uv run --no-sync python scripts/verify_dist.py
+      - run: uv run --no-sync python scripts/verify_release.py installed --id ${{ matrix.label }}-3.12-wheel --output-dir evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-${{ matrix.label }}-3.12
+          path: evidence/*.json
+          if-no-files-found: error
+
+  core-installation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+      - run: uv sync --all-extras --locked
+      - run: uv build --clear
+      - run: uv run --no-sync python scripts/verify_dist.py
+      - run: uv run --no-sync python scripts/verify_release.py installed --mode core --id core --output-dir evidence
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-core
+          path: evidence/*.json
+          if-no-files-found: error
+
+  integrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.10
+        env:
+          POSTGRES_USER: qavf
+          POSTGRES_PASSWORD: qavf
+          POSTGRES_DB: qavf
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      QAVF_POSTGRES_DSN: "host=127.0.0.1 port=5432 dbname=qavf user=qavf password=qavf connect_timeout=5"
+      QAVF_S3_ENDPOINT: http://127.0.0.1:9000
+      QAVF_S3_ACCESS_KEY: qavf-integration
+      QAVF_S3_SECRET_KEY: local-integration-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+      - run: uv sync --all-extras --group integration --locked
+      - run: uv run --no-sync python scripts/verify_release.py extensions --integration
+      - name: Start disposable S3-compatible object store
+        run: >-
+          docker run -d --name qavf-minio -p 9000:9000
+          -e MINIO_ROOT_USER=qavf-integration
+          -e MINIO_ROOT_PASSWORD=local-integration-secret
+          minio/minio:RELEASE.2025-04-22T22-12-26Z server /data
+      - name: Wait for object store readiness
+        run: curl --fail --retry 12 --retry-all-errors --retry-delay 2 http://127.0.0.1:9000/minio/health/ready
+      - name: Run required live integrations
+        run: uv run --no-sync python scripts/verify_release.py test --integration --id integrations --output evidence/integrations.json tests/integration
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-integrations
+          path: evidence/*.json
+          if-no-files-found: error
+      - name: Stop disposable object store
+        if: always()
+        run: docker rm -f qavf-minio
+
+  release-assurance:
+    name: Required release assurance
+    runs-on: ubuntu-latest
+    needs: [test, dependency-floors, platform-contracts, core-installation, integrations]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: evidence-*
+          path: collected-evidence
+      - name: Reject missing, stale, failed, skipped, or incomplete release jobs
+        env:
+          QAVF_CI_JOBS: ${{ toJSON(needs) }}
+        run: uv run --no-project python scripts/verify_release.py aggregate --evidence-dir collected-evidence --output release-assurance.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-assurance
+          path: release-assurance.json
+          if-no-files-found: error

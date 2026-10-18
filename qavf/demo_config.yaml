@@ -1,0 +1,155 @@
+# yaml-language-server: $schema=qavf.schema.json
+#
+# QAVF demo configuration. Run it with:   qavf run -c qavf.yaml
+# Relative paths resolve against this file's directory.
+
+project: Traffic monitoring demo
+
+# ---------------------------------------------------------------------------
+# Datasets: where each table comes from, and the QA limits for its columns.
+# ---------------------------------------------------------------------------
+datasets:
+  sites:
+    description: Site inventory, read from a DuckDB database.
+    source: {type: database, connection: inventory, table: sites}
+    schema:
+      primary_key: [site_id]
+      columns:
+        site_id: {dtype: str, regex: 'S\d{2}'}
+        region: {dtype: str, isin: [North, South]}
+        functional_class: {dtype: str, isin: [Interstate, Arterial, Collector]}
+        lanes: {dtype: int, ge: 1, le: 12}
+        latitude: {dtype: float, ge: 25.8, le: 36.5}       # Texas bounding box
+        longitude: {dtype: float, ge: -106.7, le: -93.5}
+
+  counts:
+    description: Annual traffic counts per site, from a CSV file.
+    path: data/counts.csv
+    schema:
+      primary_key: [site_id, year]
+      columns:
+        site_id:
+          dtype: str
+          checks:
+            - {regex: 'S\d{2}', severity: WARNING, name: site id format}
+        year: {dtype: int, ge: 2000, le: 2030}
+        aadt:
+          dtype: int
+          ge: 0                                          # ERROR (the rule's default)
+          checks:
+            - {le: 200000, severity: WARNING, name: implausibly high AADT}
+            - {mean: {ge: 1000, le: 100000}, severity: INFO, name: network average}
+        truck_share:
+          dtype: float
+          ge: 0
+          le: 1                                          # a share, not a percentage
+        count_date:
+          dtype: date
+          le: 2025-12-31
+        count_type: {dtype: str, isin: [permanent, portable]}
+    foreign_keys:
+      - {columns: [site_id], ref_dataset: sites}
+
+  crashes:
+    description: Annual crashes per site, from a Parquet file.
+    path: data/crashes.parquet
+    schema:
+      primary_key: [site_id, year]
+      columns:
+        crashes: {dtype: int, ge: 0}
+        fatal: {dtype: int, ge: 0}
+    foreign_keys:
+      - {columns: [site_id], ref_dataset: sites}
+    expressions:
+      - {expr: fatal <= crashes, name: fatal within total}
+      # Expressions may query other datasets by name:
+      - expr: year IN (SELECT year FROM counts)
+        name: year has counts
+        severity: WARNING
+
+# Databases attached for `database` and `query` sources.
+connections:
+  inventory: {type: duckdb, path: data/sites.duckdb}
+
+# SQL that returns offending rows, across any datasets.
+assertions:
+  - name: every site has counts
+    severity: WARNING
+    sql: |
+      SELECT s.site_id FROM sites s
+      WHERE s.site_id NOT IN (SELECT site_id FROM counts)
+
+# ---------------------------------------------------------------------------
+# Rules: everything runs with defaults unless configured here.
+# ---------------------------------------------------------------------------
+rules:
+  TMP-001:                          # period-over-period change
+    params:
+      max_change_rate: 0.15         # 15 % per year
+      series:
+        - {dataset: counts, value: aadt, group_by: [site_id], time_column: year}
+
+  TMP-002:                          # trend direction
+    params:
+      series:
+        - {dataset: counts, value: aadt, group_by: [site_id], time_column: year,
+           expected_trend: increasing}
+
+  TMP-003:                          # off-trend years (needs qavf[stats])
+    params:
+      series:
+        - {dataset: counts, value: aadt, group_by: [site_id], time_column: year}
+
+  TMP-004:                          # missing years
+    params:
+      expected_periods: [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+      series:
+        - {dataset: counts, value: aadt, group_by: [site_id], time_column: year}
+
+  SPA-001:                          # sites whose crash rate is an outlier
+    params:
+      method: modified_zscore
+      min_entities: 5
+      metrics:
+        - dataset: crashes
+          value: crashes
+          entity_column: site_id
+          group_by: [year]
+          normalize_by: {dataset: counts, value: aadt}
+
+  SPA-002:                          # site vs. its region
+    params:
+      max_ratio: 1.6
+      groups:
+        North: [S01, S02, S03, S04, S05, S06]
+        South: [S07, S08, S09, S10, S11, S12]
+      metrics:
+        - dataset: crashes
+          value: crashes
+          entity_column: site_id
+          group_by: [year]
+          normalize_by: {dataset: counts, value: aadt}
+
+  SPA-003:                          # every site in every year
+    params:
+      entity_column: site_id
+      time_column: year
+      reference_dataset: sites      # the authoritative list of sites
+      datasets: [counts, crashes]
+
+  STA-001:
+    enabled: false                  # nothing configured for generic outlier scans
+
+  REG-001:                          # compare with the accepted counts
+    params:
+      rtol: 1.0e-9
+      baselines:
+        - {dataset: counts, path: baseline/counts.csv, keys: [site_id, year]}
+
+engine:
+  parallel: true
+  fail_on: ERROR
+
+report:
+  title: Traffic Monitoring QA
+  output_dir: qa_output
