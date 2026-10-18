@@ -210,24 +210,30 @@ def _darwin_live_members(group: int) -> list[int]:
 def _wait(
     process: subprocess.Popen[bytes], job: Job | None, started: float, timeout: float | None
 ) -> int:
-    """Wait for the worker, polling a Windows job's CPU allowance meanwhile."""
+    """Wait for the worker, polling a Windows job's CPU allowance meanwhile.
+
+    The deadline is judged on this clock only: a platform wait may wake slightly
+    early (Windows rounds its timeout down to whole milliseconds), and stopping a
+    worker before its full allowance would break the wall-time contract.
+    """
+    polling = job is not None and job.limits_cpu
     while True:
         remaining = (
             max(0.0, timeout - (time.monotonic() - started)) if timeout is not None else None
         )
-        if job is None or not job.limits_cpu:
-            return process.wait(timeout=remaining)
+        step = remaining
+        if polling:
+            step = _CPU_POLL_S if remaining is None else min(remaining, _CPU_POLL_S)
         try:
-            return process.wait(
-                timeout=_CPU_POLL_S if remaining is None else min(remaining, _CPU_POLL_S)
-            )
+            return process.wait(timeout=step)
         except subprocess.TimeoutExpired:
-            if remaining is not None and remaining <= _CPU_POLL_S:
+            if timeout is not None and time.monotonic() - started >= timeout:
                 raise
-        try:
-            job.enforce_cpu()
-        except OSError as exc:
-            raise ExecutionLimitError("could not enforce the isolated CPU allowance") from exc
+        if polling and job is not None:
+            try:
+                job.enforce_cpu()
+            except OSError as exc:
+                raise ExecutionLimitError("could not enforce the isolated CPU allowance") from exc
 
 
 def _interpreter() -> str:

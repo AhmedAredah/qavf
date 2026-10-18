@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -376,3 +377,21 @@ def test_group_exit_during_scan_is_safe(tmp_path, monkeypatch):
     existence = iter([True, False])
     monkeypatch.setattr(supervisor, "_group_exists", lambda _: next(existence))
     assert not supervisor._group_running(7)
+
+
+def test_early_platform_wakeup_never_shortens_the_deadline():
+    # Windows rounds wait timeouts down to whole milliseconds and can wake early.
+    class EarlyWaker:
+        args = ("worker",)
+        waits = 0
+
+        def wait(self, timeout=None):
+            self.waits += 1
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+    process = EarlyWaker()
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        supervisor._wait(process, None, started, 0.2)
+    assert time.monotonic() - started >= 0.2
+    assert process.waits > 1
