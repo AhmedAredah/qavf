@@ -26,6 +26,7 @@ pass for a check it could not assess.
 
 ```bash
 pip install "qavf[stats]"                                     # or: uv tool install "qavf[stats]"
+brew install AhmedAredah/tap/qavf                             # macOS and Linux command line
 docker run --rm -v "$PWD:/work" ghcr.io/ahmedaredah/qavf run -c qavf.yaml
 ```
 
