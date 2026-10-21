@@ -10,7 +10,9 @@ Use `qavf.validate`, `qavf.File`, `qavf.Dataset`, `qavf.Query`, and `qavf.Loader
 for ordinary validation. See [the Python API](api.md) for the simplest call for
 each input form.
 `qavf.sources` exports source classes and parameter models; `qavf.regression`
-exports comparison functions and result models. `qavf.rules.input_checks`
+exports comparison functions and result models; `qavf.compare` exports
+`compare_datasets`, the comparison configuration and result models, and the four
+component registries. `qavf.rules.input_checks`
 exports the input rule classes. Internal modules are implementation details;
 the unreleased package does not retain aliases for former private locations.
 
@@ -37,13 +39,17 @@ the unreleased package does not retain aliases for former private locations.
 | Complete statistics | `statistics/ordered.py`, `rules/_distribution.py`, `_outlier_batches.py`, `_exact_grouped.py`, `_ordered_grouped.py` | Pure frequency mathematics, managed distribution/group indexes, bounded scoring and exact grouped accumulation. |
 | Input profiling | `profiling/` | Bounded per-column state and common input preparation for API and CLI profiles. |
 | Presentation | `reports/presentation.py`, `html.py` | Shared report context, sparse evidence selection and bounded HTML publication. |
-| Regression | `regression/_plan.py`, `_inputs.py`, `_streaming.py`, `_comparison.py` | Schema-only planning, policy-preserving dispatch, native joined batches and shared exact comparison state; typed indexed alignment and bounded baseline staging; numeric/cell/evidence modules retain their policies. |
+| Regression | `regression/_plan.py`, `_inputs.py`, `_streaming.py`, `_comparison.py` | Schema-only planning (including baseline column maps), policy-preserving dispatch, native joined batches and shared exact comparison state; typed indexed alignment and bounded baseline staging; numeric/cell/evidence modules retain their policies. |
+| Dataset comparison | `compare/spec.py`, `align.py`, `measures.py`, `comparators.py`, `levels/`, `results.py`, `engine.py`, `registry.py`, `api.py` | Configuration validated at load; ordered alignment steps; per-group measures over the shared exact reductions; comparators and materiality; one module per level; typed bounded results; one observation and aligned snapshot per side; component registries with entry-point discovery; the public facade. Keyed record classification is the regression engine's. |
+| Typed values | `typed_values.py` | Lossless temporal normalization, checked casts with per-row loss flags, exact numeric scaling. |
 
 Concrete SQL source classes share their loading, budget, snapshot and connection
 ownership behavior through `SQLSource`; each supplies its own query construction.
 `DataContext` composes a connection owner instead of inheriting connection behavior.
 Input rule categories and comparison stages use explicit function dependencies.
-There are no new mixin hierarchies or plugin frameworks.
+Dataset comparison components share one small registry class
+(`compare/registry.py`) that mirrors rule and source discovery; there are no mixin
+hierarchies.
 
 ## Input and planning boundaries
 
@@ -66,7 +72,7 @@ leave a partly updated exclusion/configuration ledger. Runtime dataset-lifetime
 planning stays separate because its responsibility is actual consumer completion,
 including workers that continue after a timeout notice.
 
-Rule discovery ignores re-exported classes and still registers the same 28 built-in
+Rule discovery ignores re-exported classes and registers the 29 built-in
 rules. Source discovery registers the same four source kinds inside its existing
 transaction, so a later conflict cannot publish a partial built-in registry.
 

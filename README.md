@@ -18,9 +18,12 @@ pass for a check it could not assess.
   outliers; coverage gaps; distribution drift; reconciliation of totals across datasets.
 - **Regression testing.** Keyed, tolerance-aware comparison against accepted baselines,
   usable from pytest.
+- **Dataset comparison.** Compare two versions of a dataset whose columns, types,
+  units or codes differ: structure, key coverage, record-level changes and grouped
+  measures, each judged against a tolerance.
 - **Reports and CI gates.** HTML and JSON reports, deterministic evidence and exit codes.
-- **Extensible.** Rules and sources are plain classes discovered from packages, files or
-  entry points.
+- **Extensible.** Rules, sources and comparison levels, measures and comparators are
+  plain classes discovered from packages, files or entry points.
 
 ## Install
 
@@ -167,6 +170,7 @@ Use `engine.require` to name checks that must be assessed for a run to pass.
 | REC-004 | ERROR | Two datasets have the same key set |
 | REC-005 | ERROR | Related datasets carry one identical batch id |
 | REG-001 | ERROR | Outputs match baselines within tolerance |
+| CMP-001 | ERROR | Two datasets compare within tolerance after alignment |
 
 Parameters for every rule: [docs/rules.md](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md)
 or `qavf list-rules`.
@@ -187,6 +191,33 @@ Rows match by key, numbers within tolerance, and changed values, added or remove
 and schema changes are reported. Accept reviewed outputs with `qavf baseline`, which
 records a manifest with the keys, column types and a SHA-256 of the file.
 
+## Dataset comparison
+
+Compare a new version of a dataset with the previous one, even when columns were
+renamed, retyped, rescaled or recoded:
+
+```python
+from qavf import compare_datasets
+
+result = compare_datasets(
+    "v1/counts.parquet", "v2/counts.parquet",
+    keys=["site_id", "year"],
+    columns={"AADT": "aadt"},                      # baseline name -> candidate name
+    units={"aadt": {"factor": 1000}},              # v1 counted thousands of vehicles
+    recode={"fclass": {"values": {"1": "interstate", "2": "arterial"}}},
+    levels=["structure", "coverage", "records",
+            {"level": "groups", "group_by": ["county"], "measures": ["count", "sum(aadt)"]}],
+)
+print(result.summary())
+```
+
+Each level reports graded checks with exact counts and bounded evidence: columns
+added or removed (with suggested renames), keys on one side only, changed values per
+column with their largest differences, and material changes of grouped measures. A
+lossy cast or a missing mapped column makes the comparison not assessed, never a
+pass. In a configuration, `CMP-001` compares configured datasets. See
+[dataset comparison](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison.md).
+
 ## CLI
 
 | Command | Purpose |
@@ -196,7 +227,7 @@ records a manifest with the keys, column types and a SHA-256 of the file.
 | `qavf profile PATH` | Print inferred QA limits for a file |
 | `qavf schema` | Write the configuration JSON Schema for editor support |
 | `qavf list-rules` | List discovered rules |
-| `qavf compare BASELINE CANDIDATE -k KEY` | Compare an output with a baseline |
+| `qavf compare BASELINE CANDIDATE -k KEY` | Compare an output with a baseline (`--map OLD=NEW`) |
 | `qavf baseline SOURCE DEST -k KEY` | Accept an output as a baseline |
 | `qavf demo DIR` | Write a runnable demo project |
 
@@ -207,6 +238,8 @@ resource error.
 
 - [Python API](https://github.com/AhmedAredah/qavf/blob/main/docs/api.md) and
   [sources](https://github.com/AhmedAredah/qavf/blob/main/docs/sources.md)
+- [Dataset comparison](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison.md) and
+  its [component reference](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison_reference.md)
 - [Rules reference](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md) and
   [writing plugins](https://github.com/AhmedAredah/qavf/blob/main/docs/plugins.md)
 - [Cloud storage](https://github.com/AhmedAredah/qavf/blob/main/docs/cloud_storage.md)

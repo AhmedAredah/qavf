@@ -1,7 +1,8 @@
 # Writing plugins
 
 QAVF finds rules and sources by scanning, so a plugin is just Python code in a place
-QAVF looks:
+QAVF looks (comparison components register with decorators in the same modules; see
+[comparison components](#comparison-components)):
 
 | Mechanism | Configuration | Use it for |
 |---|---|---|
@@ -189,6 +190,112 @@ duplicate declaration prevents that module's partially discovered rules or sourc
 from remaining active. Public rule IDs are preserved exactly in configuration and
 JSON Schema, including IDs whose punctuation differs.
 
+## Comparison components
+
+Dataset comparison ([`compare_datasets`, `CMP-001`](comparison.md)) is assembled from
+four kinds of registered component. Each is a class with a `name` (how configuration
+selects it), an optional `Params` model (a `RuleParams` subclass validated when the
+configuration loads) and one method:
+
+| Kind | Base class | Method | Registration | Entry-point group |
+|---|---|---|---|---|
+| Alignment step | `AlignmentStep` | `apply(plan, context) -> LazyFrame` | `register_alignment_step` | `qavf.compare.alignment` |
+| Measure | `Measure` | `compute(data) -> DataFrame` (group keys + `data.alias`) | `register_measure` | `qavf.compare.measures` |
+| Comparator | `Comparator` | `compare(baseline, candidate, context) -> value` | `register_comparator` | `qavf.compare.comparators` |
+| Level | `ComparisonLevel` | `evaluate(inputs, name) -> LevelResult` | `register_level` | `qavf.compare.levels` |
+
+Built-in components register through the same decorators, and the generated
+[component reference](comparison_reference.md) lists them with their parameters.
+Contracts:
+
+- **Steps** transform one side's lazy relation (`sides` limits which) and refuse with
+  `context.refuse(...)`/`AlignmentError` (or `context.require_none(plan, predicate,
+  message)` for a data proof). A refusal makes the comparison not assessed; never
+  coerce silently.
+- **Measures** reduce `data.relation` (a scoped relation over the aligned side) per
+  `data.keys` group without collecting rows: use `grouped_reduce`, `grouped_aggregate`,
+  `grouped_mean`, `grouped_quantile` (`qavf.rules._grouped`) or `exact_grouped`.
+  Values may be numbers or exact rational strings. Override `check` to refuse a
+  column, `columns` to declare extra columns read, and set `numeric`/`requires_column`.
+- **Comparators** receive exact `Fraction`s and return a `Fraction`, a float or `None`
+  (undefined). Materiality is judged separately.
+- **Levels** read both sides through `LevelInputs` (`schema`, `scan`, `relation`,
+  `collect`, `rows`, `missing_counts`, `evidence`) and return a `LevelResult` (or a
+  subclass set as `Result`, which is also used to read the result back from JSON)
+  with graded `CheckResult`s. Raise for anything that cannot be assessed. Override
+  `configuration_errors(spec)` for problems visible in the configuration alone.
+
+A custom measure and a custom level:
+
+```python
+from typing import ClassVar
+
+import polars as pl
+
+from qavf.compare import (
+    CheckResult,
+    ComparisonLevel,
+    LevelResult,
+    Measure,
+    register_level,
+    register_measure,
+)
+from qavf.engine.registry import RuleParams
+from qavf.rules._grouped import grouped_reduce
+
+
+class RangeParams(RuleParams):
+    scale: int = 1
+    """Multiply the range, e.g. to change its unit."""
+
+
+@register_measure
+class Range(Measure):
+    """Largest minus smallest value per group."""
+
+    name: ClassVar[str] = "range"
+    Params: ClassVar[type[RuleParams]] = RangeParams
+
+    def compute(self, data):
+        value = pl.col(data.column)
+        spread = (value.max() - value.min()) * self.params.scale
+        return grouped_reduce(data.relation, data.keys, {data.alias: spread})
+
+
+@register_level
+class RowParity(ComparisonLevel):
+    """Both sides have an even number of rows, or both an odd number."""
+
+    name: ClassVar[str] = "row_parity"
+
+    def evaluate(self, inputs, name):
+        parity = {side: inputs.rows(side) % 2 for side in ("baseline", "candidate")}
+        same = parity["baseline"] == parity["candidate"]
+        check = CheckResult(check="parity", passed=same, message=f"row parity {parity}")
+        return LevelResult(level=self.name, name=name, checks=[check])
+```
+
+```yaml
+levels:
+  - row_parity
+  - {level: groups, group_by: [county], measures: [{measure: range, column: aadt, scale: 2}]}
+```
+
+Packaged plugins advertise them like rules:
+
+```toml
+[project.entry-points."qavf.compare.measures"]
+acme = "qavf_acme.measures"      # a module (scanned) or a single component class
+
+[project.entry-points."qavf.compare.levels"]
+acme = "qavf_acme.levels"
+```
+
+Comparison entry points load when a comparison component is first looked up. Each one
+tried is recorded in `metadata.plugins` as `compare.<kind>:<name>`, a broken one leaves no
+partial registration, and `plugins.required: [compare.levels:acme]` stops a run whose
+level plugin is missing or broken.
+
 ## Packaging a plugin
 
 ```toml
@@ -236,7 +343,7 @@ and entry points.
 ## Required components and discovery transactions
 
 `plugins.required` accepts entry-point names or qualified `rules:name` / `sources:name`
-entries. An unqualified name requires all advertised components of that name; a source
+/ `compare.<kind>:name` entries. An unqualified name requires all advertised components of that name; a source
 component cannot satisfy a failed rule component. Duplicate entry-point names within a
 group are rejected before either entry point loads.
 

@@ -189,6 +189,12 @@ The existing `QARunner`, configuration models and plugin contracts remain
 available for advanced orchestration. `import qavf` itself defers heavyweight
 integration imports until a public object is requested.
 
+## Comparing two datasets
+
+`compare_datasets(baseline, candidate, keys=..., columns=..., levels=...)` takes the
+same input forms and `resources=` policy as `validate` and returns a typed
+`DatasetComparison`. See [dataset comparison](comparison.md).
+
 ## Plugin dependency declarations
 
 Rule authors can preserve parameter typing with `Rule[MyParams]` and declare

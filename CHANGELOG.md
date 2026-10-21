@@ -4,6 +4,27 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- Add dataset comparison: `compare_datasets` (also `qavf.compare`) and the `CMP-001`
+  rule compare a candidate dataset with a baseline after an alignment pipeline
+  (column mapping, lossless casts, exact unit scaling, recoding, derived columns,
+  per-side and shared filters) at four levels: structure (with suggested renames),
+  key coverage, keyed records and grouped measures with comparators, materiality and
+  rank changes. Unassessable checks (missing mapped columns, lossy casts, too few rows)
+  are reported as not assessed.
+- Make alignment steps, measures, comparators and levels extensible through
+  registration decorators and the `qavf.compare.alignment`, `qavf.compare.measures`,
+  `qavf.compare.comparators` and `qavf.compare.levels` entry-point groups;
+  `plugins.required` accepts `compare.<kind>:name`.
+- Map renamed columns in regression comparisons: `column_map=` for `compare_frames`,
+  `compare_outputs` and `assert_outputs_match`, `rename` for REG-001 baselines and
+  `qavf compare --map OLD=NEW`. Comparison results count changed values per column
+  (`column_changes`).
+- Add general exact helpers: checked casts and exact scaling (`qavf.typed_values`),
+  exact quantile interpolation (`qavf.statistics.ordered`), grouped exact means and
+  quantiles, and byte-bounded evidence collection.
+
 ## [0.4.1] - 2026-10-18
 
 - Add a `secrets` configuration section for cloud storage: AWS S3 and S3-compatible

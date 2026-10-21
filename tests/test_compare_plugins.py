@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import sys
+import re
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import ClassVar
 
 import polars as pl
 import pytest
+import yaml
 from pydantic import Field, ValidationError
 
 from qavf import QARunner, QAVFSettings, compare_datasets
@@ -246,4 +248,38 @@ def test_generic_registry_is_reusable_for_new_component_kinds():
     assert len(registry) == 0
     with pytest.raises(ValueError, match="unknown probe 'x'; available: none"):
         registry.create("x")
-    assert sys.modules  # discovery imported nothing unexpected
+
+
+DOCS = Path(__file__).resolve().parents[1] / "docs"
+
+
+def _blocks(path, language, section=None):
+    text = (DOCS / path).read_text(encoding="utf-8")
+    if section is not None:
+        start = text.index(f"## {section}\n")
+        end = text.find("\n## ", start + 1)
+        text = text[start : end if end != -1 else None]
+    return re.findall(rf"```{language}\n(.*?)```", text, flags=re.DOTALL)
+
+
+def test_documented_plugin_example_runs():
+    code = _blocks("plugins.md", "python", "Comparison components")[0]
+    configuration = _blocks("plugins.md", "yaml", "Comparison components")[0]
+    namespace: dict = {"__name__": "qavf_documented_plugin"}
+    exec(compile(code, "plugins.md", "exec"), namespace)
+    levels = yaml.safe_load(configuration)["levels"]
+    frame = pl.DataFrame({"county": ["a", "a"], "aadt": [1, 4]})
+    result = compare_datasets(frame, frame.with_columns(aadt=pl.Series([1, 9])), levels=levels)
+    assert result.level("row_parity").passed
+    (check,) = [c for c in result.level("groups").checks if c.check == "range(aadt)"]
+    record = check.affected_records[0]
+    assert (record["baseline"], record["candidate"]) == (6, 16)
+
+
+def test_documented_comparison_configuration_validates():
+    from qavf.rules.comparison_checks import DatasetComparisonRule
+
+    (configuration,) = _blocks("comparison.md", "yaml")
+    settings = QAVFSettings.model_validate(yaml.safe_load(configuration))
+    rule = DatasetComparisonRule(settings.rules["CMP-001"].params)
+    assert rule.configuration_errors(settings) == []

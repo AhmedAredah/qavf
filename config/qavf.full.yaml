@@ -72,6 +72,17 @@ datasets:
         FROM read_parquet('data/readings/*.parquet')
         GROUP BY ALL                  -- temporal rules need a numeric time: day_number
 
+  # A second version of `daily` with renamed columns, for the CMP-001 comparison below.
+  daily_v2:
+    source:
+      type: query
+      sql: |
+        SELECT Station_ID AS station_id,
+               CAST(timestamp AS DATE) AS day,
+               avg(value) * 1000 AS value_milli
+        FROM read_parquet('data/readings/*.parquet')
+        GROUP BY ALL
+
   # A table (or query) in a database attached through `connections`.
   stations:
     source: {type: database, connection: warehouse, table: stations, schema: public}
@@ -169,6 +180,29 @@ rules:
           columns:                    # per-column tolerances
             value: {atol: 0.01}
             day_number: {exact: true}
+
+  CMP-001:                            # compare two datasets after aligning them
+    params:
+      comparisons:
+        - name: daily v1 vs v2
+          baseline: daily
+          candidate: daily_v2
+          keys: [station_id, day]       # candidate names: they apply after `columns`
+          columns: {station: station_id, value: value_milli}   # baseline -> candidate
+          units: {value_milli: {factor: 1000}}  # exact for integers and decimals
+          ignore_columns: [day_number]  # only in the baseline
+          # cast: {code: str}  recode: {fc: {values: {"1": interstate}}}
+          # derive: {total: "a + b"}  baseline_where / candidate_where / where: SQL
+          rtol: 1.0e-9                  # default tolerance; per column: tolerances
+          levels:
+            - structure                 # columns, types, units, nullability, rows, keys
+            - coverage                  # keys on one side only; null-rate changes
+            - {level: records, top_n: 5}  # changed values with the largest changes
+            - level: groups             # measures per group, materiality, rank changes
+              severity: WARNING
+              group_by: [station_id]
+              measures: [count, sum(value_milli), {measure: quantile, column: value_milli, p: 0.9}]
+              rank: {measure: sum(value_milli), top_k: 3}
 
 # ---------------------------------------------------------------------------
 engine:

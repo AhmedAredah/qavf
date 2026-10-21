@@ -66,6 +66,12 @@ def test_full_example_runs_clean(tmp_path) -> None:
     for rule_id in ("TMP-001", "SPA-001", "SPA-003", "STA-001"):
         assert report.get(rule_id).status is Status.PASS, rule_id
     assert report.get("TMP-001").total_records == len(STATIONS) * 9
+    # The example comparison ran every configured level and every check passed.
+    compared = [r for r in report.results if r.rule_id == "CMP-001"]
+    assert {r.check.split(": ")[1] for r in compared} == {
+        "structure", "coverage", "records", "groups"
+    }
+    assert all(r.status is Status.PASS for r in compared)
 
 
 def test_minimal_example_runs_clean(tmp_path) -> None:
