@@ -76,9 +76,21 @@ def _paired_values(plan: ComparisonPlan, column: str, ordinal_sql: str) -> tuple
     )
 
 
+def _relation(table: str, plan: ComparisonPlan | None = None) -> str:
+    """A FROM item exposing the baseline under candidate names when columns are mapped."""
+    if plan is None or not plan.column_map:
+        return quote_identifier(table)
+    canonical = list(plan.baseline_schema)
+    selected = ", ".join(
+        f"{quote_identifier(stored)} AS {quote_identifier(name)}"
+        for stored, name in zip(plan.baseline_columns(canonical), canonical, strict=True)
+    )
+    return f"(SELECT {selected} FROM {quote_identifier(table)}) AS mapped"
+
+
 def _key_summary(
     session: ComparisonSession,
-    table: str,
+    relation: str,
     keys: tuple[str, ...],
     schema: Mapping[str, pl.DataType],
     side: str,
@@ -103,7 +115,7 @@ def _key_summary(
     query = (
         f"SELECT {', '.join(fields)} FROM ("
         f"SELECT {', '.join(key_names)}, count(*) AS n FROM ("
-        f"SELECT {', '.join(grouped)} FROM {quote_identifier(table)}"
+        f"SELECT {', '.join(grouped)} FROM {relation}"
         f") AS projected GROUP BY {', '.join(key_names)}"
         ") AS grouped"
     )
@@ -134,10 +146,10 @@ def compare_native(
     native_supported(plan)
     batch_rows = _comparison._BATCH_ROWS
     baseline_rows = _key_summary(
-        session, baseline, plan.keys, plan.baseline_schema, "baseline", plan.name
+        session, _relation(baseline, plan), plan.keys, plan.baseline_schema, "baseline", plan.name
     )
     candidate_rows = _key_summary(
-        session, candidate, plan.keys, plan.candidate_schema, "candidate", plan.name
+        session, _relation(candidate), plan.keys, plan.candidate_schema, "candidate", plan.name
     )
     accumulator = ComparisonAccumulator(plan, baseline_rows, candidate_rows)
     columns = list(plan.shared)
@@ -148,11 +160,8 @@ def compare_native(
     ordinal_sql = quote_identifier(ordinal)
     selected = ", ".join(quote_identifier(column) for column in columns)
 
-    def projected(table: str) -> str:
-        return (
-            f"SELECT {selected}, row_number() OVER () AS {ordinal_sql} "
-            f"FROM {quote_identifier(table)}"
-        )
+    def projected(relation: str) -> str:
+        return f"SELECT {selected}, row_number() OVER () AS {ordinal_sql} FROM {relation}"
 
     left_names = [f"b{i}" for i in range(len(columns))]
     right_names = [f"c{i}" for i in range(len(columns))]
@@ -173,8 +182,8 @@ def compare_native(
         for key in plan.keys
     )
     query = (
-        f"SELECT {', '.join(fields)} FROM ({projected(baseline)}) AS b "
-        f"FULL OUTER JOIN ({projected(candidate)}) AS c ON {on} "
+        f"SELECT {', '.join(fields)} FROM ({projected(_relation(baseline, plan))}) AS b "
+        f"FULL OUTER JOIN ({projected(_relation(candidate))}) AS c ON {on} "
         f"ORDER BY CASE WHEN c.{ordinal_sql} IS NULL THEN 0 "
         f"WHEN b.{ordinal_sql} IS NULL THEN 1 ELSE 2 END, "
         f"COALESCE(b.{ordinal_sql}, c.{ordinal_sql})"

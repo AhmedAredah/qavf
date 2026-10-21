@@ -104,12 +104,16 @@ class ComparisonAccumulator:
             rtol=plan.rtol,
             atol=plan.atol,
             column_tolerances=dict(plan.column_tolerances),
+            column_map=dict(plan.column_map),
             baseline_rows=self.baseline_rows,
             candidate_rows=self.candidate_rows,
             rows_added=self.rows_added,
             rows_removed=self.rows_removed,
             rows_changed=state.rows,
             values_changed=state.values,
+            column_changes={
+                column: state.columns[column] for column in plan.values if column in state.columns
+            },
             columns_added=list(plan.columns_added),
             columns_removed=list(plan.columns_removed),
             dtypes_changed=list(plan.dtypes_changed),
@@ -162,7 +166,7 @@ def _compare_batch(
         )
         if native:
             count = len(positions)
-            state.values += count
+            state.changed(column, count)
             changed_rows = changed_rows | pending
             if da.is_float():
                 finite = pl.col("a").is_finite() & pl.col("b").is_finite()
@@ -214,7 +218,7 @@ def _compare_batch(
             if not different:
                 continue
             flags[position] = True
-            state.values += 1
+            state.changed(column)
             state.nonfinite += int(changed_nonfinite)
             absolute, relative = _difference_size(before, after)
             state.maxima(absolute, relative)

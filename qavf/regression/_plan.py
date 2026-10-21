@@ -42,6 +42,14 @@ class ComparisonPlan:
     max_differences: int
     max_evidence_bytes: int
     column_tolerances: Mapping[str, tuple[float, float]]
+    column_map: Mapping[str, str] = MappingProxyType({})
+    """Baseline column -> candidate name. Every other field uses candidate names;
+    readers translate baseline projections with :meth:`baseline_columns`."""
+
+    def baseline_columns(self, columns: Sequence[str]) -> list[str]:
+        """Stored baseline names for canonical (candidate-named) columns."""
+        stored = {new: old for old, new in self.column_map.items()}
+        return [stored.get(column, column) for column in columns]
 
     def tolerance(self, column: str | None) -> tuple[float, float]:
         """Return a column override or the comparison-wide tolerance."""
@@ -120,6 +128,32 @@ def check_evidence_limits(max_differences: int, max_evidence_bytes: int, name: s
         raise ValueError(f"{name}: max_evidence_bytes must be an integer >= 0")
 
 
+def mapped_schema(
+    schema: Mapping[str, pl.DataType], column_map: Mapping[str, str] | None, name: str
+) -> tuple[dict[str, pl.DataType], dict[str, str]]:
+    """Rename baseline columns to candidate names, refusing absent or colliding names.
+
+    Returns the canonical schema (stored order) and the effective, non-identity map.
+    A mapped column must exist: silently comparing nothing would read as agreement.
+    """
+    if column_map is None:
+        return dict(schema), {}
+    if not isinstance(column_map, Mapping):
+        raise ValueError(f"{name}: column_map must map baseline names to candidate names")
+    for old, new in column_map.items():
+        if not isinstance(old, str) or not old or not isinstance(new, str) or not new:
+            raise ValueError(f"{name}: column_map must map nonempty column names")
+    if absent := sorted(set(column_map) - set(schema)):
+        raise ValueError(f"{name}: baseline lacks mapped column(s) {', '.join(absent)}")
+    renamed = [column_map.get(column, column) for column in schema]
+    if clash := sorted(column for column, count in Counter(renamed).items() if count > 1):
+        raise ValueError(
+            f"{name}: column_map gives several baseline columns the name(s) {', '.join(clash)}"
+        )
+    effective = {old: new for old, new in column_map.items() if old != new}
+    return dict(zip(renamed, schema.values(), strict=True)), effective
+
+
 def comparison_plan(
     baseline_schema: Mapping[str, pl.DataType],
     candidate_schema: Mapping[str, pl.DataType],
@@ -133,13 +167,17 @@ def comparison_plan(
     name: str = "output",
     column_tolerances: Mapping[str, tuple[float, float]] | None = None,
     schema: SchemaPolicy = "compatible",
+    column_map: Mapping[str, str] | None = None,
 ) -> ComparisonPlan:
     """Plan comparison from complete original schemas without materializing data.
 
     Numeric key widths may differ; execution must verify any proposed key cast
     against the original values. Incompatible original key kinds are rejected
-    here, regardless of the selected value-schema policy.
+    here, regardless of the selected value-schema policy. ``column_map`` renames
+    baseline columns first; keys, ignored columns and tolerances use the
+    resulting candidate names.
     """
+    baseline_schema, mapping = mapped_schema(baseline_schema, column_map, name)
     if schema not in ("compatible", "strict", "ignore"):
         raise ValueError(f"{name}: unknown schema policy {schema!r}")
     selected_keys = tuple(column_names(keys))
@@ -205,4 +243,5 @@ def comparison_plan(
         max_differences=max_differences,
         max_evidence_bytes=max_evidence_bytes,
         column_tolerances=MappingProxyType(per_column),
+        column_map=MappingProxyType(mapping),
     )

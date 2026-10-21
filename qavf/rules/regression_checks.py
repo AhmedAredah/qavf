@@ -62,6 +62,10 @@ class BaselineSpec(RuleParams):
     columns: dict[str, ColumnTolerance] = Field(default_factory=dict)
     """Per-column tolerances, e.g. ``{share: {atol: 0.001}, code: {exact: true}}``, so
     one mixed-unit table needs no globally loose tolerance."""
+    rename: dict[str, str] = Field(default_factory=dict)
+    """Baseline columns renamed in the output (``baseline_name: output_name``). The
+    baseline is compared under output names, which ``keys``, ``ignore_columns`` and
+    ``columns`` use. A mapped column the baseline lacks makes the check not assessed."""
 
     @model_validator(mode="after")
     def _one_location(self) -> BaselineSpec:
@@ -78,6 +82,9 @@ class BaselineSpec(RuleParams):
             raise ValueError(
                 f"column tolerances cannot apply to key or ignored column(s): {', '.join(clash)}"
             )
+        targets = list(self.rename.values())
+        if repeated := sorted({name for name in targets if targets.count(name) > 1}):
+            raise ValueError(f"rename gives several columns the name(s) {', '.join(repeated)}")
         return self
 
 
@@ -177,14 +184,16 @@ class BaselineComparisonRule(Rule):
                 "name": identity,
                 "column_tolerances": per_column,
                 "schema": spec.schema_policy,
+                "column_map": spec.rename,
             }
             if local_file:
                 assert isinstance(location, str)
                 resolved = ctx.resolve_path(location)
                 config["path"] = str(resolved)
+                stored = {new: old for old, new in spec.rename.items()}
                 (result, _), _manifest, fingerprint = read_verified_baseline(
                     resolved,
-                    spec.keys,
+                    tuple(stored.get(key, key) for key in spec.keys),
                     p.require_manifest,
                     lambda: compare_context(ctx, spec.dataset, spec.keys, source=config, **options),
                 )

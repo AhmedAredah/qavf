@@ -75,6 +75,7 @@ def compare_frames(
     name: str = "output",
     column_tolerances: Mapping[str, tuple[float, float]] | None = None,
     schema: SchemaPolicy = "compatible",
+    column_map: Mapping[str, str] | None = None,
 ) -> ComparisonResult:
     """Compare two tables by key with numeric tolerance.
 
@@ -101,6 +102,10 @@ def compare_frames(
         column_tolerances: ``column -> (rtol, atol)`` for columns that need their own
             tolerance (``(0, 0)`` compares a column exactly); others use ``rtol``/``atol``.
         schema: How column types are compared (:data:`SchemaPolicy`).
+        column_map: ``baseline name -> candidate name`` for renamed columns. The
+            baseline is compared under candidate names; ``keys``, ``ignore_columns``
+            and ``column_tolerances`` use candidate names. A mapped column the
+            baseline lacks is an error, never an empty comparison.
 
     Raises:
         ValueError: for invalid arguments, if a key column is missing, keys are not
@@ -120,8 +125,9 @@ def compare_frames(
         name=name,
         column_tolerances=column_tolerances,
         schema=schema,
+        column_map=column_map,
     )
-    return _compare_projected(plan, baseline, candidate)
+    return _compare_projected(plan, baseline.rename(dict(plan.column_map)), candidate)
 
 
 def _compare_projected(
@@ -167,6 +173,7 @@ def compare_outputs(
     column_tolerances: Mapping[str, tuple[float, float]] | None = None,
     schema: SchemaPolicy = "compatible",
     resources: ResourceLimits | None = None,
+    column_map: Mapping[str, str] | None = None,
 ) -> ComparisonResult:
     """Compare a candidate output with its baseline; either may be a frame or a file path.
 
@@ -208,6 +215,7 @@ def compare_outputs(
         "name": name,
         "column_tolerances": column_tolerances,
         "schema": schema,
+        "column_map": dict(column_map) if isinstance(column_map, Mapping) else column_map,
     }
     # Only eager tables bypass the common input boundary. Maintaining another
     # descriptor whitelist here made Query/Loader support depend on whether an
@@ -235,6 +243,7 @@ def assert_outputs_match(
     column_tolerances: Mapping[str, tuple[float, float]] | None = None,
     schema: SchemaPolicy = "compatible",
     resources: ResourceLimits | None = None,
+    column_map: Mapping[str, str] | None = None,
 ) -> ComparisonResult:
     """Assert that ``candidate`` matches ``baseline``; designed for pytest.
 
@@ -252,6 +261,7 @@ def assert_outputs_match(
         column_tolerances=column_tolerances,
         schema=schema,
         resources=resources,
+        column_map=column_map,
     )
     if not result.equal:
         lines = [result.summary()]

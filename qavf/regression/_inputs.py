@@ -64,26 +64,27 @@ def compare_context(
         fallback_reason = str(exc)
 
     # Import after module initialization: compare_frames shares this exact kernel.
-    from qavf.regression._indexed import compare_indexed, supported
+    from qavf.regression._indexed import MappedInput, compare_indexed, supported
     from qavf.regression.compare_outputs import _compare_projected
 
     if source is not None:
 
         def projected(view):
             plan = comparison_plan(view.schema(), candidate_schema, keys, **options)
+            stored = plan.baseline_columns(plan.shared)
             if supported(plan):
                 with (
-                    view.observe(plan.shared) as left,
+                    view.observe(stored) as left,
                     ctx.observe(candidate, plan.shared) as right,
                     ctx.work_store("typed regression alignment") as store,
                 ):
                     result = compare_indexed(
-                        store, left, right, plan, fallback_reason=fallback_reason
+                        store, MappedInput(left, plan), right, plan, fallback_reason=fallback_reason
                     )
                     return result, view.fingerprint() if fingerprint else None
             result = _compare_projected(
                 plan,
-                view.project(list(plan.shared)),
+                view.project(stored).rename(dict(plan.column_map)),
                 ctx.project(candidate, list(plan.shared)),
                 execution="projected_fallback",
                 fallback_reason=fallback_reason,
@@ -93,17 +94,22 @@ def compare_context(
         return ctx.read_source(source, projected)
     assert baseline_schema is not None
     plan = comparison_plan(baseline_schema, candidate_schema, keys, **options)
+    stored = plan.baseline_columns(plan.shared)
     if supported(plan):
         with (
-            ctx.projected_observations({baseline: plan.shared, candidate: plan.shared}) as inputs,
+            ctx.projected_observations({baseline: stored, candidate: plan.shared}) as inputs,
             ctx.work_store("typed regression alignment") as store,
         ):
             return compare_indexed(
-                store, inputs[baseline], inputs[candidate], plan, fallback_reason=fallback_reason
+                store,
+                MappedInput(inputs[baseline], plan),
+                inputs[candidate],
+                plan,
+                fallback_reason=fallback_reason,
             ), None
     result = _compare_projected(
         plan,
-        ctx.project(baseline, list(plan.shared)),
+        ctx.project(baseline, stored).rename(dict(plan.column_map)),
         ctx.project(candidate, list(plan.shared)),
         execution="projected_fallback",
         fallback_reason=fallback_reason,

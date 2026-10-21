@@ -74,6 +74,8 @@ class ComparisonResult(SnapshotModel):
     atol: float
     column_tolerances: dict[str, tuple[float, float]] = Field(default_factory=dict)
     """Columns compared with their own ``(rtol, atol)`` instead of the table's."""
+    column_map: dict[str, str] = Field(default_factory=dict)
+    """Baseline columns compared under candidate names (``baseline: candidate``)."""
     baseline_rows: int
     candidate_rows: int
     rows_added: int = 0
@@ -89,6 +91,9 @@ class ComparisonResult(SnapshotModel):
     """Largest absolute difference among changes between finite numbers."""
     max_rel_diff: float | None = None
     """Largest relative difference among changes between finite numbers."""
+    column_changes: dict[str, int] = Field(default_factory=dict)
+    """Changed values per compared column, in comparison order; unchanged columns
+    are omitted. The counts sum to ``values_changed``."""
     nonfinite_changes: int = 0
     """Changed values where either side is NaN or infinite; they have no difference
     size and are excluded from the maxima."""

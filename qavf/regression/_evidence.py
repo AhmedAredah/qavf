@@ -23,6 +23,8 @@ class _Changes:
     bytes_used: int = 2
     exhausted: bool = False
     values: int = 0
+    columns: dict[str, int] = field(default_factory=dict)
+    """Complete changed-value counts per column; ``values`` is their sum."""
     rows: int = 0
     nonfinite: int = 0
     max_abs: float | None = None
@@ -55,6 +57,11 @@ class _Changes:
                 return
         self.differences.append(difference)
         self.bytes_used += size + (len(self.differences) > 1)
+
+    def changed(self, column: str, count: int = 1) -> None:
+        """Count changed values of one column; evidence is recorded separately."""
+        self.values += count
+        self.columns[column] = self.columns.get(column, 0) + count
 
     def key(self, frame: pl.DataFrame, position: int, keys: list[str]) -> dict[str, Any] | None:
         if not self.remaining:

@@ -8,7 +8,7 @@ losslessly before crossing Python's microsecond datetime boundary.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from io import BytesIO
 from typing import Any, Protocol
 
@@ -29,6 +29,37 @@ from qavf.typed_values import encode_temporal
 class BatchInput(Protocol):
     def schema(self) -> dict[str, pl.DataType]: ...
     def batches(self, batch_rows: int = 65536) -> Iterator[pl.DataFrame]: ...
+
+
+class MappedInput:
+    """Present a stored baseline projection under the plan's candidate names."""
+
+    def __init__(self, source: BatchInput, plan: ComparisonPlan) -> None:
+        self._source, self._mapping = source, dict(plan.column_map)
+
+    def schema(self) -> dict[str, pl.DataType]:
+        schema = self._source.schema()
+        return {self._mapping.get(name, name): dtype for name, dtype in schema.items()}
+
+    def batches(self, batch_rows: int = 65536) -> Iterator[pl.DataFrame]:
+        for batch in self._source.batches(batch_rows):
+            present = {old: new for old, new in self._mapping.items() if old in batch.columns}
+            yield batch.rename(present)
+
+
+class ProjectedInput:
+    """Present only the selected columns of a wider batch input."""
+
+    def __init__(self, source: BatchInput, columns: Sequence[str]) -> None:
+        self._source, self._columns = source, list(columns)
+
+    def schema(self) -> dict[str, pl.DataType]:
+        schema = self._source.schema()
+        return {name: schema[name] for name in self._columns}
+
+    def batches(self, batch_rows: int = 65536) -> Iterator[pl.DataFrame]:
+        for batch in self._source.batches(batch_rows):
+            yield batch.select(self._columns)
 
 
 def supported(plan: ComparisonPlan) -> bool:

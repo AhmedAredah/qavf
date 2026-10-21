@@ -120,6 +120,13 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("--atol", type=float, default=1e-9)
     compare.add_argument("--ignore", nargs="*", default=[], help="columns to ignore")
     compare.add_argument("--show", type=int, default=20, help="differences to print")
+    compare.add_argument(
+        "--map",
+        action="append",
+        default=[],
+        metavar="OLD=NEW",
+        help="a baseline column renamed in the candidate (repeatable); keys use NEW",
+    )
 
     demo = commands.add_parser("demo", help="write a runnable demo project")
     demo.add_argument("directory", type=Path)
@@ -329,6 +336,19 @@ def _cmd_list_rules(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _column_map(pairs: Sequence[str]) -> dict[str, str]:
+    """``OLD=NEW`` arguments as a mapping; a malformed or repeated name is a usage error."""
+    mapping: dict[str, str] = {}
+    for pair in pairs:
+        old, separator, new = pair.partition("=")
+        if not separator or not old or not new:
+            raise ValueError(f"--map expects OLD=NEW, got {pair!r}")
+        if old in mapping:
+            raise ValueError(f"--map names baseline column {old!r} more than once")
+        mapping[old] = new
+    return mapping
+
+
 def _cmd_compare(args: argparse.Namespace) -> int:
     result = compare_outputs(
         args.baseline,
@@ -337,6 +357,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         rtol=args.rtol,
         atol=args.atol,
         ignore_columns=args.ignore,
+        column_map=_column_map(args.map) or None,
     )
     print(result.summary())
     for difference in result.differences[: args.show]:
