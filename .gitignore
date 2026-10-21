@@ -21,3 +21,6 @@ htmlcov/
 .hypothesis/
 .coverage.*
 release-evidence/
+
+# Local agent worktrees and tool state
+.claude/
