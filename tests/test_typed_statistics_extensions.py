@@ -8,6 +8,7 @@ general helpers; each expected value here is computed with plain Python
 
 from __future__ import annotations
 
+import math
 import statistics
 from datetime import date, datetime
 from decimal import Decimal
@@ -20,9 +21,10 @@ from hypothesis import strategies as st
 
 from qavf.audit_codec import evidence_json_size
 from qavf.engine.context import DataContext
+from qavf.numeric import exact_rational, report_number
 from qavf.rules._execution import normalized_plan
 from qavf.rules._grouped import ProjectedRelation, grouped_mean, grouped_quantile, grouped_reduce
-from qavf.rules.helpers import BoundedEvidence
+from qavf.rules.helpers import BoundedEvidence, LargestEvidence
 from qavf.statistics.ordered import linear_quantile, quantile_ranks
 from qavf.typed_values import checked_cast, exact_scale, logical_type
 
@@ -223,6 +225,41 @@ def test_declared_only_normalization_keeps_nan_as_a_value(tmp_path):
         everything = normalized_plan(ctx, "a", frame.lazy()).collect()
     assert plan["a"].to_list()[1] is None and plan["b"].is_nan().to_list() == [True, False]
     assert everything["b"].to_list() == [None, 1.0]
+
+
+def test_largest_evidence_keeps_the_largest_magnitudes_with_earliest_ties():
+    evidence = LargestEvidence(3)
+    items = [(5.0, 0), (1.0, 1), (5.0, 2), (9.0, 3), (5.0, 4), (0.5, 5)]
+    for magnitude, ordinal in items:
+        evidence.add(magnitude, ordinal, {"ordinal": ordinal})
+    oracle = sorted(items, key=lambda item: (-item[0], item[1]))[:3]
+    assert [r["ordinal"] for r in evidence.records] == [ordinal for _, ordinal in oracle]
+    assert not LargestEvidence(0).admits(1.0, 0)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (2**70, Fraction(2**70)),
+        (Decimal("0.1"), Fraction(1, 10)),
+        (0.1, Fraction(0.1)),
+        ("7/2", Fraction(7, 2)),
+        ("x", None),
+        (float("nan"), None),
+        (Decimal("Infinity"), None),
+        (True, None),
+        (None, None),
+    ],
+)
+def test_exact_rational_conversion(value, expected):
+    assert exact_rational(value) == expected
+
+
+def test_report_numbers_keep_integers_exact():
+    assert report_number(Fraction(2**70)) == 2**70
+    assert report_number(Fraction(1, 4)) == 0.25
+    assert report_number(Fraction(10**400, 3)) == math.inf
+    assert report_number(None) is None
 
 
 def test_statistics_oracle_sanity():

@@ -23,44 +23,13 @@ from __future__ import annotations
 import math
 from abc import abstractmethod
 from dataclasses import dataclass
-from decimal import Decimal
 from fractions import Fraction
 from typing import Any, ClassVar
 
 from qavf.compare.registry import Component, ComponentRegistry
-from qavf.numeric import numeric_close
+from qavf.numeric import exact_rational, numeric_close
 
 Value = Fraction | float | None
-
-
-def exact_value(value: Any) -> Fraction | None:
-    """The exact rational of a finite number or rational string; ``None`` otherwise."""
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    if isinstance(value, Decimal) and not value.is_finite():
-        return None
-    if isinstance(value, int | float | Decimal | Fraction):
-        return Fraction(value)
-    if isinstance(value, str):
-        try:
-            return Fraction(value)
-        except ValueError:
-            return None
-    return None
-
-
-def presented(value: Value) -> int | float | None:
-    """A rational for reports: integers stay exact, other rationals round once."""
-    if value is None or isinstance(value, float):
-        return value
-    if value.denominator == 1:
-        return value.numerator
-    try:
-        return float(value)
-    except OverflowError:
-        return math.inf if value > 0 else -math.inf
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +141,7 @@ class Materiality:
             return False
         if baseline is None or candidate is None:
             return True
-        b, c = exact_value(baseline), exact_value(candidate)
+        b, c = exact_rational(baseline), exact_rational(candidate)
         if b is None or c is None:
             nan = [isinstance(v, float) and math.isnan(v) for v in (baseline, candidate)]
             return not all(nan) and bool(baseline != candidate)

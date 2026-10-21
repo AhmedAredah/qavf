@@ -238,14 +238,15 @@ class ColumnConstraints(_Strict):
         return self
 
 
-def _check_where(condition: str) -> None:
-    """Compile a ``where`` condition with the engine that evaluates it (Polars SQL)."""
+def _check_where(condition: str, what: str = "where condition") -> None:
+    """Compile a ``where`` condition (or another Polars SQL expression, named by
+    ``what``) with the engine that evaluates it."""
     import polars as pl
 
     try:
         pl.sql_expr(condition)
     except Exception as exc:
-        raise ValueError(f"invalid where condition {condition!r}: {exc}") from exc
+        raise ValueError(f"invalid {what} {condition!r}: {exc}") from exc
 
 
 def _check_regex(pattern: str) -> None:

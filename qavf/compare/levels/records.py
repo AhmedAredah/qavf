@@ -64,6 +64,15 @@ def _difference(b: pl.Expr, c: pl.Expr, db: pl.DataType, dc: pl.DataType) -> pl.
     return (c.cast(pl.Float64) - b.cast(pl.Float64)).abs()
 
 
+def _finite(b: pl.Expr, c: pl.Expr, db: pl.DataType, dc: pl.DataType) -> pl.Expr:
+    """Both values present and, for floats, finite."""
+    finite = b.is_not_null() & c.is_not_null()
+    for expr, dtype in ((b, db), (c, dc)):
+        if dtype.is_float():
+            finite = finite & expr.is_finite()
+    return finite
+
+
 def _keyed(inputs: LevelInputs, plan: ComparisonPlan) -> ComparisonResult:
     baseline, candidate = inputs.observations["baseline"], inputs.observations["candidate"]
     if supported(plan):
@@ -150,10 +159,7 @@ def _describe(
                 (~bn & b.is_not_null() & cn).sum().alias(f"v2nan{index}"),
             ]
         if column in numeric:
-            finite = b.is_not_null() & c.is_not_null()
-            for expr, dtype in ((b, left[column]), (c, right[column])):
-                if dtype.is_float():
-                    finite = finite & expr.is_finite()
+            finite = _finite(b, c, left[column], right[column])
             gap = _difference(b, c, left[column], right[column])
             differing = finite & (gap != 0)
             relative = gap.cast(pl.Float64) / b.cast(pl.Float64).abs()
@@ -214,10 +220,7 @@ def _describe(
             pending = ~_settled(b, c, left[column], right[column], rtol, atol)
             gap = _difference(b, c, left[column], right[column])
             magnitude = fresh_internal("magnitude", [*plan.baseline_schema, *matched.names[column]])
-            finite = b.is_not_null() & c.is_not_null()
-            for expr, dtype in ((b, left[column]), (c, right[column])):
-                if dtype.is_float():
-                    finite = finite & expr.is_finite()
+            finite = _finite(b, c, left[column], right[column])
             candidates = inputs.collect(
                 matched.plan.filter(pending.fill_null(True) & finite)
                 .with_columns(gap.alias(magnitude))

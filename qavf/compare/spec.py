@@ -14,12 +14,10 @@ from collections import Counter
 from decimal import Decimal
 from typing import Any, Literal
 
-import polars as pl
 from pydantic import Field, field_validator, model_validator
 
 from qavf.engine.registry import RuleParams
 from qavf.engine.severity import Severity
-from qavf.redaction import exception_details
 from qavf.rules.regression_checks import ColumnTolerance
 from qavf.settings import DType, NumericBound, _check_where
 
@@ -32,14 +30,6 @@ DEFAULT_LEVELS = ("structure", "coverage", "records")
 
 def _repeated(values: list[str] | tuple[str, ...]) -> list[str]:
     return sorted(value for value, count in Counter(values).items() if count > 1)
-
-
-def check_expression(expression: str, what: str) -> None:
-    """Compile a Polars SQL expression with the engine that evaluates it."""
-    try:
-        pl.sql_expr(expression)
-    except Exception as exc:
-        raise ValueError(f"invalid {what} {expression!r}: {exception_details(exc)}") from None
 
 
 class CastSpec(RuleParams):
@@ -223,7 +213,7 @@ class ComparisonSpec(RuleParams):
     @classmethod
     def _expressions(cls, value: dict[str, str]) -> dict[str, str]:
         for name, expression in value.items():
-            check_expression(expression, f"derived column {name!r} expression")
+            _check_where(expression, f"derived column {name!r} expression")
         return value
 
     @model_validator(mode="after")

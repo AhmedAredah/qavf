@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import heapq
 import json
 import math
 from collections.abc import Callable, Iterator
@@ -13,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 from qavf.key_codec import canonical_key
-from qavf.rules.helpers import annotate, fresh_internal
+from qavf.rules.helpers import LargestEvidence, annotate, fresh_internal
 from qavf.statistics.ordered import OutlierModel, fit_outliers, scaled
 from qavf.stats import DEFAULT_THRESHOLDS, OutlierMethod, checked_float_series, minimum_samples
 from qavf.typed_values import encode_temporal
@@ -212,7 +211,7 @@ def scan_target(
             )
             offset += original.height
         _fit_groups(store, target, method, threshold, min_group_size)
-        best: list[tuple[float, int, dict[str, Any]]] = []
+        best = LargestEvidence(evidence_limit)
         offset = 0
         for original in observation.batches():
             source = normalize(ctx, target.dataset, original, columns)
@@ -270,9 +269,7 @@ def scan_target(
                         continue
                 result.outliers += 1
                 ordinal = offset + index
-                if evidence_limit and (
-                    len(best) < evidence_limit or (abs(score), -ordinal) > best[0][:2]
-                ):
+                if best.admits(abs(score), ordinal):
                     record = original.row(index, named=True)
                     record[row_name] = ordinal
                     fields = {
@@ -285,14 +282,8 @@ def scan_target(
                         fields["log_value"] = transformed
                     if relative is not None:
                         fields["relative_deviation"] = relative
-                    item = (abs(score), -ordinal, annotate(record, **fields))
-                    if len(best) < evidence_limit:
-                        heapq.heappush(best, item)
-                    else:
-                        heapq.heapreplace(best, item)
+                    best.add(abs(score), ordinal, annotate(record, **fields))
             offset += original.height
-        result.records = [
-            row for _, _, row in sorted(best, key=lambda item: item[:2], reverse=True)
-        ]
+        result.records = best.records
 
     return result

@@ -9,7 +9,6 @@ top-k membership changes are reported as rank changes.
 
 from __future__ import annotations
 
-import heapq
 from collections.abc import Iterator
 from fractions import Fraction
 from typing import Any, ClassVar, Literal
@@ -17,21 +16,16 @@ from typing import Any, ClassVar, Literal
 import polars as pl
 from pydantic import Field, model_validator
 
-from qavf.compare.comparators import (
-    COMPARATORS,
-    ComparatorContext,
-    Materiality,
-    exact_value,
-    presented,
-)
+from qavf.compare.comparators import COMPARATORS, ComparatorContext, Materiality
 from qavf.compare.levels import SIDES, ComparisonLevel, LevelInputs, graded, register_level
 from qavf.compare.measures import MEASURES, MeasureInput
 from qavf.compare.results import GroupsResult, LevelResult, MeasureComparison, RankChange
 from qavf.compare.spec import ComparisonSpec, Side, _Configured
 from qavf.engine.registry import RuleParams
 from qavf.keys import align_keys
+from qavf.numeric import exact_rational, report_number
 from qavf.rules._grouped import grouped_reduce
-from qavf.rules.helpers import BoundedEvidence, fresh_internal, plural
+from qavf.rules.helpers import LargestEvidence, fresh_internal, plural
 
 
 class MeasureSpec(_Configured):
@@ -137,31 +131,6 @@ def _materiality(spec: ComparisonSpec, params: GroupsParams, measure: MeasureSpe
 def _rows(frame: pl.DataFrame, columns: list[str]) -> Iterator[tuple[Any, ...]]:
     for batch in frame.select(columns).iter_slices(16_384):
         yield from batch.iter_rows()
-
-
-class _Leaders:
-    """The ``limit`` records with the largest magnitude, ties in group order."""
-
-    def __init__(self, limit: int) -> None:
-        self.limit = limit
-        self.heap: list[tuple[float, int, dict[str, Any]]] = []
-        self.count = 0
-
-    def add(self, magnitude: float, position: int, record: dict[str, Any]) -> None:
-        self.count += 1
-        if not self.limit:
-            return
-        item = (magnitude, -position, record)
-        if len(self.heap) < self.limit:
-            heapq.heappush(self.heap, item)
-        elif item[:2] > self.heap[0][:2]:
-            heapq.heapreplace(self.heap, item)
-
-    def into(self, evidence: BoundedEvidence) -> BoundedEvidence:
-        for _, _, record in sorted(self.heap, key=lambda item: (-item[0], -item[1])):
-            evidence.append(record)
-        evidence.count = self.count
-        return evidence
 
 
 @register_level
@@ -288,28 +257,30 @@ class GroupsLevel(ComparisonLevel):
         if "share_change" in spec.comparators:
             totals = []
             for column in (left, right):
-                values = (exact_value(value) for (value,) in _rows(both, [column]))
+                values = (exact_rational(value) for (value,) in _rows(both, [column]))
                 totals.append(sum((v for v in values if v is not None), Fraction(0)))
             context = ComparatorContext(totals[0], totals[1])
-        leaders = _Leaders(inputs.ctx.evidence_limit)
+        leaders = LargestEvidence(inputs.ctx.evidence_limit)
         material = 0
         for position, row in enumerate(_rows(both, [*group_by, left, right])):
             *keys, before, after = row
             if not materiality.material(before, after):
                 continue
             material += 1
-            b, c = exact_value(before), exact_value(after)
+            b, c = exact_rational(before), exact_rational(after)
             record: dict[str, Any] = dict(zip(group_by, keys, strict=True))
             record["measure"] = spec.label
-            record["baseline"] = presented(b) if b is not None else before
-            record["candidate"] = presented(c) if c is not None else after
+            record["baseline"] = report_number(b) if b is not None else before
+            record["candidate"] = report_number(c) if c is not None else after
             magnitude = 0.0
             if b is not None and c is not None:
                 for name, comparator in comparators:
-                    record[name] = presented(comparator.compare(b, c, context))
-                magnitude = float(presented(abs(c - b)) or 0)
+                    record[name] = report_number(comparator.compare(b, c, context))
+                magnitude = float(report_number(abs(c - b)) or 0)
             leaders.add(magnitude, position, record)
-        evidence = leaders.into(inputs.evidence())
+        evidence = inputs.evidence()
+        evidence.extend(leaders.records)
+        evidence.count = material
         comparison = MeasureComparison(
             label=spec.label,
             measure=spec.measure,
@@ -347,7 +318,7 @@ class GroupsLevel(ComparisonLevel):
         for side in SIDES:
             frame = frames[side]
             ordering = [
-                None if (value := exact_value(v)) is None else float(value)
+                None if (value := exact_rational(v)) is None else float(value)
                 for v in frame[alias].to_list()
             ]
             top = (

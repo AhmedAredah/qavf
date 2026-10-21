@@ -5,6 +5,7 @@ Public API for rule authors; the built-in rules use the same functions.
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -444,6 +445,37 @@ def normalize_missing(
         .alias(column)
         for column in (frame.columns if columns is None else columns)
     )
+
+
+@dataclass(slots=True)
+class LargestEvidence:
+    """Retain the ``limit`` records of largest magnitude; ties keep the earliest ordinal.
+
+    Callers test :meth:`admits` before building a record, so evidence for values
+    that cannot enter the bounded heap is never constructed.
+    """
+
+    limit: int
+    _heap: list[tuple[float, int, dict[str, Any]]] = field(default_factory=list)
+
+    def admits(self, magnitude: float, ordinal: int) -> bool:
+        if not self.limit:
+            return False
+        return len(self._heap) < self.limit or (magnitude, -ordinal) > self._heap[0][:2]
+
+    def add(self, magnitude: float, ordinal: int, record: dict[str, Any]) -> None:
+        if not self.admits(magnitude, ordinal):
+            return
+        item = (magnitude, -ordinal, record)
+        if len(self._heap) < self.limit:
+            heapq.heappush(self._heap, item)
+        else:
+            heapq.heapreplace(self._heap, item)
+
+    @property
+    def records(self) -> list[dict[str, Any]]:
+        """Retained records, largest magnitude first, then in ordinal order."""
+        return [row for _, _, row in sorted(self._heap, key=lambda item: item[:2], reverse=True)]
 
 
 @dataclass(slots=True)

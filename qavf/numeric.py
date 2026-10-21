@@ -33,6 +33,40 @@ def numeric_close(a: Any, b: Any, rtol: float = 0, atol: float = 0) -> bool:
     return abs(x - y) <= max(absolute, relative * max(abs(x), abs(y)))
 
 
+def exact_rational(value: Any) -> Fraction | None:
+    """The exact rational of a finite number or canonical rational string.
+
+    Rational strings (``"7/2"``) are how exact reducers return non-integer
+    results; ``None`` stands for a missing, non-finite or non-numeric value.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, Decimal) and not value.is_finite():
+        return None
+    if isinstance(value, int | float | Decimal | Fraction):
+        return Fraction(value)
+    if isinstance(value, str):
+        try:
+            return Fraction(value)
+        except ValueError:
+            return None
+    return None
+
+
+def report_number(value: Fraction | float | None) -> int | float | None:
+    """A rational for reports: integers stay exact, other values round once."""
+    if value is None or isinstance(value, float):
+        return value
+    if value.denominator == 1:
+        return value.numerator
+    try:
+        return float(value)
+    except OverflowError:
+        return math.inf if value > 0 else -math.inf
+
+
 def checked_float(value: int | float | Decimal) -> float:
     """Convert finite exact data only when its stored value is representable."""
     result = float(value)
