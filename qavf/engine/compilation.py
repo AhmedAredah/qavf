@@ -177,9 +177,13 @@ def check_config_keys(settings: QAVFSettings) -> None:
 
 
 def plugin_status(registry: RuleRegistry, sources: SourceRegistry) -> dict[str, str]:
-    """Every entry point tried, as ``rules:name`` / ``sources:name`` -> status."""
+    """Every entry point tried, as ``rules:name`` / ``sources:name`` /
+    ``compare.<kind>:name`` -> status."""
+    from qavf.compare.registry import plugin_status as comparison_status
+
     status = {f"rules:{name}": state for name, state in getattr(registry, "plugins", {}).items()}
     status |= {f"sources:{name}": state for name, state in getattr(sources, "plugins", {}).items()}
+    status |= comparison_status(use_entry_points=False)
     return {key: redact_text(value) for key, value in sorted(status.items())}
 
 
@@ -189,10 +193,14 @@ def check_required_plugins(
     required = settings.plugins.required
     if not required:
         return
+    if settings.plugins.entry_points:
+        from qavf.compare.registry import plugin_status as comparison_status
+
+        comparison_status()  # discover comparison components before judging them
     status = plugin_status(registry, sources)
     problems: dict[str, str] = {}
     for required_name in required:
-        qualified = required_name.startswith(("rules:", "sources:"))
+        qualified = required_name.startswith(("rules:", "sources:", "compare."))
         components = {
             name: state
             for name, state in status.items()

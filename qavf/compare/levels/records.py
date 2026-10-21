@@ -1,0 +1,366 @@
+"""Records: keyed match of rows, change counts, magnitudes and transitions.
+
+Row classification and the changed-value decision are the regression engine's
+exact keyed comparison (``qavf.regression``): the same key policy, tolerance
+arithmetic and per-column counts as REG-001. Additional descriptions (null/NaN
+transitions, difference magnitudes, categorical transitions and the largest
+changes) are native reductions over the matched pairs; only bounded results
+reach Python.
+"""
+
+from __future__ import annotations
+
+from typing import Any, ClassVar
+
+import polars as pl
+from pydantic import Field
+
+from qavf.compare.levels import ComparisonLevel, LevelInputs, graded, register_level
+from qavf.compare.results import ColumnChanges, LevelResult, RecordsResult, Transition
+from qavf.engine.registry import RuleParams
+from qavf.keys import key_casts
+from qavf.regression._indexed import ProjectedInput, compare_indexed, supported
+from qavf.regression._numeric import _difference_size, _settled, numbers_close
+from qavf.regression._plan import ComparisonPlan, comparison_plan
+from qavf.regression._schema import _nested
+from qavf.regression.compare_outputs import _compare_projected
+from qavf.regression.models import ComparisonResult, SchemaPolicy
+from qavf.rules.helpers import fresh_internal, plural
+from qavf.typed_values import encode_temporal
+
+
+class RecordsParams(RuleParams):
+    """Parameters of the ``records`` level."""
+
+    allow_added: bool = False
+    """Rows only in the candidate are acceptable."""
+    allow_removed: bool = False
+    """Rows only in the baseline are acceptable."""
+    schema_policy: SchemaPolicy = Field(default="compatible", alias="schema")
+    """``schema`` in configuration: columns whose types differ in kind are not
+    value-compared (the structure level reports them)."""
+    top_n: int = Field(default=10, ge=0)
+    """Largest numeric changes kept per column as evidence."""
+    max_transitions: int = Field(default=20, ge=0)
+    """Most frequent value transitions kept per categorical column."""
+    categorical: tuple[str, ...] | None = None
+    """Columns whose value transitions are counted; text, categorical and boolean
+    columns when omitted."""
+
+
+def _categorical(dtype: pl.DataType) -> bool:
+    return dtype in (pl.String, pl.Boolean) or isinstance(dtype, pl.Categorical | pl.Enum)
+
+
+def _difference(b: pl.Expr, c: pl.Expr, db: pl.DataType, dc: pl.DataType) -> pl.Expr:
+    """Exact ``|c - b|`` for integers and decimals; binary64 when a float is involved."""
+    if db.is_integer() and dc.is_integer():
+        return (c.cast(pl.Int128) - b.cast(pl.Int128)).abs()
+    if not (db.is_float() or dc.is_float()):
+        scale = max(
+            (dtype.scale or 0) if isinstance(dtype, pl.Decimal) else 0 for dtype in (db, dc)
+        )
+        return (c.cast(pl.Decimal(38, scale)) - b.cast(pl.Decimal(38, scale))).abs()
+    return (c.cast(pl.Float64) - b.cast(pl.Float64)).abs()
+
+
+def _keyed(inputs: LevelInputs, plan: ComparisonPlan) -> ComparisonResult:
+    baseline, candidate = inputs.observations["baseline"], inputs.observations["candidate"]
+    if supported(plan):
+        with inputs.ctx.work_store("comparison record alignment") as store:
+            return compare_indexed(
+                store,
+                ProjectedInput(baseline, plan.shared),
+                ProjectedInput(candidate, plan.shared),
+                plan,
+            )
+    columns = list(plan.shared)
+    return _compare_projected(
+        plan,
+        inputs.collect(inputs.scan("baseline").select(columns)),
+        inputs.collect(inputs.scan("candidate").select(columns)),
+        execution="projected_fallback",
+        fallback_reason="opaque Object columns need an eager comparison",
+    )
+
+
+class _Matched:
+    """Matched pairs as one native join, with collision-free side column names."""
+
+    def __init__(self, inputs: LevelInputs, plan: ComparisonPlan, columns: list[str]) -> None:
+        keys = list(plan.keys)
+        left, right = plan.baseline_schema, plan.candidate_schema
+        taken = [*left, *right]
+        self.names: dict[str, tuple[str, str]] = {}
+        for column in columns:
+            before = fresh_internal(f"baseline_{column}", taken)
+            taken.append(before)
+            after = fresh_internal(f"candidate_{column}", taken)
+            taken.append(after)
+            self.names[column] = (before, after)
+        casts: tuple[dict[str, pl.DataType], dict[str, pl.DataType]] = ({}, {})
+        for key in keys:
+            # The keyed comparison has already proven any cross-type alignment exact.
+            to_left, to_right = key_casts(key, left[key], right[key], exact_float=lambda: True)
+            if to_left is not None:
+                casts[0][key] = to_left
+            if to_right is not None:
+                casts[1][key] = to_right
+        sides = []
+        for index, side in enumerate(("baseline", "candidate")):
+            sides.append(
+                inputs.scan(side)  # type: ignore[arg-type]
+                .select([*keys, *columns])
+                .with_columns(pl.col(key).cast(dtype) for key, dtype in casts[index].items())
+                .rename({column: self.names[column][index] for column in columns})
+            )
+        self.plan = sides[0].join(sides[1], on=keys, how="inner", nulls_equal=True)
+        self.keys = keys
+
+    def pair(self, column: str) -> tuple[pl.Expr, pl.Expr]:
+        b, c = self.names[column]
+        return pl.col(b), pl.col(c)
+
+
+def _describe(
+    inputs: LevelInputs,
+    plan: ComparisonPlan,
+    params: RecordsParams,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    """Per-column transition counts, magnitudes, categorical transitions and top changes."""
+    left, right = plan.baseline_schema, plan.candidate_schema
+    columns = [c for c in plan.values if not (_nested(left[c]) or _nested(right[c]))]
+    stats: dict[str, dict[str, Any]] = {column: {} for column in plan.values}
+    if not columns:
+        return stats, []
+    matched = _Matched(inputs, plan, columns)
+    reductions: list[pl.Expr] = []
+    numeric = [c for c in columns if left[c].is_numeric() and right[c].is_numeric()]
+    for index, column in enumerate(columns):
+        b, c = matched.pair(column)
+        reductions += [
+            (b.is_null() & c.is_not_null()).sum().alias(f"n2v{index}"),
+            (b.is_not_null() & c.is_null()).sum().alias(f"v2n{index}"),
+        ]
+        if left[column].is_float() or right[column].is_float():
+            bn = b.is_nan().fill_null(False) if left[column].is_float() else pl.lit(False)
+            cn = c.is_nan().fill_null(False) if right[column].is_float() else pl.lit(False)
+            reductions += [
+                (bn & ~cn & c.is_not_null()).sum().alias(f"nan2v{index}"),
+                (~bn & b.is_not_null() & cn).sum().alias(f"v2nan{index}"),
+            ]
+        if column in numeric:
+            finite = b.is_not_null() & c.is_not_null()
+            for expr, dtype in ((b, left[column]), (c, right[column])):
+                if dtype.is_float():
+                    finite = finite & expr.is_finite()
+            gap = _difference(b, c, left[column], right[column])
+            differing = finite & (gap != 0)
+            relative = gap.cast(pl.Float64) / b.cast(pl.Float64).abs()
+            reductions += [
+                gap.filter(differing).max().alias(f"abs{index}"),
+                relative.filter(differing & (b != 0)).max().alias(f"rel{index}"),
+            ]
+    row = inputs.collect(matched.plan.select(reductions)).row(0, named=True)
+    for index, column in enumerate(columns):
+        stats[column] = {
+            "null_to_value": int(row[f"n2v{index}"] or 0),
+            "value_to_null": int(row[f"v2n{index}"] or 0),
+            "nan_to_value": int(row.get(f"nan2v{index}") or 0),
+            "value_to_nan": int(row.get(f"v2nan{index}") or 0),
+        }
+        if column in numeric:
+            largest = row[f"abs{index}"]
+            stats[column]["max_abs_diff"] = None if largest is None else float(largest)
+            stats[column]["max_rel_diff"] = row[f"rel{index}"]
+    selected = params.categorical
+    categorical = [
+        c
+        for c in columns
+        if (
+            c in selected
+            if selected is not None
+            else _categorical(left[c]) and _categorical(right[c])
+        )
+    ]
+    if selected is not None and (unknown := sorted(set(selected) - set(columns))):
+        raise ValueError(f"categorical names column(s) not compared: {', '.join(unknown)}")
+    for column in categorical:
+        b, c = matched.pair(column)
+        names = matched.names[column]
+        count = fresh_internal("transitions", [*names, *matched.keys])
+        transitions = (
+            matched.plan.filter(b.ne_missing(c))
+            .group_by(list(names))
+            .agg(pl.len().cast(pl.UInt64).alias(count))
+        )
+        stats[column]["distinct_transitions"] = int(
+            inputs.collect(transitions.select(pl.len())).item()
+        )
+        top = inputs.collect(
+            transitions.sort(
+                [count, *names], descending=[True, False, False], nulls_last=True
+            ).head(params.max_transitions)
+        )
+        top = encode_temporal(top)
+        stats[column]["transitions"] = [
+            Transition(baseline=x, candidate=y, count=n) for x, y, n in top.iter_rows()
+        ]
+    changes: list[dict[str, Any]] = []
+    if params.top_n:
+        for column in numeric:
+            b, c = matched.pair(column)
+            rtol, atol = plan.tolerance(column)
+            pending = ~_settled(b, c, left[column], right[column], rtol, atol)
+            gap = _difference(b, c, left[column], right[column])
+            magnitude = fresh_internal("magnitude", [*plan.baseline_schema, *matched.names[column]])
+            finite = b.is_not_null() & c.is_not_null()
+            for expr, dtype in ((b, left[column]), (c, right[column])):
+                if dtype.is_float():
+                    finite = finite & expr.is_finite()
+            candidates = inputs.collect(
+                matched.plan.filter(pending.fill_null(True) & finite)
+                .with_columns(gap.alias(magnitude))
+                .sort([magnitude, *matched.keys], descending=[True, *[False] * len(matched.keys)])
+                .head(4 * params.top_n + 16)
+                .select([*matched.keys, *matched.names[column]])
+            )
+            kept = 0
+            for record in encode_temporal(candidates, matched.keys).iter_rows(named=True):
+                before, after = (
+                    record.pop(matched.names[column][0]),
+                    record.pop(matched.names[column][1]),
+                )
+                if numbers_close(before, after, rtol, atol):
+                    continue
+                absolute_size, relative_size = _difference_size(before, after)
+                changes.append(
+                    {
+                        "column": column,
+                        **record,
+                        "baseline": before,
+                        "candidate": after,
+                        "abs_diff": absolute_size,
+                        "rel_diff": relative_size,
+                    }
+                )
+                kept += 1
+                if kept == params.top_n:
+                    break
+    return stats, changes
+
+
+@register_level
+class RecordsLevel(ComparisonLevel):
+    """Rows added, removed, changed and unchanged, with per-column change detail."""
+
+    name: ClassVar[str] = "records"
+    description: ClassVar[str] = (
+        "Keyed match of rows: added, removed, changed and unchanged rows; per-column "
+        "change counts, rates and magnitudes; null/NaN and categorical transitions; the "
+        "largest changes as evidence."
+    )
+    Params: ClassVar[type[RuleParams]] = RecordsParams
+    Result: ClassVar[type[LevelResult]] = RecordsResult
+    requires_keys: ClassVar[bool] = True
+
+    def evaluate(self, inputs: LevelInputs, name: str) -> RecordsResult:
+        params: RecordsParams = self.params  # type: ignore[assignment]
+        spec = inputs.spec
+        left, right = inputs.schema("baseline"), inputs.schema("candidate")
+        present = set(left) | set(right)
+        plan = comparison_plan(
+            left,
+            right,
+            spec.keys,
+            rtol=spec.rtol,
+            atol=spec.atol,
+            ignore_columns=[c for c in spec.ignore_columns if c in present],
+            max_differences=inputs.ctx.evidence_limit,
+            max_evidence_bytes=inputs.ctx.evidence_bytes,
+            name=name,
+            column_tolerances={c: spec.tolerance(c) for c in spec.tolerances if c in present},
+            schema=params.schema_policy,
+        )
+        result = _keyed(inputs, plan)
+        stats, changes = _describe(inputs, plan, params)
+        matched = result.baseline_rows - result.rows_removed
+        columns = [
+            ColumnChanges(
+                column=column,
+                changed=result.column_changes.get(column, 0),
+                rate=result.column_changes.get(column, 0) / matched if matched else None,
+                **stats[column],
+            )
+            for column in plan.values
+        ]
+        rows = inputs.evidence()
+        values = inputs.evidence()
+        values.extend(changes)
+        numeric = {record["column"] for record in changes}
+        for difference in result.differences:
+            record = {"kind": difference.kind, **difference.key}
+            if difference.kind in ("row_added", "row_removed"):
+                rows.append(record)
+            elif difference.kind == "value_changed" and difference.column not in numeric:
+                values.append(
+                    {
+                        "column": difference.column,
+                        **difference.key,
+                        "baseline": difference.baseline,
+                        "candidate": difference.candidate,
+                    }
+                )
+        # Counts are complete even where evidence above was capped.
+        rows.count = result.rows_added + result.rows_removed
+        values.count = result.values_changed
+        one_sided = (0 if params.allow_removed else result.rows_removed) + (
+            0 if params.allow_added else result.rows_added
+        )
+        not_compared = [c for c in plan.dtypes_changed if c not in plan.values]
+        checks = [
+            graded(
+                "rows",
+                one_sided,
+                f"Every row matches by key ({matched:,} rows).",
+                f"{plural(result.rows_removed, 'row')} removed, "
+                f"{plural(result.rows_added, 'row')} added.",
+                evidence=rows,
+                total=matched + result.rows_added + result.rows_removed,
+                unit="rows",
+            ),
+            graded(
+                "values",
+                result.values_changed,
+                f"Matched rows agree within tolerance ({len(plan.values)} column(s)).",
+                f"{plural(result.values_changed, 'value')} changed in "
+                f"{plural(result.rows_changed, 'row')}: "
+                + ", ".join(
+                    f"{column} ({count:,})" for column, count in result.column_changes.items()
+                ),
+                evidence=values,
+                total=matched * len(plan.values),
+                unit="values",
+                metrics={
+                    "column_changes": dict(result.column_changes),
+                    "not_compared": not_compared,
+                    "max_abs_diff": result.max_abs_diff,
+                    "max_rel_diff": result.max_rel_diff,
+                    "nonfinite_changes": result.nonfinite_changes,
+                },
+            ),
+        ]
+        return RecordsResult(
+            level=self.name,
+            name=name,
+            checks=checks,
+            keys=list(plan.keys),
+            matched=matched,
+            rows_added=result.rows_added,
+            rows_removed=result.rows_removed,
+            rows_changed=result.rows_changed,
+            rows_unchanged=matched - result.rows_changed,
+            values_changed=result.values_changed,
+            columns=columns,
+            execution=result.execution,
+        )

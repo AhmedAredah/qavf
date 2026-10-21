@@ -20,6 +20,8 @@ from qavf._version import __version__
 
 if TYPE_CHECKING:
     from qavf.api import validate
+    from qavf.compare.api import compare_datasets
+    from qavf.compare.results import DatasetComparison
     from qavf.engine.compilation import ConfigurationError, build_registry
     from qavf.engine.context import DataContext
     from qavf.engine.planning import DataRequirements
@@ -47,6 +49,7 @@ _EXPORTS = {
     "DataContext": "qavf.engine.context",
     "DataRequirements": "qavf.engine.planning",
     "DataSource": "qavf.sources",
+    "DatasetComparison": "qavf.compare.results",
     "Dataset": "qavf.inputs.descriptors",
     "ExecutionLimitError": "qavf.execution.errors",
     "File": "qavf.inputs.descriptors",
@@ -67,6 +70,7 @@ _EXPORTS = {
     "Status": "qavf.engine.severity",
     "assert_outputs_match": "qavf.regression.compare_outputs",
     "build_registry": "qavf.engine.compilation",
+    "compare_datasets": "qavf.compare.api",
     "compare_frames": "qavf.regression.compare_outputs",
     "compare_outputs": "qavf.regression.compare_outputs",
     "load_settings": "qavf.settings",
@@ -84,6 +88,7 @@ __all__ = [
     "DataRequirements",
     "DataSource",
     "Dataset",
+    "DatasetComparison",
     "ExecutionLimitError",
     "File",
     "Finding",
@@ -104,6 +109,7 @@ __all__ = [
     "__version__",
     "assert_outputs_match",
     "build_registry",
+    "compare_datasets",
     "compare_frames",
     "compare_outputs",
     "load_settings",

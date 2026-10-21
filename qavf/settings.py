@@ -822,9 +822,12 @@ class PluginSettings(_Strict):
     paths: list[Path] = Field(default_factory=list)
     """Stand-alone ``.py`` files (or directories of them) scanned for rules."""
     entry_points: bool = True
-    """Also load plugins advertised under the ``qavf.rules`` / ``qavf.sources`` groups."""
+    """Also load plugins advertised under the ``qavf.rules`` / ``qavf.sources`` groups.
+    Comparison components (``qavf.compare.*`` groups) load when first used."""
     required: list[str] = Field(default_factory=list)
-    """Required entry-point names, or qualified names such as ``rules:moves``.
+    """Required entry-point names, or qualified names such as ``rules:moves`` or
+    ``compare.levels:spatial`` (also ``compare.measures``, ``compare.comparators``,
+    ``compare.alignment``).
     Every advertised component of an unqualified name must load; at least one
     must exist. Missing or broken components stop the run with a configuration error."""
 

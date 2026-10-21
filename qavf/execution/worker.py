@@ -85,6 +85,19 @@ def run(request_path: Path | str, result_path: Path | str, control: dict[str, An
                     raise ValueError(f"comparison source identity changed: {failures}")
             comparison = comparison.model_copy(update={"execution_limits": usage})
             chunks = _iter_snapshot_json(comparison)
+        elif control["operation"] == "compare_datasets":
+            from qavf.compare.engine import compare_in_context
+            from qavf.compare.spec import ComparisonSpec
+
+            spec = ComparisonSpec.model_validate(options["comparison"])
+            with DataContext.from_settings(
+                local, frames, threads=local.engine.native_threads, execution_workers=1
+            ) as context:
+                outcome = compare_in_context(context, spec)
+                if failures := context.verify_inputs():
+                    raise ValueError(f"comparison source identity changed: {failures}")
+            outcome = outcome.model_copy(update={"execution_limits": usage})
+            chunks = _iter_snapshot_json(outcome)
         else:
             raise ValueError("unknown isolated operation")
         write_result(result_path, chunks, int(control["max_report_bytes"]))

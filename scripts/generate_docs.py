@@ -1,4 +1,4 @@
-"""Regenerate docs/rules.md and docs/sources.md from the code.
+"""Regenerate docs/rules.md, docs/sources.md and docs/comparison_reference.md from the code.
 
 uv run python scripts/generate_docs.py          # write
 uv run python scripts/generate_docs.py --check  # exit 1 if out of date
@@ -14,7 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from qavf.docgen import rules_markdown, sources_markdown  # noqa: E402
+from qavf.compare import ALIGNMENT_STEPS, COMPARATORS, LEVELS, MEASURES  # noqa: E402
+from qavf.docgen import comparison_markdown, rules_markdown, sources_markdown  # noqa: E402
 from qavf.sources import SourceRegistry  # noqa: E402
 from qavf.testing import discovered_rules  # noqa: E402
 
@@ -27,6 +28,15 @@ def pages() -> dict[Path, str]:
         DOCS / "rules.md": rules_markdown(discovered_rules(entry_points=False), "Built-in rules"),
         DOCS / "sources.md": sources_markdown(
             SourceRegistry().discover(use_entry_points=False), "Built-in sources"
+        ),
+        DOCS / "comparison_reference.md": comparison_markdown(
+            {
+                "Levels": LEVELS.discover(use_entry_points=False),
+                "Measures": MEASURES.discover(use_entry_points=False),
+                "Comparators": COMPARATORS.discover(use_entry_points=False),
+                "Alignment steps": ALIGNMENT_STEPS.discover(use_entry_points=False),
+            },
+            "Built-in comparison components",
         ),
     }
 

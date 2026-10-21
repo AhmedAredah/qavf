@@ -12,6 +12,8 @@ from qavf.reports.models import QAReport
 from qavf.settings import QAVFSettings
 
 if TYPE_CHECKING:
+    from qavf.compare.results import DatasetComparison
+    from qavf.compare.spec import ComparisonSpec
     from qavf.regression.models import ComparisonResult
 
 
@@ -44,3 +46,20 @@ def compare_isolated(
         return ComparisonResult.model_validate_json(data)
     except (ValueError, TypeError) as exc:
         raise ExecutionLimitError("isolated worker returned an invalid comparison result") from exc
+
+
+def compare_datasets_isolated(
+    settings: QAVFSettings, frames: Mapping[str, Any], spec: ComparisonSpec
+) -> DatasetComparison:
+    from qavf.compare.results import DatasetComparison
+    from qavf.execution.supervisor import execute
+
+    inputs = isolated_inputs(frames, settings)
+    options = {"comparison": spec.model_dump(mode="python", by_alias=True)}
+    data, _ = execute(
+        settings, request_bytes(settings, inputs, options), operation="compare_datasets"
+    )
+    try:
+        return DatasetComparison.model_validate_json(data)
+    except (ValueError, TypeError) as exc:
+        raise ExecutionLimitError("isolated worker returned an invalid dataset comparison") from exc

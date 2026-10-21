@@ -4,6 +4,7 @@
 
 | ID | Category | Default severity | Name |
 |---|---|---|---|
+| [CMP-001](#cmp-001) | comparison | ERROR | Datasets compare within tolerance |
 | [GEO-001](#geo-001) | spatial | ERROR | Coordinate validity |
 | [INP-001](#inp-001) | input | CRITICAL | Datasets available |
 | [INP-002](#inp-002) | input | CRITICAL | Schema conformance |
@@ -32,6 +33,108 @@
 | [TMP-006](#tmp-006) | temporal | ERROR | Cumulative series never decrease |
 | [TMP-007](#tmp-007) | temporal | WARNING | Seasonal anomalies |
 | [TMP-008](#tmp-008) | temporal | WARNING | Level shifts |
+
+## Comparison
+
+### CMP-001
+
+**Datasets compare within tolerance** · default severity `ERROR`
+
+Each configured pair of datasets (for example two versions of an output) agrees after alignment (column mapping, lossless casts, unit conversion, recoding, derived columns, filters) at each configured level: structure, key coverage, keyed records and grouped measures.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `comparisons` | `tuple[ComparisonSpec, ...]` | `[]` | Pairs of configured datasets and how to compare them. |
+
+#### `ComparisonSpec`
+
+Two datasets compared at several levels after an alignment pipeline.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str \| None` | `None` | Comparison label in reports (``baseline vs candidate`` when omitted). |
+| `baseline` | `str` | **required** | The reference dataset (e.g. the previous version). |
+| `candidate` | `str` | **required** | The dataset compared with it (e.g. the new version). |
+| `keys` | `tuple[str, ...]` | `[]` | Columns identifying a record on both sides (candidate names). Coverage and record levels need them. |
+| `columns` | `dict[str, str]` | `{}` | Baseline columns renamed in the candidate (``baseline_name: candidate_name``). |
+| `cast` | `dict[str, CastSpec]` | `{}` | Lossless type conversions; a value that would change makes the comparison not assessed. |
+| `units` | `dict[str, UnitConversion]` | `{}` |  |
+| `recode` | `dict[str, Recode]` | `{}` |  |
+| `derive` | `dict[str, str]` | `{}` | New columns computed on both sides from a Polars SQL expression. |
+| `steps` | `tuple[StepConfig, ...]` | `[]` | Further alignment steps, e.g. from plugins, applied after ``derive``. |
+| `baseline_where` | `str \| None` | `None` | Compare only baseline rows matching this Polars SQL condition. |
+| `candidate_where` | `str \| None` | `None` |  |
+| `where` | `str \| None` | `None` | Scope condition applied to both sides. |
+| `ignore_columns` | `tuple[str, ...]` | `[]` |  |
+| `rtol` | `float` | `1e-06` | Default relative tolerance for values and measures. |
+| `atol` | `float` | `1e-09` |  |
+| `tolerances` | `dict[str, ColumnTolerance]` | `{}` | Per-column tolerances, e.g. ``{share: {atol: 0.001}, code: {exact: true}}``. |
+| `levels` | `tuple[LevelConfig, ...] \| None` | `None` | Levels to compare; ``structure, coverage, records`` (``structure`` without keys). |
+| `min_rows` | `int` | `1` | Fewest aligned rows on each side for the comparison to be assessed. |
+
+#### `CastSpec`
+
+A lossless type conversion of one column (``{dtype: int}`` or just ``int``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dtype` | `Literal['int', 'float', 'decimal', 'str', 'bool', 'date', 'datetime']` | **required** |  |
+| `scale` | `int \| None` | `None` | Decimal places for ``dtype: decimal``. |
+| `side` | `Literal['baseline', 'candidate', 'both']` | `both` | Which dataset's column is converted. |
+
+#### `UnitConversion`
+
+Multiply one side's column by ``factor`` so both sides share a unit.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `factor` | `int \| Decimal \| float` | **required** | Exact for integers and decimals; a float factor means its decimal spelling. |
+| `side` | `Literal['baseline', 'candidate']` | `baseline` |  |
+| `from_unit` | `str \| None` | `None` | The unit the column must be declared in (``schema.columns.<c>.unit``), if declared. |
+| `to_unit` | `str \| None` | `None` | The unit after conversion, compared with the other side's declared unit. |
+
+#### `Recode`
+
+Replace categorical values, e.g. codes renamed between versions.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `values` | `dict[str, Any] \| list[tuple[Any, Any]]` | **required** | ``old: new`` (mapping keys are text; they are converted to the column type) or a list of ``[old, new]`` pairs for typed old values. |
+| `side` | `Literal['baseline', 'candidate', 'both']` | `baseline` |  |
+| `unmapped` | `Literal['keep', 'null', 'error']` | `keep` | Values without a mapping: kept (when losslessly representable), made null, or reported (the comparison is then not assessed). |
+
+#### `StepConfig`
+
+A plugin (or built-in) alignment step: ``{step: name, ...its parameters}``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `step` | `str` | **required** |  |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+#### `ColumnTolerance`
+
+A tolerance for one column of a baseline comparison.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `rtol` | `float \| None` | `None` | Relative tolerance; the baseline's (or rule's) when omitted. |
+| `atol` | `float \| None` | `None` | Absolute tolerance; the baseline's (or rule's) when omitted. |
+| `exact` | `bool` | `False` | Compare exactly (no tolerance), e.g. for identifiers or categorical codes. |
+
+#### `LevelConfig`
+
+A comparison level: ``records`` or ``{level: groups, group_by: [...], ...}``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `level` | `str` | **required** |  |
+| `name` | `str \| None` | `None` | Label in reports; the level name when omitted. |
+| `severity` | `Severity \| None` | `None` | Severity of this level's failures; the rule's when omitted. |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+*When it fails:* Decide whether each difference is intended. Start with structure and coverage (renamed, missing or new columns and keys), then the largest record and group changes. Map, convert or recode intended differences in the comparison.
+
 
 ## Input
 
@@ -325,6 +428,7 @@ One dataset and the baseline file it must match.
 | `ignore_columns` | `tuple[str, ...]` | `[]` |  |
 | `schema` | `Literal['compatible', 'strict', 'ignore']` | `compatible` | ``schema`` in configuration. How column types are compared: ``compatible`` reports changes of kind (number to text, date to datetime, a time zone added), ``strict`` any dtype change, ``ignore`` none. |
 | `columns` | `dict[str, ColumnTolerance]` | `{}` | Per-column tolerances, e.g. ``{share: {atol: 0.001}, code: {exact: true}}``, so one mixed-unit table needs no globally loose tolerance. |
+| `rename` | `dict[str, str]` | `{}` | Baseline columns renamed in the output (``baseline_name: output_name``). The baseline is compared under output names, which ``keys``, ``ignore_columns`` and ``columns`` use. A mapped column the baseline lacks makes the check not assessed. |
 
 #### `ColumnTolerance`
 
