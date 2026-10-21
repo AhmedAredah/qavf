@@ -17,6 +17,7 @@ from pydantic import model_validator
 
 from qavf.aggregation import exact_sum_expr as exact_sum_expr
 from qavf.aggregation import narrow_integer, numeric_expr
+from qavf.audit_codec import evidence_json_size
 from qavf.engine.context import DataContext, stable_order
 from qavf.engine.registry import Finding, RuleParams
 from qavf.keys import KeyTypeError as KeyTypeError
@@ -447,15 +448,38 @@ def normalize_missing(
 
 @dataclass(slots=True)
 class BoundedEvidence:
-    """Count all findings while retaining at most ``limit`` Python records."""
+    """Count all findings while retaining at most ``limit`` Python records.
+
+    With ``byte_limit``, records are also admitted only while their encoded
+    audit size fits; ``truncated`` then reports that counted records were omitted.
+    """
 
     limit: int
     records: list[dict[str, Any]] = field(default_factory=list)
     count: int = 0
+    byte_limit: int | None = None
+    bytes_used: int = 0
+
+    @property
+    def truncated(self) -> bool:
+        """Whether counted records were left out of :attr:`records`."""
+        return self.count > len(self.records)
+
+    def _admit(self, record: Mapping[str, Any]) -> bool:
+        if len(self.records) >= self.limit:
+            return False
+        if self.byte_limit is None:
+            return True
+        size = evidence_json_size(dict(record))
+        if self.bytes_used + size > self.byte_limit:
+            self.limit = len(self.records)  # later, smaller records stay out: order is kept
+            return False
+        self.bytes_used += size
+        return True
 
     def append(self, record: Mapping[str, Any]) -> None:
         self.count += 1
-        if len(self.records) < self.limit:
+        if self._admit(record):
             self.records.append(dict(record))
 
     def extend(self, records: Iterable[Mapping[str, Any]]) -> None:
@@ -465,4 +489,10 @@ class BoundedEvidence:
     def add_frame(self, frame: pl.DataFrame) -> None:
         self.count += frame.height
         remaining = max(0, self.limit - len(self.records))
-        self.records.extend(frame.head(remaining).to_dicts())
+        if self.byte_limit is None:
+            self.records.extend(frame.head(remaining).to_dicts())
+            return
+        for record in frame.head(remaining).iter_rows(named=True):
+            if not self._admit(record):
+                break
+            self.records.append(record)

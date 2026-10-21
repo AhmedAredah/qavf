@@ -7,18 +7,22 @@ projected fallback rather than substitute an approximate backend reduction.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from decimal import Decimal
+from fractions import Fraction
 
 import polars as pl
 
-from qavf.aggregation import checked_accumulator_dtype, narrow_integer
+from qavf.aggregation import checked_accumulator_dtype, narrow_integer, numeric_expr
 from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation
+from qavf.rules._exact_grouped import exact_grouped
 from qavf.rules._execution import normalized_plan
 from qavf.rules.helpers import Aggregate, fresh_internal, missing_expr
 from qavf.sources.sql import quote_identifier
+from qavf.statistics.ordered import linear_quantile, quantile_ranks
 
 
 @dataclass(frozen=True)
@@ -336,3 +340,112 @@ def grouped_aggregate(
         if how == "sum" and dtype is not None and dtype.is_integer()
         else result
     )
+
+
+def keyed_values(
+    frame: pl.DataFrame, keys: Sequence[str], alias: str, values: Sequence[str | None]
+) -> pl.DataFrame:
+    """Group keys of ``frame`` with one exact rational-string value per group."""
+    column = pl.Series(alias, list(values), dtype=pl.String)
+    return frame.select(*keys).with_columns(column) if keys else column.to_frame()
+
+
+def grouped_reduce(
+    relation: ProjectedRelation, keys: Sequence[str], expressions: Mapping[str, pl.Expr]
+) -> pl.DataFrame:
+    """Collect native per-group reductions whose backend result is already exact.
+
+    Counts, distinct counts, extrema and other dtype-preserving reductions need
+    no exact fallback. Only the G-row result crosses the collection boundary.
+    Polars plans only: SQL relations keep their own reductions.
+    """
+    if relation.lazy is None:
+        raise ValueError("grouped reductions need a Polars relation")
+    named = [expression.alias(alias) for alias, expression in expressions.items()]
+    plan = (
+        relation.lazy.group_by(list(keys), maintain_order=True).agg(named)
+        if keys
+        else relation.lazy.select(named)
+    )
+    return relation.collect_plan(plan)
+
+
+def grouped_quantile(
+    relation: ProjectedRelation,
+    keys: Sequence[str],
+    value: str,
+    alias: str,
+    probability: float | Decimal,
+) -> pl.DataFrame:
+    """Exact NumPy-linear quantiles per group as canonical rational strings.
+
+    The backend selects the two bracketing order statistics in their stored
+    dtype; interpolation is then exact (:func:`~qavf.statistics.ordered.linear_quantile`),
+    so integers beyond 2**53 and decimals are never rounded. Null and NaN are
+    missing; a group without usable values has no quantile.
+    """
+    dtype = relation.schema[value]
+    if not dtype.is_numeric() and dtype != pl.Null:
+        raise ValueError(f"quantiles require numeric values, found {dtype}")
+    exact = Fraction(str(probability))
+    if not 0 <= exact <= 1:
+        raise ValueError("quantile probabilities must lie in [0, 1]")
+    taken = [*relation.schema, alias]
+    count, low, high = (fresh_internal(name, taken) for name in ("q_count", "q_low", "q_high"))
+    measured = numeric_expr(value, dtype)
+    ordered = measured.drop_nulls().sort()
+    rank = (measured.count().cast(pl.Int64) - 1).clip(lower_bound=0) * exact.numerator
+    lower = rank // exact.denominator
+    upper = -((-rank) // exact.denominator)
+    reduced = grouped_reduce(
+        relation,
+        keys,
+        {
+            count: measured.count().cast(pl.UInt64),
+            low: ordered.slice(lower, 1).first(),
+            high: ordered.slice(upper, 1).first(),
+        },
+    )
+    results: list[str | None] = []
+    for size, a, b in reduced.select(count, low, high).iter_rows():
+        if not size:
+            results.append(None)
+            continue
+        results.append(str(linear_quantile(a, b, quantile_ranks(size, probability)[2])))
+    return keyed_values(reduced, keys, alias, results)
+
+
+def grouped_mean(
+    relation: ProjectedRelation, keys: Sequence[str], value: str, alias: str
+) -> pl.DataFrame:
+    """Exact means per group as canonical rational strings.
+
+    Integer and decimal sums use the overflow-checked native accumulator;
+    stored floats use the exact sorted-batch reducer. Division is exact. A group
+    without usable values has no mean.
+    """
+    dtype = relation.schema[value]
+    if dtype.is_float():
+        if relation.observation is None or relation.lazy is None:
+            raise ValueError("float means need a scoped observation")
+        return exact_grouped(
+            relation.ctx,
+            relation.observation,
+            relation.lazy,
+            keys,
+            value,
+            alias,
+            "mean",
+            rational=True,
+        )
+    taken = [*relation.schema, alias]
+    rows, missing = fresh_internal("mean_rows", taken), fresh_internal("mean_missing", taken)
+    sums = grouped_aggregate(
+        relation, keys, value, alias, "sum", presence_alias=rows, missing_alias=missing
+    )
+    assert sums is not None
+    results: list[str | None] = []
+    for total, size, absent in sums.select(alias, rows, missing).iter_rows():
+        usable = size - absent
+        results.append(None if total is None or not usable else str(Fraction(total) / usable))
+    return keyed_values(sums, keys, alias, results)

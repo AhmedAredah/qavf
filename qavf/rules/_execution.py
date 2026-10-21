@@ -271,18 +271,34 @@ def projected_frame(ctx: DataContext, dataset: str, columns: Iterable[str]) -> p
     return ctx.project(dataset, columns)
 
 
-def normalized_plan(ctx: DataContext, dataset: str, plan: pl.LazyFrame) -> pl.LazyFrame:
-    """Apply a source's missing-value contract to an already scoped observation."""
+def normalized_plan(
+    ctx: DataContext, dataset: str, plan: pl.LazyFrame, *, declared_only: bool = False
+) -> pl.LazyFrame:
+    """Apply a source's missing-value contract to an already scoped observation.
+
+    ``declared_only`` normalizes only columns declaring ``missing_values`` or
+    ``blank_as_missing``; other NaN values then remain observable values, as an
+    exact value comparison needs.
+    """
     schema = dict(plan.collect_schema())
     spec = ctx.specs.get(dataset)
     contracts = spec.schema_spec.columns if spec is not None and spec.schema_spec else {}
     empty = pl.DataFrame(schema=schema)
+    selected = [
+        name
+        for name in schema
+        if not declared_only
+        or (
+            name in contracts
+            and (bool(contracts[name].missing_values) or contracts[name].blank_as_missing)
+        )
+    ]
     return plan.with_columns(
         pl.when(missing_expr(empty, name, contracts.get(name)))
         .then(None)
         .otherwise(pl.col(name))
         .alias(name)
-        for name in schema
+        for name in selected
     )
 
 

@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
+from fractions import Fraction
 
 import numpy as np
 
@@ -52,6 +54,36 @@ def quantiles(rows: CountStream, size: int, probabilities: Sequence[float]) -> n
     # extreme values before this operation so subtraction cannot overflow.
     distance = b - a
     return np.where(fraction >= 0.5, b - distance * (1 - fraction), a + distance * fraction)
+
+
+def quantile_ranks(size: int, probability: float | Decimal) -> tuple[int, int, Fraction]:
+    """Zero-based order ranks bracketing NumPy's linear quantile, and the exact weight.
+
+    The rank ``(size - 1) * probability`` uses the probability's decimal spelling,
+    so ``0.9`` means nine tenths, not its nearest binary64 value.
+    """
+    if size < 1:
+        raise ValueError("quantiles require a nonempty sample")
+    exact = Fraction(str(probability))
+    if not 0 <= exact <= 1:
+        raise ValueError("quantile probabilities must lie in [0, 1]")
+    rank = (size - 1) * exact
+    lower = math.floor(rank)
+    return lower, math.ceil(rank), rank - lower
+
+
+def linear_quantile(
+    lower: int | float | Decimal, upper: int | float | Decimal, weight: Fraction
+) -> Fraction:
+    """Exact linear interpolation between two selected order statistics.
+
+    Integers, decimals and stored binary floats interpolate as rationals, so a
+    median of large integers or decimals is never rounded through binary64.
+    """
+    if not all(isinstance(value, int | float | Decimal) for value in (lower, upper)):
+        raise TypeError("quantile interpolation needs numeric order statistics")
+    a, b = Fraction(lower), Fraction(upper)
+    return a + (b - a) * weight
 
 
 def power_of_two(magnitude: float) -> float:
