@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import ClassVar
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 from qavf.compare.engine import compare_in_context
+from qavf.compare.registry import entry_point_scope, entry_points_enabled
 from qavf.compare.results import DatasetComparison
 from qavf.compare.spec import ComparisonSpec
 from qavf.engine.context import DataContext
@@ -85,6 +87,16 @@ class DatasetComparisonRule(Rule):
     )
     Params: ClassVar[type[RuleParams]] = ComparisonParams
 
+    def __init__(
+        self,
+        params: ComparisonParams | Mapping[str, Any] | None = None,
+        severity: Severity | None = None,
+    ) -> None:
+        super().__init__(params, severity)
+        # Rules evaluate on worker threads, outside the compile-time context:
+        # keep the run's plugin choice to resolve the same components there.
+        self._installed_plugins = entry_points_enabled()
+
     def configuration_errors(self, settings: QAVFSettings) -> list[str]:
         problems = []
         for spec in self.params.comparisons:
@@ -112,6 +124,7 @@ class DatasetComparisonRule(Rule):
         if not self.params.comparisons:
             return Finding.skip("No comparisons are configured.")
         findings: list[Finding] = []
-        for spec in self.params.comparisons:
-            findings.extend(comparison_findings(compare_in_context(ctx, spec), spec))
+        with entry_point_scope(self._installed_plugins):
+            for spec in self.params.comparisons:
+                findings.extend(comparison_findings(compare_in_context(ctx, spec), spec))
         return findings

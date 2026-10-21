@@ -87,12 +87,16 @@ def run(request_path: Path | str, result_path: Path | str, control: dict[str, An
             chunks = _iter_snapshot_json(comparison)
         elif control["operation"] == "compare_datasets":
             from qavf.compare.engine import compare_in_context
+            from qavf.compare.registry import entry_point_scope
             from qavf.compare.spec import ComparisonSpec
 
-            spec = ComparisonSpec.model_validate(options["comparison"])
-            with DataContext.from_settings(
-                local, frames, threads=local.engine.native_threads, execution_workers=1
-            ) as context:
+            with (
+                entry_point_scope(local.plugins.entry_points),
+                DataContext.from_settings(
+                    local, frames, threads=local.engine.native_threads, execution_workers=1
+                ) as context,
+            ):
+                spec = ComparisonSpec.model_validate(options["comparison"])
                 outcome = compare_in_context(context, spec)
                 if failures := context.verify_inputs():
                     raise ValueError(f"comparison source identity changed: {failures}")

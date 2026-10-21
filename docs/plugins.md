@@ -291,10 +291,17 @@ acme = "qavf_acme.measures"      # a module (scanned) or a single component clas
 acme = "qavf_acme.levels"
 ```
 
-Comparison entry points load when a comparison component is first looked up. Each one
-tried is recorded in `metadata.plugins` as `compare.<kind>:<name>`, a broken one leaves no
-partial registration, and `plugins.required: [compare.levels:acme]` stops a run whose
-level plugin is missing or broken.
+Comparison entry points follow `plugins.entry_points` exactly like rules and sources.
+When it is true, the `qavf.compare.*` groups load while the configuration is compiled,
+before `CMP-001` parameters are validated, so a plugin level named there resolves. When
+it is false, no installed plugin code is imported and naming a plugin component is a
+configuration error; looking components up never loads entry points by itself.
+`compare_datasets(..., entry_points=False)` makes the same choice for the Python API,
+and isolated workers apply the run's choice when they validate the configuration again.
+Each entry point tried is recorded in `metadata.plugins` as `compare.<kind>:<name>`, a
+broken one leaves no partial registration, and `plugins.required: [compare.levels:acme]`
+stops a run whose level plugin is missing, broken or disabled. Components registered in
+code with the decorators (for example from `plugins.modules`) are always available.
 
 ## Packaging a plugin
 

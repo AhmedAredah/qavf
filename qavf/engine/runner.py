@@ -150,7 +150,11 @@ class QARunner:
 
     def plugin_status(self) -> dict[str, str]:
         """Every entry point tried, as ``rules:name`` / ``sources:name`` -> status."""
-        return plugin_status(self.registry, self.sources)
+        return plugin_status(
+            self.registry,
+            self.sources,
+            comparison_plugins=self.settings.plugins.entry_points,
+        )
 
     def context(
         self,

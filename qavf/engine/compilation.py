@@ -75,9 +75,21 @@ def compile_rules(
 ) -> RulePlan:
     """Instantiate the rules that will run, in ``rule_id`` order.
 
+    Comparison components from installed plugins load and resolve only when
+    ``plugins.entry_points`` is enabled; rule parameters are validated in that scope.
+
     Raises:
         ConfigurationError: for unknown rule ids or invalid rule parameters.
     """
+    from qavf.compare.registry import entry_point_scope
+
+    with entry_point_scope(settings.plugins.entry_points):
+        return _compile_rules(settings, registry, sources)
+
+
+def _compile_rules(
+    settings: QAVFSettings, registry: RuleRegistry, sources: SourceRegistry
+) -> RulePlan:
     check_config_keys(settings)
     engine = settings.engine
     check_required_plugins(settings, registry, sources)
@@ -176,14 +188,17 @@ def check_config_keys(settings: QAVFSettings) -> None:
         raise ConfigurationError(str(exc)) from None
 
 
-def plugin_status(registry: RuleRegistry, sources: SourceRegistry) -> dict[str, str]:
+def plugin_status(
+    registry: RuleRegistry, sources: SourceRegistry, *, comparison_plugins: bool = True
+) -> dict[str, str]:
     """Every entry point tried, as ``rules:name`` / ``sources:name`` /
-    ``compare.<kind>:name`` -> status."""
+    ``compare.<kind>:name`` -> status. ``comparison_plugins`` is the run's
+    ``plugins.entry_points``: a run without plugins reports no comparison plugin."""
     from qavf.compare.registry import plugin_status as comparison_status
 
     status = {f"rules:{name}": state for name, state in getattr(registry, "plugins", {}).items()}
     status |= {f"sources:{name}": state for name, state in getattr(sources, "plugins", {}).items()}
-    status |= comparison_status(use_entry_points=False)
+    status |= comparison_status(enabled=comparison_plugins)
     return {key: redact_text(value) for key, value in sorted(status.items())}
 
 
@@ -194,10 +209,10 @@ def check_required_plugins(
     if not required:
         return
     if settings.plugins.entry_points:
-        from qavf.compare.registry import plugin_status as comparison_status
+        from qavf.compare.registry import load_entry_points
 
-        comparison_status()  # discover comparison components before judging them
-    status = plugin_status(registry, sources)
+        load_entry_points()  # judge comparison components after discovering them
+    status = plugin_status(registry, sources, comparison_plugins=settings.plugins.entry_points)
     problems: dict[str, str] = {}
     for required_name in required:
         qualified = required_name.startswith(("rules:", "sources:", "compare."))

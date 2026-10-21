@@ -21,6 +21,7 @@ def compare_datasets(
     levels: Sequence[str | Mapping[str, Any]] | None = None,
     name: str | None = None,
     resources: ResourceLimits | None = None,
+    entry_points: bool = True,
     **options: Any,
 ) -> DatasetComparison:
     """Compare a candidate dataset with its baseline at several levels.
@@ -39,24 +40,45 @@ def compare_datasets(
 
     ``resources`` applies the same :class:`~qavf.ResourceLimits` as validation,
     including isolated execution for transportable file and query inputs.
+    ``entry_points`` resolves levels, measures, comparators and alignment steps
+    from installed plugins (the ``qavf.compare.*`` entry-point groups); with
+    ``False`` no installed plugin code is imported, as with
+    ``plugins.entry_points: false``.
 
     Raises:
         pydantic.ValidationError: for an invalid comparison configuration.
         SourceError: if an input is missing or its source policy cannot be satisfied.
     """
+    from qavf.compare.registry import entry_point_scope
+
+    with entry_point_scope(entry_points):
+        return _compare(
+            baseline,
+            candidate,
+            resources,
+            entry_points,
+            {
+                **options,
+                "name": name or "comparison",
+                "baseline": "baseline",
+                "candidate": "candidate",
+                "keys": [keys] if isinstance(keys, str) else list(keys),
+                "columns": dict(columns or {}),
+                "levels": None if levels is None else list(levels),
+            },
+        )
+
+
+def _compare(
+    baseline: object,
+    candidate: object,
+    resources: ResourceLimits | None,
+    entry_points: bool,
+    configuration: dict[str, Any],
+) -> DatasetComparison:
     from qavf.inputs.normalize import prepare
 
-    spec = ComparisonSpec.model_validate(
-        {
-            **options,
-            "name": name or "comparison",
-            "baseline": "baseline",
-            "candidate": "candidate",
-            "keys": [keys] if isinstance(keys, str) else list(keys),
-            "columns": dict(columns or {}),
-            "levels": None if levels is None else list(levels),
-        }
-    )
+    spec = ComparisonSpec.model_validate(configuration)
     for value in (baseline, candidate):
         if callable(getattr(value, "read_next_batch", None)):
             raise ValueError(
@@ -65,7 +87,7 @@ def compare_datasets(
     settings, frames = prepare(
         dict(zip(_SIDES, (baseline, candidate), strict=True)),
         schema=None,
-        config={"engine": {"parallel": False}, "plugins": {"entry_points": False}},
+        config={"engine": {"parallel": False}, "plugins": {"entry_points": entry_points}},
         resources=resources,
     )
     if settings.engine.execution_mode == "isolated":

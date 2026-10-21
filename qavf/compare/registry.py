@@ -7,6 +7,12 @@ plugins use; installed distributions add components through the
 discovery: duplicate entry-point names are rejected before loading, a failing
 plugin is recorded (never silently dropped) and leaves no partial registration,
 and ``plugins.required`` can insist on a component (``compare.levels:name``).
+
+Lookups never import installed plugin code. Entry points load only through
+:func:`entry_point_scope` (driven by ``plugins.entry_points``, or the
+``entry_points`` argument of :func:`~qavf.compare.compare_datasets`), and the
+components they provide are visible only inside such a scope, so a run with
+``plugins.entry_points: false`` neither imports nor resolves them.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from abc import ABC
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from importlib.metadata import entry_points
 from threading import RLock
 from types import ModuleType
@@ -29,6 +36,8 @@ from qavf.engine.registry import RuleParams, registration_transaction
 from qavf.redaction import exception_details, redact_text
 
 logger = logging.getLogger(__name__)
+
+_INSTALLED: ContextVar[bool] = ContextVar("qavf_compare_entry_points", default=False)
 
 
 class Component(ABC):
@@ -54,11 +63,13 @@ class Component(ABC):
 
 
 class ComponentRegistry[C: Component]:
-    """Component classes keyed by ``name``, discovered once per process.
+    """Component classes keyed by ``name``.
 
-    Lookups trigger discovery of the built-in modules and, unless disabled with
-    :meth:`discover`, of the entry-point group. Use :meth:`refresh` after
-    installing a distribution in a running process.
+    Built-in and in-code registrations are always visible; lookups import only
+    the built-in modules. Components from the entry-point group load once, on
+    explicit :meth:`discover` (``use_entry_points=True``), and are visible only
+    inside :func:`entry_point_scope` with plugins enabled. Use :meth:`refresh`
+    after installing a distribution in a running process.
     """
 
     def __init__(self, kind: str, group: str, base: type, builtins: Iterable[str]) -> None:
@@ -67,11 +78,14 @@ class ComponentRegistry[C: Component]:
         self.base = base
         self.builtins = tuple(builtins)
         self._components: dict[str, type[C]] = {}
+        self._installed: dict[str, type[C]] = {}
+        """Components provided by entry points, kept apart from code registrations."""
         self.plugins: dict[str, str] = {}
         """Entry points tried: ``"loaded"`` or the error."""
         self._lock = RLock()
         self._builtins_loaded = False
         self._entry_points_loaded = False
+        self._loading_entry_point = False
 
     # ------------------------------------------------------------ registration
     def register[T: type](self, component: T) -> T:
@@ -93,14 +107,15 @@ class ComponentRegistry[C: Component]:
         if not (isinstance(params, type) and issubclass(params, BaseModel)):
             raise TypeError(f"{component.__name__}.Params must be a pydantic model")
         with self._lock:
-            existing = self._components.get(name)
+            existing = self._components.get(name) or self._installed.get(name)
             if existing is not None and not _same_class(existing, component):
                 raise ValueError(
                     f"duplicate {self.kind} {name!r}: "
                     f"{existing.__module__}.{existing.__qualname__} and "
                     f"{component.__module__}.{component.__qualname__}"
                 )
-            self._components[name] = component  # type: ignore[assignment]
+            target = self._installed if self._loading_entry_point else self._components
+            target[name] = component  # type: ignore[assignment]
         return component
 
     def register_module(self, module: ModuleType) -> list[type[C]]:
@@ -121,8 +136,8 @@ class ComponentRegistry[C: Component]:
         return found
 
     # --------------------------------------------------------------- discovery
-    def discover(self, *, use_entry_points: bool = True) -> ComponentRegistry[C]:
-        """Load built-ins and (once) the entry-point group; return ``self``."""
+    def discover(self, *, use_entry_points: bool = False) -> ComponentRegistry[C]:
+        """Load the built-ins and, when asked, (once) the entry-point group."""
         with self._lock:
             if not self._builtins_loaded:
                 with self._transaction():
@@ -138,7 +153,7 @@ class ComponentRegistry[C: Component]:
         """Rescan the entry-point group (for example after installing a plugin)."""
         with self._lock:
             self._entry_points_loaded = False
-        return self.discover()
+        return self.discover(use_entry_points=True)
 
     def _discover_entry_points(self) -> None:
         entries = list(entry_points(group=self.group))
@@ -150,12 +165,16 @@ class ComponentRegistry[C: Component]:
                 continue
             try:
                 with self._transaction():
-                    loaded = entry.load()
-                    if inspect.ismodule(loaded):
-                        if not self.register_module(loaded):
-                            raise TypeError(f"the module defines no {self.kind}")
-                    else:
-                        self.register(loaded)
+                    self._loading_entry_point = True
+                    try:
+                        loaded = entry.load()
+                        if inspect.ismodule(loaded):
+                            if not self.register_module(loaded):
+                                raise TypeError(f"the module defines no {self.kind}")
+                        else:
+                            self.register(loaded)
+                    finally:
+                        self._loading_entry_point = False
             except Exception as exc:
                 message = exception_details(exc)
                 logger.error(
@@ -172,13 +191,19 @@ class ComponentRegistry[C: Component]:
     def _transaction(self) -> Iterator[None]:
         """Undo every registration a failed import made, including by decorators."""
         with self._lock:
-            before = dict(self._components)
+            before, installed = dict(self._components), dict(self._installed)
             try:
                 with registration_transaction():
                     yield
             except BaseException:
-                self._components = before
+                self._components, self._installed = before, installed
                 raise
+
+    def _visible(self) -> dict[str, type[C]]:
+        self.discover()
+        if _INSTALLED.get():
+            return {**self._installed, **self._components}
+        return self._components
 
     # ------------------------------------------------------------------ lookup
     def get(self, name: str) -> type[C]:
@@ -187,12 +212,17 @@ class ComponentRegistry[C: Component]:
         Raises:
             KeyError: naming the available components.
         """
-        self.discover()
+        visible = self._visible()
         try:
-            return self._components[name]
+            return visible[name]
         except KeyError:
-            available = ", ".join(sorted(self._components)) or "none"
-            raise KeyError(f"unknown {self.kind} {name!r}; available: {available}") from None
+            available = ", ".join(sorted(visible)) or "none"
+            hint = (
+                "; installed plugins are disabled (plugins.entry_points: false)"
+                if name in self._installed and not _INSTALLED.get()
+                else ""
+            )
+            raise KeyError(f"unknown {self.kind} {name!r}; available: {available}{hint}") from None
 
     def create(self, name: str, params: RuleParams | dict[str, Any] | None = None) -> C:
         """Instantiate a component with validated parameters.
@@ -211,21 +241,18 @@ class ComponentRegistry[C: Component]:
             raise ValueError(f"invalid {self.kind} {name!r}: {exception_details(exc)}") from None
 
     def names(self) -> list[str]:
-        """Registered names, sorted."""
-        self.discover()
-        return sorted(self._components)
+        """Visible names, sorted."""
+        return sorted(self._visible())
 
     def __iter__(self) -> Iterator[type[C]]:
-        self.discover()
-        return iter([self._components[name] for name in sorted(self._components)])
+        visible = self._visible()
+        return iter([visible[name] for name in sorted(visible)])
 
     def __contains__(self, name: object) -> bool:
-        self.discover()
-        return name in self._components
+        return name in self._visible()
 
     def __len__(self) -> int:
-        self.discover()
-        return len(self._components)
+        return len(self._visible())
 
 
 def _same_class(a: type, b: type) -> bool:
@@ -247,10 +274,43 @@ def registries() -> dict[str, ComponentRegistry[Any]]:
     }
 
 
-def plugin_status(*, use_entry_points: bool = True) -> dict[str, str]:
-    """Every comparison entry point tried, as ``compare.<kind>:name`` -> status."""
+def load_entry_points() -> None:
+    """Load every comparison entry-point group (once per process)."""
+    for registry in registries().values():
+        registry.discover(use_entry_points=True)
+
+
+@contextmanager
+def entry_point_scope(enabled: bool) -> Iterator[None]:
+    """Resolve components from installed plugins inside this context, or never.
+
+    With ``enabled``, the entry-point groups load (once) and their components
+    become visible to lookups in this context. Without it, no plugin code is
+    imported and only built-in and in-code components resolve. Contexts do not
+    cross threads: code running a comparison on another thread re-enters a scope.
+    """
+    if enabled:
+        load_entry_points()
+    token = _INSTALLED.set(enabled)
+    try:
+        yield
+    finally:
+        _INSTALLED.reset(token)
+
+
+def entry_points_enabled() -> bool:
+    """Whether the current context resolves components from installed plugins."""
+    return _INSTALLED.get()
+
+
+def plugin_status(*, enabled: bool = True) -> dict[str, str]:
+    """Comparison entry points tried, as ``compare.<kind>:name`` -> status.
+
+    Empty when plugins are disabled for the run: nothing was loaded for it.
+    """
+    if not enabled:
+        return {}
     status: dict[str, str] = {}
     for prefix, registry in registries().items():
-        registry.discover(use_entry_points=use_entry_points)
         status |= {f"{prefix}:{name}": state for name, state in registry.plugins.items()}
     return status

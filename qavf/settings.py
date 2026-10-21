@@ -824,7 +824,7 @@ class PluginSettings(_Strict):
     """Stand-alone ``.py`` files (or directories of them) scanned for rules."""
     entry_points: bool = True
     """Also load plugins advertised under the ``qavf.rules`` / ``qavf.sources`` groups.
-    Comparison components (``qavf.compare.*`` groups) load when first used."""
+    The same applies to comparison components (``qavf.compare.*`` groups)."""
     required: list[str] = Field(default_factory=list)
     """Required entry-point names, or qualified names such as ``rules:moves`` or
     ``compare.levels:spatial`` (also ``compare.measures``, ``compare.comparators``,

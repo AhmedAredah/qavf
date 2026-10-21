@@ -29,7 +29,7 @@ from qavf.compare import (
     register_level,
     register_measure,
 )
-from qavf.compare.registry import ComponentRegistry, registries
+from qavf.compare.registry import ComponentRegistry, entry_point_scope, registries
 from qavf.engine.compilation import ConfigurationError
 from qavf.engine.registry import RuleParams
 from qavf.rules._grouped import grouped_reduce
@@ -40,14 +40,14 @@ def restore_registries():
     for registry in registries().values():
         registry.discover(use_entry_points=False)
     saved = {
-        name: (dict(r._components), dict(r.plugins), r._entry_points_loaded)
+        name: (dict(r._components), dict(r._installed), dict(r.plugins), r._entry_points_loaded)
         for name, r in registries().items()
     }
     yield
     for name, registry in registries().items():
-        components, plugins, loaded = saved[name]
-        registry._components, registry.plugins = components, plugins
-        registry._entry_points_loaded = loaded
+        components, installed, plugins, loaded = saved[name]
+        registry._components, registry._installed = components, installed
+        registry.plugins, registry._entry_points_loaded = plugins, loaded
 
 
 class RangeParams(RuleParams):
@@ -182,7 +182,10 @@ def test_entry_points_load_classes_and_modules(monkeypatch):
         )
         for registry in registries().values():
             registry.refresh()
-        assert "range" in MEASURES and "doubled_diff" in COMPARATORS
+        # Installed components resolve only where plugins are enabled.
+        assert "range" not in MEASURES and "doubled_diff" not in COMPARATORS
+        with entry_point_scope(True):
+            assert "range" in MEASURES and "doubled_diff" in COMPARATORS
         assert MEASURES.plugins == {"spread": "loaded"}
         assert COMPARATORS.plugins == {"double": "loaded"}
     finally:
@@ -208,7 +211,8 @@ def test_broken_entry_points_are_recorded_and_leave_nothing_behind(monkeypatch):
         ),
     )
     LEVELS.refresh()
-    assert "row_parity" not in LEVELS
+    with entry_point_scope(True):
+        assert "row_parity" not in LEVELS
     assert LEVELS.plugins["broken"].startswith("error: ImportError")
     assert "duplicate entry-point name" in LEVELS.plugins["twice"]
     assert LEVELS.plugins["notacomponent"].startswith("error:")
