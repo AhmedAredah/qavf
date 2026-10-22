@@ -372,3 +372,16 @@ def test_results_round_trip_and_isolated_runs_agree(tmp_path):
     assert isolated.model_dump(exclude={"execution_limits"}) == local.model_dump(
         exclude={"execution_limits"}
     )
+
+
+def test_series_shape_tests_that_cannot_run_are_not_assessed():
+    baseline, candidate = _series(0.0, 0.5)
+    sites = [pl.lit("a").alias("site")]
+    levels = [{**SHAPE, "group_by": ["site"], "max_work": 10}]
+    result = compare_datasets(
+        baseline.with_columns(sites), candidate.with_columns(sites), levels=levels
+    )
+    trend = _check(result, "series_shape", "trend")
+    assert not trend.assessed and "max_work" in trend.message
+    assert trend.affected_records[0]["site"] == "a"
+    assert trend.significance.tests[0].label == "site=a"

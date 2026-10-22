@@ -60,6 +60,7 @@ from qavf.compare.results import (
     ShapeResult,
 )
 from qavf.compare.significance import Inference, MeasureTest, Member, evidence_fields, judge
+from qavf.compare.significance import label as member_label
 from qavf.compare.spec import InferenceParams, Side
 from qavf.engine.registry import RuleParams
 from qavf.inference.results import Alternative, Significance, TestResult
@@ -255,6 +256,8 @@ class _Check:
     series: list[int] = field(default_factory=list)
     significance: Significance | None = None
     results: list[TestResult | None] = field(default_factory=list)
+    unassessed: list[dict[str, Any]] = field(default_factory=list)
+    """Evidence of the series whose test could not run (bounded like ``evidence``)."""
 
     def record(
         self,
@@ -262,6 +265,7 @@ class _Check:
         record: dict[str, Any],
         series: int = -1,
         test: Callable[[], TestResult] | None = None,
+        label: str | None = None,
     ) -> None:
         """A series' threshold judgement; ``test`` (``None``: no sound test) runs lazily."""
         if self.inference is None:
@@ -270,7 +274,7 @@ class _Check:
                 self.different += 1
                 self.evidence.append(record)
             return
-        self.members.append(Member(different, None, applicable=test is not None, run=test))
+        self.members.append(Member(different, label, applicable=test is not None, run=test))
         self.records.append(record)
         self.series.append(series)
 
@@ -282,16 +286,14 @@ class _Check:
         plan = MeasureTest(method, None)
         if method == "none":
             plan = MeasureTest(method, None, False, f"no sound test for {self.name}")
-        labelled = [
-            Member(m.material, _label(r), m.data, m.problem, m.applicable, m.run)
-            for m, r in zip(self.members, self.records, strict=True)
-        ]
-        judgement = judge(plan, self.inference, labelled, limit)
+        judgement = judge(plan, self.inference, self.members, limit)
         self.results = judgement.results
         self.significance = judgement.significance
         for position, decision in enumerate(judgement.decisions):
             if not decision.assessed:
                 self.not_assessed += 1
+                if len(self.unassessed) < limit:
+                    self.unassessed.append({**self.records[position], "decision": decision.reason})
                 continue
             self.assessed += 1
             if decision.failed:
@@ -299,11 +301,6 @@ class _Check:
                 record = self.records[position]
                 result = judgement.results[position]
                 self.evidence.append({**record, **evidence_fields(result, decision)})
-
-
-def _label(record: dict[str, Any]) -> str | None:
-    keys = [key for key in record if not isinstance(record[key], dict | list)][:3]
-    return ", ".join(f"{key}={record[key]}" for key in keys) or None
 
 
 @register_level
@@ -462,6 +459,8 @@ class SeriesShapeLevel(ComparisonLevel):
                     affected_count=check.not_assessed,
                     total=check.assessed + check.not_assessed,
                     unit="series",
+                    affected_records=check.unassessed,
+                    truncated=check.not_assessed > len(check.unassessed),
                 )
             else:
                 how = "" if tests is None else f" ({tests.describe()})"
@@ -524,6 +523,7 @@ class SeriesShapeLevel(ComparisonLevel):
         xb = [b[p].value for p in common]
         xc = [c[p].value for p in common]
         flat = (_constant(xb), _constant(xc))
+        name = member_label(list(group), list(group.values()))
         seed = 0 if inference is None else inference.seed + ordinal
         work = 0 if inference is None else inference.max_work
         floats = (
@@ -564,7 +564,7 @@ class SeriesShapeLevel(ComparisonLevel):
                     )
 
             record = {**group, **found, "buckets": len(common)}
-            checks["correlation"].record(low, record, position, test)
+            checks["correlation"].record(low, record, position, test, name)
         if (trend := params.trend) is not None:
             positions = [Fraction(p) for p in common]
             before, after = (normal_equations(positions, values).slope for values in (xb, xc))
@@ -582,12 +582,16 @@ class SeriesShapeLevel(ComparisonLevel):
                     seed=seed, max_work=work,
                 )  # fmt: skip
 
-            checks["trend"].record(changed, {**group, **found, "change": change}, position, slopes)
+            checks["trend"].record(
+                changed, {**group, **found, "change": change}, position, slopes, name
+            )
         if (profile := params.profile) is not None:
             distance = _profile_distance(b, c, common)
             shape["profile_distance"] = float(distance)
             different = distance > Fraction(str(profile.max_distance))
-            checks["profile"].record(different, {**group, "distance": float(distance)}, position)
+            checks["profile"].record(
+                different, {**group, "distance": float(distance)}, position, None, name
+            )
         if (peak := params.peak) is not None:
             top_b = max(common, key=lambda p: (b[p].value, -p))
             top_c = max(common, key=lambda p: (c[p].value, -p))
@@ -603,7 +607,7 @@ class SeriesShapeLevel(ComparisonLevel):
                 "candidate_value": report_number(c[top_c].value),
             }
             checks["peak"].record(
-                abs(shift) > peak.max_shift or higher, {**group, **found}, position
+                abs(shift) > peak.max_shift or higher, {**group, **found}, position, None, name
             )
         if (lag := params.lag) is not None:
             values_b = {p: point.value for p, point in b.items()}
@@ -631,7 +635,7 @@ class SeriesShapeLevel(ComparisonLevel):
                         minimum=params.min_buckets,
                     )  # fmt: skip
 
-            checks["lag"].record(not agrees, {**group, **found}, position, gain)
+            checks["lag"].record(not agrees, {**group, **found}, position, gain, name)
         if (screen := params.level_shift) is not None:
             # TMP-008's screen in binary64 (values rounded once), on the common buckets.
             at: list[int | None] = []
@@ -650,7 +654,7 @@ class SeriesShapeLevel(ComparisonLevel):
             }
             shape["level_shifts"] = labels
             found = {"baseline_shift": labels["baseline"], "candidate_shift": labels["candidate"]}
-            checks["level shift"].record(differs, {**group, **found}, position)
+            checks["level shift"].record(differs, {**group, **found}, position, None, name)
         return SeriesShape(**shape)
 
 

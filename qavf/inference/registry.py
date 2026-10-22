@@ -80,6 +80,9 @@ class InferenceTest(Component):
     __test__: ClassVar[bool] = False  # not a pytest test class
     Params: ClassVar[type[RuleParams]] = TestParams
     needs: ClassVar[Needs] = "samples"
+    minimum: ClassVar[int] = 2
+    """Fewest values per side (pairs for paired tests, trials for proportions, events
+    for counts) the test needs; a smaller sample is not assessed, with the reason."""
     supports_equivalence: ClassVar[bool] = False
     """Whether :meth:`equivalent` can show equivalence within a margin."""
     uses_statistic: ClassVar[bool] = False

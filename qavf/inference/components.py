@@ -198,6 +198,7 @@ class Poisson(InferenceTest):
     """Exact conditional test of two Poisson rates (counts per exposure)."""
 
     name: ClassVar[str] = "poisson"
+    minimum: ClassVar[int] = 0
     needs: ClassVar[Needs] = "counts"
 
     def run(self, data: TestInput) -> TestResult:
@@ -217,6 +218,7 @@ class TwoProportion(InferenceTest):
     """Pooled two-proportion z-test of two shares."""
 
     name: ClassVar[str] = "two_proportion"
+    minimum: ClassVar[int] = 1
     needs: ClassVar[Needs] = "proportions"
 
     def run(self, data: TestInput) -> TestResult:
@@ -257,6 +259,7 @@ class Wilcoxon(InferenceTest):
     """Wilcoxon signed-rank test of matched values."""
 
     name: ClassVar[str] = "wilcoxon"
+    minimum: ClassVar[int] = 1
     needs: ClassVar[Needs] = "paired"
 
     def run(self, data: TestInput) -> TestResult:
@@ -270,6 +273,7 @@ class Sign(InferenceTest):
     """Exact sign test of matched values."""
 
     name: ClassVar[str] = "sign"
+    minimum: ClassVar[int] = 1
     needs: ClassVar[Needs] = "paired"
 
     def run(self, data: TestInput) -> TestResult:

@@ -212,6 +212,31 @@ def test_undefined_or_too_small_samples_are_not_assessed():
         assert result.significant is None
 
 
+@pytest.mark.parametrize("name", sorted(TESTS.names()))
+def test_each_component_enforces_its_declared_minimum(name):
+    test = TESTS.create(name)
+    if test.needs in ("counts", "proportions"):
+        assert test.run(TestInput(counts=(test.minimum, 1), totals=(3, 3))).assessed
+        if test.needs == "proportions":
+            assert not test.run(TestInput(counts=(0, 0), totals=(0, 3))).assessed
+        return
+
+    def values(n, shift=0.0):
+        return np.arange(n, dtype=float) * 1.5 + shift + np.array([0.3, -0.1] * n)[:n] ** 2
+
+    if test.needs == "moments":
+        enough = Moments(test.minimum, 1.0, 1.0), Moments(test.minimum, 2.0, 1.5)
+        short = Moments(test.minimum - 1, 1.0, 1.0), enough[1]
+        assert test.run(TestInput(moments=enough)).assessed
+        assert not test.run(TestInput(moments=short)).assessed
+        return
+    n = test.minimum
+    assert test.run(TestInput(baseline=values(n), candidate=values(n, 0.7))).assessed
+    shorter = values(n - 1)
+    result = test.run(TestInput(baseline=shorter, candidate=values(n - 1, 0.7)))
+    assert not result.assessed and result.reason
+
+
 def test_without_scipy_every_test_is_not_assessed(monkeypatch):
     for module in ("scipy", "scipy.stats"):
         monkeypatch.setitem(sys.modules, module, None)
