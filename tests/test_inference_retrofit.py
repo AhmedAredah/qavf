@@ -3,7 +3,8 @@
 Two kinds of evidence that the retrofit changed no default result:
 
 * golden values recorded by running the rules on the commit before the
-  retrofit (``1804f7c``), compared exactly;
+  retrofit (``1804f7c``, SciPy 1.18), compared to 1e-12 (SciPy versions differ
+  in the last digits of the t tail and the KS statistic; the floor is 1.11);
 * the pre-retrofit formulas, written out here with SciPy directly, compared
   exactly on further inputs (ties, short series, several comparisons).
 
@@ -66,13 +67,19 @@ def test_golden_values_recorded_before_the_retrofit():
     assert (record["kendall_tau"], record["p_value"]) == (-0.9048, 0.002778)
     years, values, rng = _trend()
     [record] = run_rule("TMP-003", _series(values, years), _params()).affected_records
-    assert (record["year"], record["adjusted_p"]) == (2006, 0.0012957361236595206)
+    assert record["year"] == 2006
+    assert record["adjusted_p"] == pytest.approx(0.0012957361236595206, rel=1e-12)
     results = rule_results("STA-002", _drift_frames(rng), {"comparisons": KS})
     observed = [(r.status, r.metrics["ks_statistic"], r.metrics["p_value"]) for r in results]
-    assert observed == [
+    expected = [
         (Status.FAIL, 0.10266666666666663, 5.828489753506503e-13),
         (Status.FAIL, 0.1702380952380953, 0.00038127226417131405),
     ]
+    for (status, statistic, p), (want_status, want_statistic, want_p) in zip(
+        observed, expected, strict=True
+    ):
+        assert status == want_status
+        assert (statistic, p) == pytest.approx((want_statistic, want_p), rel=1e-12)
 
 
 # ---------------------------------------------------- pre-retrofit formulas

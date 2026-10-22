@@ -284,26 +284,16 @@ judged by materiality under every policy, and their `significance` says so
 values, values that are not counts, beyond `max_work`) leaves the check **not
 assessed**, never passed.
 
-```yaml
-comparisons:
-  - name: counts 2024 vs 2025
-    baseline: v1
-    candidate: v2
-    decision: material_and_significant   # the default
-    correction: bh
-    alpha: 0.05
-    seed: 0                     # resampling tests reproduce exactly
-    levels:
-      - level: groups
-        group_by: [county]
-        measures:
-          - sum(aadt)                                   # Poisson for integer sums
-          - {measure: mean, column: speed}              # Welch's t
-          - {measure: median, column: speed, test: bootstrap}
-          - {measure: mean, column: speed, name: speed distribution, test: ks}
-      - {level: records, shift_by: [county]}
-      - {level: series_shape, time_column: day, bucket: week, measure: sum(aadt),
-         trend: {dependence: block}, decision: significant, alpha: 0.01}
+Set them on a comparison (or override them on one level), and pick a test per
+measure with `test:`, as in the [CMP-001 example](#in-a-configuration-cmp-001):
+
+```text
+decision: material_and_significant     # the default
+correction: bh
+alpha: 0.05
+seed: 0                                # resampling tests reproduce exactly
+measures: [sum(aadt), {measure: median, column: speed, test: bootstrap},
+           {measure: mean, column: speed, name: speed distribution, test: ks}]
 ```
 
 Evidence of a failing group, bucket or column adds `test`, `p_value`, `adjusted_p`,
@@ -331,12 +321,19 @@ rules:
           keys: [site]
           columns: {aadt_k: aadt}
           units: {aadt: {factor: 1000}}
+          decision: material_and_significant  # the default; material runs no test
+          correction: bh
           levels:
             - structure
             - {level: coverage, allow_added: true}
-            - records
-            - {level: groups, severity: WARNING, group_by: [county], measures: [sum(aadt)]}
+            - {level: records, shift_by: [county]}
+            - level: groups
+              severity: WARNING
+              group_by: [county]
+              measures: [sum(aadt), {measure: median, column: aadt, test: bootstrap}]
             - {level: temporal, time_column: counted_on, bucket: month, measures: [sum(aadt)]}
+            - {level: series_shape, time_column: counted_on, bucket: month, measure: sum(aadt),
+               trend: {dependence: block}, decision: significant, alpha: 0.01}
 ```
 
 Each check becomes one result, `CMP-001 [counts 2024 vs 2025: records: values]`, so
