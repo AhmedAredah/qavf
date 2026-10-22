@@ -72,13 +72,14 @@ from qavf.inference.results import (
     TestResult,
     not_assessed,
 )
-from qavf.inference.spatial import morans_i
+from qavf.inference.spatial import LocalMoran, local_morans_i, morans_i
 from qavf.inference.trend import (
     compare_correlations,
     correlation_test,
     kendall_tau,
     lag_test,
     mann_kendall,
+    rank_correlation_test,
     seasonal_kendall,
     slope_difference,
 )
@@ -93,6 +94,7 @@ __all__ = [
     "DecisionPolicy",
     "Dependence",
     "InferenceTest",
+    "LocalMoran",
     "Moments",
     "Significance",
     "TestInput",
@@ -113,6 +115,7 @@ __all__ = [
     "kendall_tau",
     "ks_two_sample",
     "lag_test",
+    "local_morans_i",
     "mann_kendall",
     "mann_whitney",
     "mcnemar",
@@ -125,6 +128,7 @@ __all__ = [
     "paired_table",
     "permutation",
     "poisson_rate",
+    "rank_correlation_test",
     "register_test",
     "seasonal_kendall",
     "sign_test",

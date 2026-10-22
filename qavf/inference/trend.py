@@ -7,8 +7,10 @@
   differently? The slope of their difference, with Newey-West (HAC) or
   block-bootstrap uncertainty for dependent buckets;
 * :func:`correlation_test`: Fisher's z test of a correlation against a value,
-  with Bartlett's effective sample size for autocorrelated series, and
-  :func:`compare_correlations` for two independent correlations;
+  with Bartlett's effective sample size for autocorrelated series,
+  :func:`rank_correlation_test` for Spearman's rank correlation (zones ranked
+  alike by two versions), and :func:`compare_correlations` for two independent
+  correlations;
 * :func:`lag_test`: does a lagged pairing correlate better than lag 0? A
   circular block bootstrap of the correlation gain.
 
@@ -414,6 +416,64 @@ def correlation_test(
         assumptions=["approximately bivariate normal", f"null correlation {rho:g}"],
         dependence=dependence,
         notes=notes,
+    )
+
+
+FIELLER_VARIANCE = 1.06
+"""Variance factor of Fisher's z of Spearman's correlation (Fieller, Hartley and
+Pearson 1957): ``var(atanh(r_s)) ~ 1.06 / (n - 3)``."""
+
+
+@assessed("spearman")
+def rank_correlation_test(
+    x: npt.ArrayLike,
+    y: npt.ArrayLike,
+    *,
+    rho: float = 0.0,
+    alternative: Alternative = "two-sided",
+    confidence: float = 0.95,
+) -> TestResult:
+    """Spearman's rank correlation tested against ``rho`` by Fisher's z.
+
+    ``z = (atanh(r_s) - atanh(rho)) * sqrt((n - 3) / 1.06)``, the Fieller,
+    Hartley and Pearson variance of a rank correlation (ties take average
+    ranks). ``less`` tests whether the correlation is below ``rho``. At least 4
+    pairs; a constant side is not assessed.
+    """
+    check_confidence(confidence)
+    if not -1 < rho < 1:
+        raise ValueError(f"rho must lie in (-1, 1), got {rho!r}")
+    a, b = observations(x, "x"), observations(y, "y")
+    if len(a) != len(b):
+        raise Unassessable("a correlation needs paired values")
+    n: dict[str, int] = {"pairs": len(a)}
+    at_least(len(a), 4, "pairs", n=n)
+    stats = require_scipy()
+    r = _pearson(stats.rankdata(a), stats.rankdata(b))
+    if r is None:
+        raise Unassessable("a side is constant; the rank correlation is undefined", n=n)
+    root = math.sqrt((len(a) - 3) / FIELLER_VARIANCE)
+    gap = _fisher(r) - math.atanh(rho)
+    z = gap * root if math.isfinite(gap) else gap
+    half = float(stats.norm.ppf(0.5 + confidence / 2)) / root
+    centre = _fisher(r)
+    return TestResult(
+        method="spearman",
+        statistic=z,
+        statistic_name="z",
+        p_value=normal_p_value(z, alternative),
+        alternative=alternative,
+        effect=r,
+        effect_name="spearman_rho",
+        ci_low=math.tanh(centre - half),
+        ci_high=math.tanh(centre + half),
+        confidence=confidence,
+        n=n,
+        assumptions=[
+            "independent pairs",
+            f"Fieller-Hartley-Pearson variance {FIELLER_VARIANCE}/(n - 3)",
+            f"null correlation {rho:g}",
+        ],
     )
 
 
