@@ -230,7 +230,17 @@ Contracts:
   reducing again: `reduce_groups(inputs, keys, measures, relations)`,
   `one_sided_check` and `compare_measure` (`qavf.compare.levels.groups`) reduce,
   align and judge any keys, and `bucketed_sides(inputs, params)`
-  (`qavf.compare.levels.temporal`) adds time-bucket labels to both sides. The
+  (`qavf.compare.levels.temporal`) adds time-bucket labels to both sides;
+  `keyed_sides(inputs, group_by, time)` gives the members of a level (groups, zones
+  and optionally time buckets) as the built-in levels key them. A level that tests a
+  family of members whose tests are not components builds `Member`s with a `run`
+  and grades them with `family_check` (`qavf.compare.significance`): one correction,
+  the decision policy, bounded evidence with p-values, and members that could not be
+  measured left not assessed; `sample_extras(column)` collects a column's values per
+  member within the work budget. Per-member detail for the report's charts
+  (`member_values`, bounded by the comparison's `chart_points`) goes in fields named
+  in the result's `detail_fields`, which `DatasetComparison.bounded` leaves out first
+  to fit a byte budget (override `without_details` for nested detail). The
   bucketing itself (`bucket_labels`, `bucket_grid`, calendar offsets) is
   `qavf.temporal`, shared with the TMP series rules. Pick the position you mean:
   `sequence_positions` for spacing in time (rates, slopes, lags) and

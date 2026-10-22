@@ -209,6 +209,11 @@ by their thresholds and `lisa` (which is a test) is left out. Under `equivalence
 `moran` and `lisa` use `material_and_significant`: a cluster is a difference.
 `SpatialResult` reports the zone counts, `expected_zones`, `missing`, `spearman`,
 `morans_i`, the `weights` used, `islands` and the named `clusters` (bounded).
+For the report's choropleth it also keeps each zone's values (`values`, bounded by
+`chart_points`) and the zones' `outlines`: the layer's polygons simplified in DuckDB
+(`ST_SimplifyPreserveTopology`, a tolerance of 1/500 of the extent) or the grid's
+cells, as SVG paths; more than `map_vertices` (20,000) vertices, or no spatial
+extension, leaves the map out with the reason (`map: false` skips it).
 
 Permutation p-values are at least `1 / (permutations + 1)` (`smallest_p` in the
 `lisa` check's metrics). With `m` compared zones, the Benjamini-Hochberg correction

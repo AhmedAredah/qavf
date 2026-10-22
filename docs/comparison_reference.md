@@ -6,6 +6,98 @@
 
 Entry-point group: `qavf.compare.levels`.
 
+### `contribution`
+
+Members' contributions to the total change, minimal sets and mix versus rate.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `decision` | `Literal['material', 'significant', 'material_and_significant', 'equivalence'] \| None` | `None` | ``material_and_significant`` (default), ``material``, ``significant`` or ``equivalence``. |
+| `alpha` | `float \| None` | `None` |  |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by'] \| None` | `None` | Multiple-testing correction across each check's family of tests. |
+| `seed` | `int \| None` | `None` |  |
+| `max_work` | `int \| None` | `None` |  |
+| `measure` | `MeasureSpec` | `{'measure': 'count', 'column': None, 'name': None, 'comparators': ['diff', 'rel_diff'], 'rtol': None, 'atol': None, 'exact': False, 'test': None, 'params': {}}` | An additive measure: ``count``, ``sum(x)`` or ``null_count(x)``. |
+| `dimensions` | `tuple[Dimension, ...]` | `[]` | Dimensions to explain the total change along (``zone``, ``[zone, fc]``, ...). |
+| `share` | `float` | `0.8` | Share of the total change the minimal set of members must explain. |
+| `rates` | `tuple[RateCheck, ...]` | `[]` | Rates decomposed into mix and rate effects, ``"fatal / vmt"`` or a mapping. |
+| `rtol` | `float \| None` | `None` | Default relative tolerance of this level; the comparison's when omitted. |
+| `atol` | `float \| None` | `None` |  |
+
+#### `MeasureSpec`
+
+A measure and how its change is judged: ``sum(x)``-style or a mapping.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `measure` | `str` | **required** |  |
+| `column` | `str \| None` | `None` |  |
+| `name` | `str \| None` | `None` | Label in reports; ``measure(column)`` when omitted. |
+| `comparators` | `tuple[str, ...]` | `('diff', 'rel_diff')` |  |
+| `rtol` | `float \| None` | `None` | Relative tolerance; the column's, then the level's, then the comparison's. |
+| `atol` | `float \| None` | `None` |  |
+| `exact` | `bool` | `False` |  |
+| `test` | `TestConfig \| None` | `None` | Significance test of the change per group; the measure's default when omitted (``mean``: ``welch_t``, ``median``: ``mann_whitney``, ``count``: ``poisson``, ...), ``none``: judged by materiality alone. |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+#### `TestConfig`
+
+A significance test: ``welch_t``, ``{test: bootstrap, resamples: 999}`` or ``none``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `test` | `str` | **required** | A registered test (``qavf.inference.TESTS``), or ``none``: no test applies. |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+#### `Dimension`
+
+What members the total splits into: ``zone``, ``[zone, fc]`` or with ``time``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `columns` | `tuple[str, ...]` | `[]` |  |
+| `time` | `TimeMembers \| None` | `None` | Also split by time bucket: ``{time_column: day, bucket: month}`` (zone x month). |
+| `name` | `str \| None` | `None` | Label in reports; the columns (and bucket) joined by `` x `` when omitted. |
+
+#### `TimeMembers`
+
+Time buckets as members of a level: ``{time_column: day, bucket: month}``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | **required** | Date, Datetime, text (with ``time_format``) or numeric period column. |
+| `max_buckets` | `int` | `1000000` |  |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
+
+#### `RateCheck`
+
+An overall rate ``sum(numerator) / sum(denominator)`` decomposed over a dimension.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `numerator` | `str` | **required** |  |
+| `denominator` | `str` | **required** |  |
+| `name` | `str \| None` | `None` | Label in reports; ``numerator / denominator`` when omitted. |
+| `dimension` | `str \| None` | `None` | The dimension label whose members are the strata; the first dimension by default. |
+| `method` | `Literal['three_term', 'symmetric']` | `three_term` | ``three_term``: mix, rate and interaction (shift-share); ``symmetric``: Kitagawa's two terms, each difference weighted by the mean of the other factor. |
+| `rtol` | `float \| None` | `None` | Relative tolerance of the overall rate; the level's, then the comparison's. |
+| `atol` | `float \| None` | `None` |  |
+| `test` | `Literal['poisson', 'none'] \| None` | `None` | Poisson test of the overall rate (whole-number numerators, the default for them), or ``none``: judged by materiality. |
+
 ### `coverage`
 
 Keys only in the baseline or only in the candidate, and null-rate changes.
@@ -16,6 +108,85 @@ Keys only in the baseline or only in the candidate, and null-rate changes.
 | `allow_removed` | `bool` | `False` | Keys only in the baseline are acceptable. |
 | `group_by` | `tuple[str, ...]` | `[]` | Break one-sided keys down by these columns (read from the side holding the key). |
 | `max_null_rate_change` | `float` | `0.0` | Largest acceptable change of a column's missing fraction (0.01 = one point). |
+
+### `distribution`
+
+Distribution distances, quantile deltas and category changes per column and member.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `decision` | `Literal['material', 'significant', 'material_and_significant', 'equivalence'] \| None` | `None` | ``material_and_significant`` (default), ``material``, ``significant`` or ``equivalence``. |
+| `alpha` | `float \| None` | `None` |  |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by'] \| None` | `None` | Multiple-testing correction across each check's family of tests. |
+| `seed` | `int \| None` | `None` |  |
+| `max_work` | `int \| None` | `None` |  |
+| `columns` | `tuple[DistributionColumn, ...]` | **required** | Columns whose distributions are compared. |
+| `group_by` | `tuple[str, ...]` | `[]` | Compare within each group (a zone column too); the whole side when empty. |
+| `time` | `TimeMembers \| None` | `None` | Also compare per time bucket: ``{time_column: day, bucket: month}``. |
+| `bins` | `int` | `10` | Quantile bins of the baseline for PSI and Jensen-Shannon (numeric); a baseline with no more distinct values than this uses one bin per value. |
+| `thresholds` | `Thresholds` | `{'max_psi': 0.2, 'max_ks': 0.1, 'max_wasserstein': None, 'max_js': 0.05}` |  |
+| `quantiles` | `QuantileCheck \| None` | `{'probabilities': [0.1, 0.25, 0.5, 0.75, 0.9], 'rtol': None, 'atol': None}` | Quantile deltas; ``null`` leaves them out. |
+| `test` | `Literal['ks', 'anderson_darling']` | `ks` | Significance test of a numeric distribution change. |
+| `categorical_test` | `Literal['chi_square', 'g_test']` | `chi_square` | Significance test of a categorical distribution change (homogeneity). |
+| `min_values` | `int` | `2` | Fewest values on each side for a member to be measured. |
+| `missing_groups` | `Literal['fail', 'ignore']` | `fail` | A member (group, bucket) present on one side only: a difference or left out. |
+| `new_categories` | `Literal['fail', 'ignore']` | `fail` | Categories that appeared or disappeared: a difference, or reported only. |
+| `rtol` | `float \| None` | `None` | Default relative tolerance of the quantile deltas; the comparison's when omitted. |
+| `atol` | `float \| None` | `None` |  |
+
+#### `DistributionColumn`
+
+A compared column: ``speed`` or ``{column: fc, kind: categorical}``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `column` | `str` | **required** |  |
+| `kind` | `Literal['auto', 'numeric', 'categorical']` | `auto` | ``auto``: numeric columns are numeric, every other type categorical; integer codes can be compared as ``categorical``. |
+
+#### `TimeMembers`
+
+Time buckets as members of a level: ``{time_column: day, bucket: month}``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | **required** | Date, Datetime, text (with ``time_format``) or numeric period column. |
+| `max_buckets` | `int` | `1000000` |  |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
+
+#### `Thresholds`
+
+When a distribution change is material (``null`` leaves a metric out).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_psi` | `float \| None` | `0.2` | Population stability index (0.1 small, 0.2 notable, 0.25 large). |
+| `max_ks` | `float \| None` | `0.1` | Kolmogorov-Smirnov distance, the largest gap of the CDFs (numeric). |
+| `max_wasserstein` | `float \| None` | `None` | Earth mover's distance in the column's units (numeric; off by default). |
+| `max_js` | `float \| None` | `0.05` | Jensen-Shannon divergence in bits on the shared bins or categories. |
+
+#### `QuantileCheck`
+
+Quantile-by-quantile deltas, material beyond ``max(atol, rtol * max(\|b\|, \|c\|))``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `probabilities` | `tuple[float, ...]` | `(0.1, 0.25, 0.5, 0.75, 0.9)` |  |
+| `rtol` | `float \| None` | `None` | Relative tolerance; the column's, then the level's, then the comparison's. |
+| `atol` | `float \| None` | `None` |  |
 
 ### `groups`
 
@@ -129,6 +300,94 @@ A significance test: ``welch_t``, ``{test: bootstrap, resamples: 999}`` or ``non
 |---|---|---|---|
 | `test` | `str` | **required** | A registered test (``qavf.inference.TESTS``), or ``none``: no test applies. |
 | `params` | `dict[str, Any]` | `{}` |  |
+
+### `relationships`
+
+Correlation changes, ratio invariants and agreement of matched records.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `decision` | `Literal['material', 'significant', 'material_and_significant', 'equivalence'] \| None` | `None` | ``material_and_significant`` (default), ``material``, ``significant`` or ``equivalence``. |
+| `alpha` | `float \| None` | `None` |  |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by'] \| None` | `None` | Multiple-testing correction across each check's family of tests. |
+| `seed` | `int \| None` | `None` |  |
+| `max_work` | `int \| None` | `None` |  |
+| `group_by` | `tuple[str, ...]` | `[]` | Compare within each group (a zone column too); the whole side when empty. |
+| `time` | `TimeMembers \| None` | `None` | Also compare per time bucket: ``{time_column: day, bucket: month}``. |
+| `correlation` | `CorrelationCheck \| None` | `None` |  |
+| `ratios` | `tuple[RatioCheck, ...]` | `[]` | Ratio invariants, ``"fatal / crashes"`` or ``{numerator, denominator, ...}``. |
+| `agreement` | `AgreementCheck \| None` | `None` | Agreement of matched records (needs the comparison's ``keys``). |
+| `rtol` | `float \| None` | `None` | Default relative tolerance of the ratios; the comparison's when omitted. |
+| `atol` | `float \| None` | `None` |  |
+
+#### `TimeMembers`
+
+Time buckets as members of a level: ``{time_column: day, bucket: month}``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | **required** | Date, Datetime, text (with ``time_format``) or numeric period column. |
+| `max_buckets` | `int` | `1000000` |  |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
+
+#### `CorrelationCheck`
+
+Correlations of every pair of ``columns`` should not change by ``max_change``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `columns` | `tuple[str, ...]` | **required** | Numeric columns; every pair is compared. |
+| `methods` | `tuple[Literal['pearson', 'spearman'], ...]` | `('pearson', 'spearman')` |  |
+| `max_change` | `float` | `0.1` | Largest acceptable change of a correlation coefficient. |
+| `min_pairs` | `int` | `4` | Fewest complete rows on each side for a correlation to be measured. |
+
+#### `RatioCheck`
+
+A ratio invariant ``sum(numerator) / sum(denominator)``: ``fatal / crashes``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `numerator` | `str` | **required** |  |
+| `denominator` | `str` | **required** |  |
+| `name` | `str \| None` | `None` | Label in reports; ``numerator / denominator`` when omitted. |
+| `rtol` | `float \| None` | `None` | Relative tolerance of the ratio; the level's, then the comparison's. |
+| `atol` | `float \| None` | `None` |  |
+| `test` | `Literal['poisson', 'none'] \| None` | `None` | ``poisson``: two event rates per exposure (whole-number numerators); ``none``: judged by materiality alone. By default Poisson for integer numerators. |
+
+#### `AgreementCheck`
+
+Matched values agree: thresholds per metric (``null`` leaves one out).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `columns` | `tuple[str, ...]` | **required** | Numeric columns compared record by record. |
+| `fit` | `Literal['ols', 'deming']` | `ols` | The candidate-on-baseline line: ``ols`` (the baseline as exact) or ``deming`` (both sides measured with error, in ``error_ratio``). |
+| `error_ratio` | `float` | `1.0` | Deming: the candidate's error variance over the baseline's. |
+| `min_pairs` | `int` | `3` | Fewest matched pairs for a member to be measured. |
+| `max_abs_bias` | `float \| None` | `None` | Largest ``\|mean(candidate - baseline)\|``, in data units. |
+| `max_loa` | `float \| None` | `None` | Largest ``\|limit of agreement\|`` (bias -/+ 1.96 sd), in data units. |
+| `min_ccc` | `float \| None` | `0.99` | Lowest Lin's concordance correlation. |
+| `max_mae` | `float \| None` | `None` |  |
+| `max_rmse` | `float \| None` | `None` |  |
+| `max_mape` | `float \| None` | `None` | Largest mean absolute percentage difference (percent). |
+| `max_smape` | `float \| None` | `None` |  |
+| `min_r_squared` | `float \| None` | `None` |  |
+| `max_slope_deviation` | `float \| None` | `0.05` | Largest ``\|slope - 1\|`` of the fitted line. |
+| `max_abs_intercept` | `float \| None` | `None` |  |
 
 ### `series_shape`
 
@@ -281,6 +540,8 @@ Measures per zone, zones on one side or missing, rank, share and cluster changes
 | `lisa` | `LisaCheck \| None` | `{}` | Local Moran's I: the zones in significant clusters of material change. |
 | `rtol` | `float \| None` | `None` | Default relative tolerance of this level; the comparison's when omitted. |
 | `atol` | `float \| None` | `None` |  |
+| `map` | `bool` | `True` | Keep simplified zone outlines for the report's map (from the layer or grid). |
+| `map_vertices` | `int` | `20000` | Most outline vertices kept after simplification; a larger map is left out. |
 
 #### `MeasureSpec`
 

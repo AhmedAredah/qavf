@@ -87,7 +87,8 @@ reported in data units.
 | `seasonal_kendall` | | Mann-Kendall summed over seasons, seasonal Sen slope | a season with 2 values | |
 | `slope_difference` | | difference of two series' slopes on shared positions | 4 positions | exactly linear difference: p = 0 (or 1 for no slope) |
 | `correlation_test` | | Fisher z of a correlation against `rho` | 4 pairs (effective size above 3) | constant series: not assessed |
-| `compare_correlations` | | Fisher z of two independent correlations | 4 pairs each | |
+| `compare_correlations` | | Fisher z of two independent correlations (`variance=1.06` for Spearman's) | 4 pairs each | |
+| `identity_test` | | joint F test that the candidate-on-baseline line has slope 1 and intercept 0 (OLS, or Deming with a jackknife covariance) | 3 pairs | on the line exactly: p = 1; a perfect fit off it: p = 0 |
 | `lag_test` | | gain in correlation of a lag over lag 0 (block bootstrap) | `minimum` positions | constant series: not assessed |
 | `rank_correlation_test` | | Fisher z of Spearman's correlation against `rho` (Fieller-Hartley-Pearson variance `1.06 / (n - 3)`) | 4 pairs | constant side: not assessed |
 | `morans_i` | | spatial autocorrelation from given weights (permutation) | 3 locations | constant values or no neighbours: not assessed |
@@ -189,6 +190,19 @@ values `bland_altman` (bias and limits of agreement), `concordance` (Lin's CCC),
 of the baseline). Undefined values (a zero spread, a zero baseline for MAPE) are
 `None`.
 
+Distribution distances compare two samples as a whole: `population_stability` (PSI of
+per-bin counts, STA-002's formula with its `1e-6` floor), `jensen_shannon` (the
+divergence in bits on shared bins; SciPy's `jensenshannon` distance is its square
+root), `ks_distance`, `wasserstein` (earth mover's distance in data units, as SciPy's
+`wasserstein_distance`) and `quantile_deltas`. `qavf.statistics.ordered.quantile_cutpoints`
+gives the bins: the reference's quantiles with open support tails.
+
+`qavf.inference.agreement.fit_line` fits `candidate = intercept + slope * baseline` by
+OLS (the baseline taken as exact) or by Deming regression (`error_ratio`: the
+candidate's error variance over the baseline's; 1 is orthogonal regression), with the
+covariance of the estimates (analytic, or a jackknife computed from leave-one-out sums
+in linear time); `identity_test` tests it against the identity line.
+
 ## Decision policies
 
 `decide(policy, material, test)` combines materiality and significance:
@@ -248,8 +262,8 @@ level.
 
 ## In rules
 
-TMP-002 (Kendall), TMP-003 (studentized residuals) and STA-002 (KS) use the shared
-tests and corrections. Each has a `correction` (TMP-002 `none`, TMP-003 and STA-002
+TMP-002 (Kendall), TMP-003 (studentized residuals) and STA-002 (KS, and PSI with the
+shared binning) use the shared tests, distances and corrections. Each has a `correction` (TMP-002 `none`, TMP-003 and STA-002
 `bonferroni`, their behaviour before) and reports `p_value`, `adjusted_p` and `effect`
 in its evidence; their default results are unchanged.
 

@@ -74,10 +74,11 @@ def test_full_example_runs_clean(tmp_path) -> None:
     compared = [r for r in report.results if r.rule_id == "CMP-001"]
     levels = {tuple(r.check.split(": ")[:2]) for r in compared}
     assert {level for name, level in levels if name == "daily v1 vs v2"} == {
-        "structure", "coverage", "records", "groups", "temporal", "series_shape"
+        "structure", "coverage", "records", "groups", "temporal", "series_shape",
+        "distribution", "relationships",
     }  # fmt: skip
     assert {level for name, level in levels if name == "daily by zone"} == {
-        "spatial", "temporal", "locations"
+        "spatial", "temporal", "locations", "contribution"
     }  # fmt: skip
     zoned = [r for r in compared if r.check.startswith("daily by zone: spatial")]
     spatial = {r.check.split(": ")[2] for r in zoned}

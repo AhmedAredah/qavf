@@ -262,6 +262,18 @@ rules:
               measure: mean(value_milli)
               trend: {dependence: block}  # slope difference: block bootstrap (or hac)
               lag: {max_lag: 2}         # profile: {profile: day_of_week} compares cycles
+            - level: distribution       # PSI, KS, Wasserstein, Jensen-Shannon, quantile deltas
+              columns: [value_milli]    # categorical columns: chi-square, new categories
+              group_by: [station_id]    # time: {time_column: day, bucket: month} too
+              thresholds: {max_psi: 0.2, max_ks: 0.1, max_js: 0.05}
+              quantiles: {probabilities: [0.1, 0.5, 0.9]}
+            - level: relationships      # correlations, ratio invariants, agreement
+              agreement:                # matched records: Bland-Altman, CCC, MAE, the fit
+                columns: [value_milli]
+                fit: deming             # or ols; tests slope = 1 and intercept = 0
+                min_ccc: 0.99
+                max_slope_deviation: 0.05
+              # correlation: {columns: [a, b, c]}  ratios: ["fatal / crashes"]
 
         - name: daily by zone           # spatial comparison (docs/spatial.md)
           baseline: daily
@@ -273,6 +285,7 @@ rules:
           derive:                       # each station's coordinates, on both sides
             lon: "-97.7 + 0.1 * CAST(SUBSTR(station_id, 4, 2) AS INTEGER)"
             lat: "30.0"
+            readings: "1"               # one per row: the rate below is a mean per reading
           steps:
             - step: assign_zones        # points to zone polygons (or grid: {size: 0.1})
               x: lon
@@ -292,6 +305,12 @@ rules:
             - {level: temporal, time_column: day, bucket: week, group_by: [zone],
                measures: [sum(value_milli)]}  # each zone, week by week
             - {level: locations, x: lon, y: lat, max_distance: 10}  # metres moved
+            - level: contribution       # what explains the total change
+              measure: sum(value_milli) # additive: count, sum or null_count
+              dimensions: [zone, {columns: [zone], time: {time_column: day, bucket: week}}]
+              share: 0.8                # the fewest zones explaining 80 % of the change
+              rates:                    # mix (composition) vs rate effects, exactly
+                - {numerator: value_milli, denominator: readings, dimension: zone}
 
 # ---------------------------------------------------------------------------
 engine:

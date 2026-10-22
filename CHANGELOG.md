@@ -6,6 +6,39 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Add the `distribution` comparison level: per column and member (group, zone or
+  time bucket), the population stability index over the baseline's quantile bins,
+  Kolmogorov-Smirnov, Anderson-Darling, Wasserstein and Jensen-Shannon distances and
+  quantile deltas for numbers; PSI, Jensen-Shannon, the chi-square (or G) test and
+  categories that appeared or disappeared for categories; thresholds per metric and
+  one corrected family of tests per column.
+- Add the `relationships` level: Pearson and Spearman correlation changes of column
+  pairs (Fisher z of two correlations, corrected), ratio invariants such as
+  `fatal / crashes` per member (Poisson rates), and the agreement of keyed records per
+  column (Bland-Altman bias and limits, Lin's concordance, MAE, RMSE, MAPE, sMAPE, R²
+  and an OLS or Deming fit tested against slope 1 and intercept 0).
+- Add the `contribution` level: each member's contribution to the total change of an
+  additive measure along any dimension (columns, zones, time buckets, combinations),
+  the smallest set of members explaining a share of it, and an exact mix-versus-rate
+  (shift-share, or Kitagawa's symmetric) decomposition of declared rates.
+- Reports show a dataset comparison section for CMP-001: a summary card with the
+  verdict per level, a drill-down with each check's evidence and tests, and inline SVG
+  charts (contribution waterfall, heat map of relative change, distribution overlays
+  and quantile deltas, series lines, a choropleth of zone outlines), bounded by
+  `HtmlLimits.max_chart_points` and `max_chart_bytes` and omitted with a note beyond
+  them. The typed comparison is kept with the first CMP-001 result
+  (`QAReport.comparisons()`), within the evidence limits. `DatasetComparison` gains
+  `write_html`, `write_json` (with disclosed truncation in `omitted`), `bounded` and
+  `verdict`; `qavf compare-datasets BASELINE CANDIDATE -c SPEC` runs a comparison and
+  writes both reports.
+- Shared building blocks: `quantile_cutpoints` and `bin_index` (STA-002's binning, its
+  results unchanged), `population_stability`, `jensen_shannon`, `ks_distance`,
+  `wasserstein` and `quantile_deltas` in `qavf.inference.effects`,
+  `qavf.inference.agreement` (`fit_line`, `identity_test`), a `variance` factor for
+  `compare_correlations`, exact decompositions in `qavf.statistics.decomposition`,
+  `qavf.spatial.outlines`, and for level authors `keyed_sides`, `member_values`,
+  `sample_extras` and `family_check`. Temporal and spatial results keep chart values
+  (`chart_points`), spatial results simplified zone outlines (`map`).
 - Add spatial comparison. `qavf.spatial` holds the shared building blocks: zone layers
   from a configured dataset (WKB or WKT), GeoParquet, GeoJSON or a shapefile, validated
   (`ST_IsValid`; invalid geometry is refused unless `repair: true`), with declared CRSs

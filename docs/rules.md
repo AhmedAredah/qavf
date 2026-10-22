@@ -40,7 +40,7 @@
 
 **Datasets compare within tolerance** · default severity `ERROR`
 
-Each configured pair of datasets (for example two versions of an output) agrees after alignment (column mapping, lossless casts, unit conversion, recoding, derived columns, filters) at each configured level: structure, key coverage, keyed records and grouped measures.
+Each configured pair of datasets (for example two versions of an output) agrees after alignment (column mapping, lossless casts, unit conversion, recoding, derived columns, filters) at each configured level: structure, key coverage, keyed records, grouped measures, time, space, distributions, relationships and contributions to the change.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -76,6 +76,7 @@ Two datasets compared at several levels after an alignment pipeline.
 | `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by']` | `bh` | Multiple-testing correction across each check's family (groups, buckets, series, columns): ``bh`` (Benjamini-Hochberg), ``by``, ``holm``, ``bonferroni`` or ``none``. |
 | `seed` | `int` | `0` | Seed of resampling tests; the same seed reproduces a comparison exactly. |
 | `max_work` | `int` | `20000000` | Largest work (resamples x values, or values collected) of one test; a larger test is not assessed rather than slow. |
+| `chart_points` | `int` | `500` | Most per-member values (buckets, zones, contributions) a level keeps for the report's charts, within the evidence byte limit; 0 keeps none. |
 
 #### `CastSpec`
 

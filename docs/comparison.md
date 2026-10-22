@@ -45,7 +45,8 @@ alone exactly as before and runs no test.
 
 A `DatasetComparison` holds one typed result per level (`StructureResult`,
 `CoverageResult`, `RecordsResult`, `GroupsResult`, `TemporalResult`, `ShapeResult`,
-`SpatialResult`, `LocationsResult`),
+`SpatialResult`, `LocationsResult`, `DistributionResult`, `RelationshipsResult`,
+`ContributionResult`),
 each with graded checks. A check
 has an exact `affected_count` and bounded `affected_records`: evidence follows the
 run's `max_affected_records` and `max_evidence_bytes` limits and is ordered
@@ -88,6 +89,9 @@ pipeline, exactly as for every other rule.
 | `series_shape` | Each group's bucketed series on both sides: correlation, trend, cyclic profile, peak, lag, level shifts | `series`, `correlation`, `trend`, `profile`, `peak`, `lag`, `level shift` (and `too short`) |
 | `spatial` | Measures per zone (an attribute or `assign_zones`): zones on one side only, expected zones a side lacks, material changes per measure, rank correlation, share redistribution, global Moran's I of the changes and LISA clusters of change | `zones`, one per measure, `expected`, `rank`, `shares`, `moran`, `lisa` |
 | `locations` | Features matched by key: located on one side only, distance moved (metres for longitude/latitude), area and shape changes of geometries | `located`, `moved`, `area`, `shape` |
+| `distribution` | Each column's distribution per member (group, zone, time bucket): PSI, KS, Anderson-Darling, Wasserstein, Jensen-Shannon, quantile deltas; categories that appeared or disappeared | `groups` (or `buckets`), one per column, `<column>: categories` |
+| `relationships` | Correlation changes of column pairs, ratio invariants, agreement of keyed records (Bland-Altman, CCC, error metrics, the candidate-on-baseline line) | `correlation: <method>`, `ratio: <name>`, `agreement: <column>` |
+| `contribution` | Each member's contribution to the total change along each dimension, the minimal set explaining a share, mix versus rate of declared rates | `total`, `contribution: <dimension>`, `rate: <name>` |
 
 `allow_added` / `allow_removed` accept one-sided columns, keys or rows where they are
 expected. Every level's parameters are listed in the
@@ -284,6 +288,165 @@ not assessed, never passed, while attribute zones keep working. Zone layers,
 assignment policies (boundaries, overlaps, unassigned points), grids, crosswalks,
 neighbour weights and both levels are described in [spatial data](spatial.md).
 
+## Distributions
+
+The `distribution` level compares each column's whole distribution, overall or per
+member: a `group_by` group (a zone column is a group column too) and, with `time`, a
+time bucket within it.
+
+```python
+levels=[{"level": "distribution", "columns": ["speed", {"column": "fc", "kind": "categorical"}],
+         "group_by": ["zone"], "time": {"time_column": "day", "bucket": "month"},
+         "thresholds": {"max_psi": 0.2, "max_ks": 0.1, "max_js": 0.05},
+         "quantiles": {"probabilities": [0.1, 0.5, 0.9]}}]
+```
+
+| Kind | Metrics (materiality) | Test (significance) |
+|---|---|---|
+| numeric | PSI over the baseline's `bins` quantile bins with open tails (STA-002's binning; a baseline with few distinct values gets one bin per value), KS distance, Wasserstein distance (in data units), Jensen-Shannon divergence on the same bins, quantile deltas at `probabilities` | `ks` (default) or `anderson_darling`; the other statistic is reported too |
+| categorical | PSI and Jensen-Shannon over the categories | `chi_square` (default) or `g_test` of homogeneity |
+
+A member is material when a metric passes its threshold (`max_psi` 0.2, `max_ks` 0.1,
+`max_js` 0.05, `max_wasserstein` off; `null` leaves one out) or a quantile moves
+beyond the column's tolerance. Each column's members form one family for the
+correction. Categories that appeared or disappeared within a member are reported in
+`<column>: categories` (`new_categories: ignore` to report without failing). A member
+with fewer than `min_values` values on a side, values beyond Float64's exact range, or
+more values than `max_work` leaves the check not assessed. `DistributionResult.members`
+keeps each member's metrics, bin shares, quantiles and test (bounded by the evidence
+limit). Jensen-Shannon is the divergence in bits (0 to 1); SciPy's `jensenshannon` is
+its square root.
+
+## Relationships
+
+The `relationships` level compares how columns relate, per member (`group_by`,
+`time`), with three optional parts:
+
+```python
+levels=[{"level": "relationships", "group_by": ["county"],
+         "correlation": {"columns": ["aadt", "vmt", "crashes"], "max_change": 0.1},
+         "ratios": ["fatal / crashes", {"numerator": "nox", "denominator": "vmt", "rtol": 0.01}],
+         "agreement": {"columns": ["aadt"], "fit": "deming", "min_ccc": 0.99,
+                       "max_slope_deviation": 0.05, "max_abs_bias": 50}}]
+```
+
+* `correlation`: every pair of `columns` is correlated on each side (Pearson, and
+  Spearman on average ranks), exactly, over the member's complete rows. A change
+  beyond `max_change` is material; Fisher's z test of two independent correlations
+  decides significance (Spearman with the Fieller-Hartley-Pearson variance 1.06),
+  one family per method across pairs and members.
+* `ratios`: `sum(numerator) / sum(denominator)` per member on each side, exact,
+  material beyond the ratio's tolerance, tested as two Poisson rates (the
+  denominators as exposures) when the numerators sum to whole counts; otherwise
+  judged by materiality (`test: none`).
+* `agreement` needs `keys`: records are matched by key (members by the candidate's
+  values) and each column's pairs give the Bland-Altman bias and 95 % limits of
+  agreement, Lin's concordance correlation, MAE, RMSE, bias, MAPE, sMAPE, R² and the
+  line `candidate = intercept + slope * baseline` (OLS, or Deming with
+  `error_ratio`). Thresholds per metric (`max_abs_bias`, `max_loa`, `min_ccc` 0.99,
+  `max_mae`, `max_rmse`, `max_mape`, `max_smape`, `min_r_squared`,
+  `max_slope_deviation` 0.05, `max_abs_intercept`) decide materiality, and the joint
+  F test of `slope = 1, intercept = 0` (jackknife covariance for Deming)
+  significance.
+
+These tests have no equivalence form: under `decision: equivalence` the checks are not
+assessed. A member without enough complete rows, a constant column or a zero
+denominator is not assessed, never passed.
+
+## Contributions
+
+The `contribution` level says what explains the total change of an additive measure
+(`count`, `sum(x)`, `null_count(x)`), along one or more dimensions:
+
+```python
+levels=[{"level": "contribution", "measure": "sum(fatal)", "share": 0.8,
+         "dimensions": ["zone", ["zone", "fc"],
+                        {"columns": ["zone"], "time": {"time_column": "day", "bucket": "month"}}],
+         "rates": [{"numerator": "fatal", "denominator": "vmt", "dimension": "zone"}]}]
+```
+
+For each dimension every member's change (`candidate - baseline`, a member on one side
+only counting 0 on the other) is its contribution; the contributions sum exactly to
+the total change (they are exact rationals, kept as `exact_change`). They are sorted
+largest first with their share of the total change and the cumulative share, and the
+smallest set of members explaining `share` of it is named (`minimal_set`; taking the
+largest changes in the total's direction first is optimal). The `contribution:
+<dimension>` check judges each member's change as a `groups` measure would (materiality
+and significance, one family per dimension); `total` judges the whole.
+
+### Mix and rate
+
+A rate such as fatalities per vehicle-mile can change because the strata's own rates
+changed (**rate** effect) or because the denominator moved between strata with
+different rates (**mix** effect). With weights `w = D / sum(D)` and rates `r = N / D`
+per stratum, the overall rate is `R = sum(w r)` and, stratum by stratum,
+
+```text
+w_c r_c - w_b r_b = (w_c - w_b) r_b          mix
+                  + w_b (r_c - r_b)          rate
+                  + (w_c - w_b)(r_c - r_b)   interaction
+```
+
+so `mix + rate + interaction = R_c - R_b` exactly (`method: symmetric` gives
+Kitagawa's two-term form, each difference weighted by the mean of the other factor).
+A worked example with two road classes:
+
+| | baseline fatal / vmt | rate | weight | candidate fatal / vmt | rate | weight |
+|---|---|---|---|---|---|---|
+| A | 10 / 100 | 0.1 | 1/2 | 60 / 300 | 0.2 | 3/4 |
+| B | 40 / 100 | 0.4 | 1/2 | 40 / 100 | 0.4 | 1/4 |
+| all | 50 / 200 | **0.25** | | 100 / 400 | **0.25** | |
+
+The overall rate did not change, but not because nothing happened: travel shifted to
+the safer class A (mix `1/4 * 0.1 - 1/4 * 0.4 = -0.075`) while class A became twice as
+dangerous (rate `1/2 * 0.1 = +0.05`; interaction `1/4 * 0.1 = +0.025`). The parts are
+exact rationals (`RateDecompositionResult.exact`) and the `rate: <name>` check judges
+the overall rate's change (a Poisson test of the totals for whole-number numerators).
+
+## Reports
+
+When a report holds CMP-001 results, the HTML report has a **Dataset comparisons**
+section with, per comparison, a summary card (its verdict, a verdict per level with
+check counts, the alignment steps and notes) and a drill-down per level: each check's
+message, evidence and significance (test, p, adjusted p, effect and interval), and
+inline SVG charts:
+
+| Level | Charts |
+|---|---|
+| `contribution` | a waterfall from the baseline total through the largest contributions to the candidate total; a heat map of relative change for two-column dimensions (zone x month); a waterfall of each rate's mix, rate and interaction |
+| `temporal` | a heat map of relative change by group and bucket; baseline (solid) and candidate (dashed) lines per bucket for the first groups |
+| `distribution` | each side's share per bin or category (candidate hatched) and the quantile deltas, for the first members |
+| `spatial` | a choropleth of each zone's relative change, from the zone layer's (or grid's) outlines simplified when the level ran (`map`, `map_vertices`) |
+
+Charts read without colour (values are labelled, decreases and the candidate hatched,
+the candidate's line dashed) and follow the light or dark theme. A chart with more
+marks than `HtmlLimits.max_chart_points`, or beyond the document's `max_chart_bytes`,
+is replaced by "Chart omitted: too large"; a map without outlines says why (for
+example, DuckDB's spatial extension is unavailable). Levels keep at most
+`chart_points` values for charts (500 by default, within the evidence byte limit).
+
+The JSON report keeps the typed `DatasetComparison` with the first CMP-001 result of
+each comparison (`metrics["comparison"]`; `QAReport.comparisons()` reads them back),
+trimmed to the evidence limit with what was left out listed in its `omitted`; when
+`engine.max_report_bytes` trims the report, the omission is disclosed in
+`metadata.resource_usage.report_details_omitted` and the section is built from the
+findings alone. A `DatasetComparison` from `compare_datasets` writes the same section
+as its own page and its JSON:
+
+```python
+result.write_html("comparison.html")
+result.write_json("comparison.json", max_bytes=16_777_216)  # DatasetComparison.model_validate_json
+```
+
+```text
+qavf compare-datasets v1/counts.parquet v2/counts.parquet -c spec.yaml --html out.html --json out.json
+```
+
+The spec holds the options of `compare_datasets` (`keys`, `columns`, `levels`, `decision`,
+...; paths relative to the working directory). The exit code is 0 when every check was
+assessed and passed, 1 when one failed or was not assessed, and 2 for a usage or
+configuration error.
+
 ## Significance
 
 A material difference can still be chance: two versions drawn from the same process
@@ -309,6 +472,9 @@ series of a shape check, the columns of the record shift. Members that needed no
 | `records` | the `shift` check: per numeric column (and `shift_by` group), a paired test (`test: paired_t` by default; `wilcoxon`, `sign`, `paired_permutation`, `paired_bootstrap`) of `candidate - baseline` over matched rows, with the mean difference judged by the column's tolerance; value changes stay facts, reported whatever the policy |
 | `series_shape` | `correlation`: Fisher z of the Pearson correlation against `min_pearson` with Bartlett's effective sample size; `trend`: the slope difference with a block bootstrap (`dependence: block`, or `hac`, `none`); `lag`: a block bootstrap of the best lag's correlation gain; `profile`, `peak` and `level shift` have no test and are judged by threshold |
 | `spatial` | each zone's change of a measure, as for `groups`; `rank`: Fisher z of Spearman's correlation against `min_spearman`; `shares`: two-proportion per zone (counts); `moran`: a permutation test of the global Moran's I of the changes; `lisa`: conditional permutation tests of the local Moran's I per zone, corrected across zones |
+| `distribution` | each member's distribution change, by `ks` or `anderson_darling` (numbers) or `chi_square`/`g_test` (categories), one family per column |
+| `relationships` | `correlation`: Fisher z of two correlations per pair and member; `ratios`: two Poisson rates per member; `agreement`: the joint F test of slope 1 and intercept 0 per member |
+| `contribution` | each member's change as for `groups`, one family per dimension; `total`: the whole; `rate`: two Poisson rates of the totals |
 
 `min`, `max`, `distinct_count` and `weighted_mean` have no sound test: they are
 judged by materiality under every policy, and their `significance` says so
