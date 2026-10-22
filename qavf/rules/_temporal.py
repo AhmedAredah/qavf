@@ -4,9 +4,48 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
 from fractions import Fraction
-from typing import Any
+from typing import Any, Literal
 
 import polars as pl
+
+Ambiguous = Literal["raise", "earliest", "latest", "null"]
+
+
+def zoned(
+    value: pl.Expr,
+    aware: bool,
+    zone: str,
+    *,
+    ambiguous: Ambiguous = "raise",
+    non_existent: Literal["raise", "null"] = "raise",
+) -> pl.Expr:
+    """Instants of a Datetime expression in ``zone``.
+
+    Aware values are converted (the instant is kept). Naive values are wall-clock
+    times in ``zone`` and are localized by Polars, whose ambiguity (DST fall-back)
+    and nonexistence (spring-forward gap) handling is chosen by the caller:
+    ``"null"`` marks such times instead of guessing.
+    """
+    if aware:
+        return value.dt.convert_time_zone(zone)
+    return value.dt.replace_time_zone(zone, ambiguous=ambiguous, non_existent=non_existent)
+
+
+def wall_clock(value: pl.Expr, dtype: pl.DataType, zone: str | None) -> pl.Expr:
+    """Naive local wall-clock times: aware values in ``zone`` (else their own zone).
+
+    Naive values are already wall-clock times and pass through. Two instants of a
+    DST fall-back map to the same wall-clock time; keep the instant to tell them apart.
+    """
+    if not (isinstance(dtype, pl.Datetime) and dtype.time_zone):
+        return value
+    local = value.dt.convert_time_zone(zone) if zone is not None else value
+    return local.dt.replace_time_zone(None)
+
+
+def utc_wall_clock(instant: pl.Expr) -> pl.Expr:
+    """Naive UTC wall-clock time of an aware instant (its offset is local minus this)."""
+    return instant.dt.convert_time_zone("UTC").dt.replace_time_zone(None)
 
 
 def temporal_ticks(value: date | datetime, dtype: pl.DataType) -> Fraction:
@@ -20,11 +59,7 @@ def temporal_ticks(value: date | datetime, dtype: pl.DataType) -> Fraction:
     stamp = value if isinstance(value, datetime) else datetime.combine(value, time())
     literal = pl.lit(stamp).dt.cast_time_unit("us")
     if isinstance(dtype, pl.Datetime) and dtype.time_zone:
-        literal = (
-            literal.dt.replace_time_zone(dtype.time_zone)
-            if stamp.tzinfo is None
-            else literal.dt.convert_time_zone(dtype.time_zone)
-        )
+        literal = zoned(literal, stamp.tzinfo is not None, dtype.time_zone)
     microseconds = int(pl.select(literal.cast(pl.Int64)).item())
     if dtype == pl.Date:
         return Fraction(microseconds, 86_400_000_000)

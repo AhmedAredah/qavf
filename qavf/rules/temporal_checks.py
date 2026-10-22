@@ -1,8 +1,13 @@
 """Temporal QA: step changes, trend direction, trend outliers and gaps.
 
-Each rule works on *series*: a value column summed per time period (a numeric
-column such as a year) within optional group columns, e.g. NOx by county. No
-series are examined until they are configured, so these rules skip by default.
+Each rule works on *series*: a value column summed per time period within
+optional group columns, e.g. NOx by county. The period is a numeric column
+(such as a year) or, with ``bucket``, a calendar bucket of a Date, Datetime or
+text column (``day``, ``15 minutes``, ``month`` in ``time_zone``; see
+:mod:`qavf.temporal.buckets`). Bucketed periods are positioned by their exact
+bucket ordinal, so rates are per bucket and seasons are ordinals modulo the
+season length. No series are examined until they are configured, so these
+rules skip by default.
 
 ``TMP-002`` and ``TMP-003`` need the ``stats`` extra (``pip install qavf[stats]``);
 without it they report SKIPPED with an explanation.
@@ -12,10 +17,10 @@ from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, replace
+from datetime import date, datetime
 from decimal import Decimal, localcontext
-from fractions import Fraction
 from typing import Any, ClassVar, Literal
 
 import numpy as np
@@ -55,13 +60,17 @@ from qavf.rules.helpers import (
     shared,
     usable,
 )
-from qavf.settings import NumericBound, QAVFSettings
+from qavf.settings import Bound, NumericBound, QAVFSettings
 from qavf.sources.sql import quote_identifier
-from qavf.stats import (
-    OutlierMethod,
-    center_scale_observations,
-    checked_float_series,
-    detect_outliers,
+from qavf.statistics.series import best_split as _best_split
+from qavf.statistics.series import normal_equations
+from qavf.stats import OutlierMethod, checked_float_series, detect_outliers
+from qavf.temporal.buckets import (
+    TimeBucketing,
+    bucket_grid,
+    bucket_labels,
+    bucket_ordinal,
+    bucket_scalar,
 )
 
 logger = logging.getLogger(__name__)
@@ -86,12 +95,13 @@ def _stats_stack() -> Any:
 _MISSING_STATS = "Not assessed: this rule needs the stats extra (pip install 'qavf[stats]')."
 
 
-class SeriesSpec(AggregatedMetric):
+class SeriesSpec(TimeBucketing, AggregatedMetric):
     """A series: ``value`` combined (``aggregate``, a sum by default) per
-    ``time_column`` value within ``group_by``."""
+    ``time_column`` value (or ``bucket`` of it) within ``group_by``."""
 
     time_column: str = "year"
-    """Numeric time column (e.g. a year). Rates of change are per unit of it."""
+    """Numeric time column (e.g. a year), or a Date, Datetime or text column with
+    ``bucket``. Rates of change are per unit of it (per bucket when bucketed)."""
     expected_trend: Literal["increasing", "decreasing"] | None = None
     """Direction the series should move in; used by the trend-direction rule."""
     max_change_rate: float | None = Field(default=None, gt=0)
@@ -134,6 +144,7 @@ def _aggregate(
         spec.aggregate,
         spec.weight,
         spec.order_by,
+        spec.bucketing.model_dump_json(),
     )
     series = shared(ctx, key, blocked, lambda found: _aggregate_raw(ctx, spec, found))
     if series is None or not require_finite:
@@ -181,16 +192,19 @@ def _aggregate_raw(
             )
         )
         return None
-    if spec.aggregate in {"first", "last"} or supports_exact(
+    keys = [*spec.group_by, spec.time_column]
+    exact = spec.aggregate in {"first", "last"} or supports_exact(
         ctx.schema(spec.dataset)[spec.value], spec.aggregate
-    ):
+    )
+    # Buckets are computed on the scoped lazy relation, so every source kind
+    # (including native SQL ones) is bucketed by the same native expressions.
+    if exact or spec.bucket is not None:
         with scoped_relation(ctx, spec.dataset, columns) as scoped:
             valid = _valid_times(scoped, spec, blocked, ctx.evidence_limit)
             if valid is None:
                 return None
             assert isinstance(valid, ProjectedRelation) and valid.lazy is not None
             assert valid.observation is not None
-            keys = [*spec.group_by, spec.time_column]
             if spec.aggregate in {"first", "last"}:
                 return ordered_grouped(
                     valid.observation,
@@ -201,16 +215,18 @@ def _aggregate_raw(
                     spec.aggregate,
                     spec.order_by,
                 ).sort(keys)
-            return exact_grouped(
-                ctx,
-                valid.observation,
-                valid.lazy,
-                keys,
-                spec.value,
-                _name(spec, "value"),
-                spec.aggregate,
-                weight=spec.weight,
-            ).sort(keys)
+            if exact:
+                return exact_grouped(
+                    ctx,
+                    valid.observation,
+                    valid.lazy,
+                    keys,
+                    spec.value,
+                    _name(spec, "value"),
+                    spec.aggregate,
+                    weight=spec.weight,
+                ).sort(keys)
+            return _grouped_series(valid, spec, keys, blocked)
     relation = normalized_relation(ctx, spec.dataset, columns)
     source = (
         relation
@@ -222,7 +238,16 @@ def _aggregate_raw(
     frame = _valid_times(source, spec, blocked, ctx.evidence_limit)
     if frame is None:
         return None
-    keys = [*spec.group_by, spec.time_column]
+    return _grouped_series(frame, spec, keys, blocked)
+
+
+def _grouped_series(
+    frame: pl.DataFrame | ProjectedRelation,
+    spec: SeriesSpec,
+    keys: list[str],
+    blocked: list[Finding],
+) -> pl.DataFrame | None:
+    """Reduce the non-exact aggregates (integer sums, counts, extrema, ``none``)."""
     if spec.aggregate == "none" and (
         repeated := duplicate_groups(frame, keys)
         if isinstance(frame, ProjectedRelation)
@@ -255,17 +280,21 @@ def _valid_times(
 ) -> pl.DataFrame | ProjectedRelation | None:
     """``frame`` without groups that have rows with a missing or non-finite time.
 
-    Time must be numeric (a year, a period number). A row without a usable time
-    cannot be placed in any period, so its group's totals are incomplete: the
-    group is reported as not assessed, with the offending rows, and left out.
-    The rest of the series is still assessed.
+    Time must be numeric (a year, a period number), or bucketed (``bucket``).
+    A row without a usable time cannot be placed in any period, so its group's
+    totals are incomplete: the group is reported as not assessed, with the
+    offending rows, and left out. The rest of the series is still assessed.
     """
+    if spec.bucket is not None:
+        assert isinstance(frame, ProjectedRelation)
+        return _bucketed_times(frame, spec, blocked, evidence_limit)
     dtype = frame.schema[spec.time_column]
     if not dtype.is_numeric():
         blocked.append(
             Finding.unassessed(
                 f"Not assessed: series {spec.label}: time column {spec.time_column!r} must be "
-                f"numeric (e.g. a year), found {dtype}.",
+                f"numeric (e.g. a year), found {dtype}; set 'bucket' to use calendar periods "
+                "of a Date, Datetime or text column.",
                 check=spec.label,
                 datasets=(spec.dataset,),
             )
@@ -309,6 +338,63 @@ def _valid_times(
         else frame.head(0)
     )
     return remaining if not remaining.is_empty() else None
+
+
+def _bucketed_times(
+    relation: ProjectedRelation, spec: SeriesSpec, blocked: list[Finding], evidence_limit: int
+) -> ProjectedRelation | None:
+    """``relation`` with its time column replaced by bucket labels, natively.
+
+    Rows whose time is missing or cannot be placed in a bucket (unparseable text,
+    a naive local time that is ambiguous or skipped in ``time_zone``) exclude
+    their group, reported with the offending rows exactly as invalid numeric times.
+    """
+    assert relation.lazy is not None
+    try:
+        label, dtype = bucket_labels(spec.time_column, relation.schema[spec.time_column], spec)
+    except ValueError as exc:
+        blocked.append(
+            Finding.unassessed(
+                f"Not assessed: series {spec.label}: {exc}.",
+                check=spec.label,
+                datasets=(spec.dataset,),
+            )
+        )
+        return None
+    count, bad = relation.filter(label.is_null(), "").count_sample(evidence_limit)
+    labelled = replace(
+        relation,
+        lazy=relation.lazy.with_columns(label.alias(spec.time_column)),
+        schema={**relation.schema, spec.time_column: dtype},
+    )
+    if not count:
+        return labelled
+    blocked.append(
+        Finding.unassessed(
+            f"Not assessed: {plural(count, 'row')} of series {spec.label} "
+            f"{'has' if count == 1 else 'have'} a time value ({spec.time_column}) that is "
+            f"missing or cannot be placed in a {spec.describe()} bucket (unparseable, or a "
+            "local time that is ambiguous or does not exist in the time zone); the affected "
+            "group(s) could not be tested.",
+            check=f"{spec.label}: invalid time values",
+            affected=bad.head(evidence_limit),
+            affected_count=count,
+            unit="rows",
+            datasets=(spec.dataset,),
+        )
+    )
+    if not spec.group_by:
+        return None
+    remaining = labelled.without_groups(pl.col(spec.time_column).is_null(), "", spec.group_by)
+    return remaining if remaining.count() else None
+
+
+def _position(spec: SeriesSpec, series: pl.DataFrame) -> pl.Expr:
+    """Numeric position of each period: the period itself, or its exact bucket ordinal."""
+    time = pl.col(spec.time_column)
+    if spec.bucket is None:
+        return time
+    return bucket_ordinal(time, series.schema[spec.time_column], spec.bucket)
 
 
 def _groups(
@@ -442,11 +528,24 @@ class StepChangeRule(_TemporalRule):
                 limit = spec.max_change_rate or self.params.max_change_rate
                 partition = list(spec.group_by) or None
                 time, value = pl.col(spec.time_column), pl.col(_name(spec, "value"))
-                previous = value.shift(1).over(partition) if partition else value.shift(1)
-                previous_time = time.shift(1).over(partition) if partition else time.shift(1)
+
+                def lagged(expression: pl.Expr, over: list[str] | None = partition) -> pl.Expr:
+                    shifted = expression.shift(1)
+                    return shifted.over(over) if over else shifted
+
+                # Bucketed periods are labels; rates use their exact bucket positions.
+                positions = (
+                    [
+                        _position(spec, series).alias(_name(spec, "position")),
+                        lagged(_position(spec, series)).alias(_name(spec, "previous_position")),
+                    ]
+                    if spec.bucket is not None
+                    else []
+                )
                 stepped = series.with_columns(
-                    previous.alias(_name(spec, "previous_value")),
-                    previous_time.alias(_name(spec, "previous_period")),
+                    lagged(value).alias(_name(spec, "previous_value")),
+                    lagged(time).alias(_name(spec, "previous_period")),
+                    *positions,
                 ).filter(pl.col(_name(spec, "previous_value")).is_not_null())
                 # Steps below min_value were examined and judged immaterial: they count.
                 steps += stepped.height
@@ -457,7 +556,12 @@ class StepChangeRule(_TemporalRule):
                     | (pl.col(_name(spec, "previous_value")) > self.params.min_value)
                     | (pl.col(_name(spec, "previous_value")) < -self.params.min_value)
                 )
-                stepped = stepped.with_columns(_compound_rates(stepped, spec))
+                periods = (
+                    (_name(spec, "previous_position"), _name(spec, "position"))
+                    if spec.bucket is not None
+                    else (_name(spec, "previous_period"), spec.time_column)
+                )
+                stepped = stepped.with_columns(_compound_rates(stepped, spec, periods))
                 # A step from zero (or a negative base) has no finite rate but is still a jump.
                 undefined = pl.col(_name(spec, "change_rate")).is_null() & (
                     pl.col(_name(spec, "value")) != pl.col(_name(spec, "previous_value"))
@@ -468,7 +572,10 @@ class StepChangeRule(_TemporalRule):
                     max(0, ctx.evidence_limit - len(records.records)),
                 )
                 flagged = present(
-                    flagged,
+                    flagged.drop(
+                        [_name(spec, "position"), _name(spec, "previous_position")],
+                        strict=False,
+                    ),
                     {
                         _name(spec, "value"): "value",
                         _name(spec, "previous_value"): "previous_value",
@@ -518,14 +625,16 @@ def _compound_change(previous: Any, current: Any, before: Any, now: Any) -> floa
         return math.inf
 
 
-def _compound_rates(frame: pl.DataFrame, spec: SeriesSpec) -> pl.Series:
-    """O(n) vector kernel, with an exact scalar fallback for wider numeric domains."""
-    columns = [
-        _name(spec, "previous_value"),
-        _name(spec, "value"),
-        _name(spec, "previous_period"),
-        spec.time_column,
-    ]
+def _compound_rates(
+    frame: pl.DataFrame, spec: SeriesSpec, periods: Sequence[str] | None = None
+) -> pl.Series:
+    """O(n) vector kernel, with an exact scalar fallback for wider numeric domains.
+
+    ``periods`` names the previous and current period positions (the time column
+    and its predecessor by default; bucket ordinals for bucketed series).
+    """
+    earlier, later = periods or (_name(spec, "previous_period"), spec.time_column)
+    columns = [_name(spec, "previous_value"), _name(spec, "value"), earlier, later]
     narrow = frame.select(columns)
     wider = any(dtype.is_decimal() or dtype == pl.Int128 for dtype in narrow.dtypes)
     if wider or np.finfo(np.longdouble).nmant < 63:
@@ -612,7 +721,7 @@ class TrendDirectionRule(_TemporalRule):
                             too_short += 1
                             continue
                         result = sps.kendalltau(
-                            frame[spec.time_column].to_numpy(),
+                            frame.select(_position(spec, frame)).to_series().to_numpy(),
                             frame[_name(spec, "value")].to_numpy(),
                         )
                         examined += 1
@@ -702,7 +811,8 @@ class TrendOutlierRule(_TemporalRule):
                             too_short += 1
                             continue
                         try:
-                            times = checked_float_series(frame[spec.time_column]).to_numpy()
+                            positions = frame.select(_position(spec, frame)).to_series()
+                            times = checked_float_series(positions).to_numpy()
                             values = checked_float_series(frame[_name(spec, "value")]).to_numpy()
                         except ValueError as exc:
                             blocked.append(
@@ -736,7 +846,9 @@ class TrendOutlierRule(_TemporalRule):
                         for index in np.flatnonzero(flagged):
                             time_value = times[index]
                             period = (
-                                int(time_value)
+                                frame[spec.time_column][int(index)]
+                                if spec.bucket is not None
+                                else int(time_value)
                                 if float(time_value).is_integer()
                                 else float(time_value)
                             )
@@ -916,10 +1028,9 @@ def _exact_trend_core(
     y_range = max(abs(value - y[0]) for value in y)
     if y_range == 0:
         return _constant_trend(values)
-    sum_x, sum_y = sum(x), sum(y)
-    centred = [count * value - sum_x for value in x]  # count * (x - mean x)
-    spread = sum(c * c for c in centred)  # count**2 * Sxx
-    cross = sum(c * value for c, value in zip(centred, y, strict=True))  # count * Sxy
+    # count * (x - mean x), count**2 * Sxx and count * Sxy, exactly.
+    terms = normal_equations(x, y)
+    sum_y, centred, spread, cross = terms.sum_y, terms.centred, terms.spread, terms.cross
     # With D = count * spread, fitted_i = numerator_i / D and residual_i = r_i / D
     # in the common integer y units; D is positive because x is not constant.
     denominator = count * spread
@@ -954,8 +1065,12 @@ def _exact_trend_core(
 class MissingPeriodParams(SeriesParams):
     """Parameters for :class:`MissingPeriodRule`."""
 
-    expected_periods: tuple[NumericBound, ...] | None = None
-    """Periods every group must have; the union of observed periods when omitted."""
+    expected_periods: tuple[Bound, ...] | None = None
+    """Periods every group must have; the union of observed periods when omitted.
+    For a bucketed series these are dates or datetimes (each names its bucket), and
+    when omitted every bucket between the first and last observed one is expected."""
+    max_expected_periods: int = Field(default=1_000_000, ge=1)
+    """Largest calendar grid of a bucketed series; a longer one is not assessed."""
     expected_groups: tuple[dict[str, Any], ...] | None = None
     """Group combinations that must exist (``{county: 48001, pollutant: 2}``), so a
     group missing altogether is reported, not only gaps in groups that exist."""
@@ -990,8 +1105,18 @@ class MissingPeriodRule(_TemporalRule):
                 series = _aggregate(ctx, spec, blocked, require_finite=False)
                 if series is None:
                     continue
-                observed = series[spec.time_column].unique().to_list()
-                expected = set(self.params.expected_periods or observed)
+                try:
+                    expected = self._expected(ctx, spec, series)
+                except ValueError as exc:
+                    blocked.append(
+                        unassessed_contract(
+                            spec.label,
+                            exception_details(exc),
+                            (spec.dataset,),
+                            check=f"{spec.label}: expected periods",
+                        )
+                    )
+                    continue
                 try:
                     absent = self._absent_groups(ctx, spec, series, blocked)
                 except Exception as exc:
@@ -1007,7 +1132,11 @@ class MissingPeriodRule(_TemporalRule):
                 if absent is None:
                     continue
                 used.append(spec)
-                shown_all = sorted(int(m) if m == int(m) else m for m in expected)
+                shown_all = (
+                    expected.to_list()
+                    if isinstance(expected, pl.Series)
+                    else sorted(int(m) if m == int(m) else m for m in expected)
+                )
                 shown_sample = shown_all[: ctx.evidence_limit]
                 for key in absent:
                     groups += 1
@@ -1029,9 +1158,21 @@ class MissingPeriodRule(_TemporalRule):
                         groups += 1
                         # A period whose values are all missing is as absent as one with no rows.
                         with_value = frame.filter(pl.col(_name(spec, "value")).is_not_null())
-                        missing = sorted(expected - set(with_value[spec.time_column].to_list()))
-                        if missing:
+                        if isinstance(expected, pl.Series):
+                            # Labels compare natively: two fall-back hours stay distinct.
+                            present_periods = with_value.select(spec.time_column)
+                            shown = (
+                                expected.to_frame(spec.time_column)
+                                .join(present_periods, on=spec.time_column, how="anti")
+                                .sort(spec.time_column)[spec.time_column]
+                                .to_list()
+                            )
+                        else:
+                            missing = sorted(
+                                expected - set(with_value[spec.time_column].to_list())
+                            )
                             shown = [int(m) if m == int(m) else m for m in missing]
+                        if shown:
                             records.append(
                                 annotate(
                                     key,
@@ -1053,6 +1194,34 @@ class MissingPeriodRule(_TemporalRule):
             blocked,
             unit="groups",
         )
+
+    def _expected(
+        self, ctx: DataContext, spec: SeriesSpec, series: pl.DataFrame
+    ) -> set[Any] | pl.Series:
+        """Expected periods: numbers, or (bucketed) the ordered bucket labels.
+
+        A bucketed series expects its configured periods' buckets, or else every
+        bucket of the calendar grid from its first to its last observed bucket, so
+        a bucket missing from every group is found too.
+
+        Raises:
+            ValueError: if the expected periods do not suit the time column.
+        """
+        configured = self.params.expected_periods
+        temporal = [p for p in configured or () if isinstance(p, date | datetime)]
+        if spec.bucket is None:
+            if temporal:
+                raise ValueError(
+                    "expected_periods are dates or times; set the series' 'bucket' to use them"
+                )
+            return set(configured or series[spec.time_column].unique().to_list())
+        time = spec.time_column
+        if configured:
+            raw = ctx.schema(spec.dataset)[time]
+            labels = [bucket_scalar(p, time, raw, spec) for p in configured]
+            return pl.concat(labels).unique().sort()
+        first, last = (series.select(bound(time))[time] for bound in (pl.min, pl.max))
+        return bucket_grid(first, last, spec.bucket, limit=self.params.max_expected_periods)
 
     def _absent_groups(
         self, ctx: DataContext, spec: SeriesSpec, series: pl.DataFrame, blocked: list[Finding]
@@ -1409,7 +1578,8 @@ class SeasonalParams(SeriesParams):
     season_length: int = Field(default=12, ge=2)
     """Periods per cycle: 12 for monthly data indexed 1..12 or as a running month
     number, 4 for quarters, 7 for days of the week. The season of a period is
-    ``period mod season_length``."""
+    ``period mod season_length`` (the bucket ordinal for a bucketed series, so
+    monthly buckets with 12 give calendar months)."""
     threshold: float = Field(default=3.5, gt=0)
     """Modified z-score (median/MAD) above which a value is anomalous for its season."""
     min_cycles: int = Field(default=4, ge=3)
@@ -1450,7 +1620,7 @@ class SeasonalAnomalyRule(_TemporalRule):
                 used.append(spec)
                 season = fresh_internal("season", series.columns)
                 seasonal = series.with_columns(
-                    (pl.col(spec.time_column) % p.season_length).alias(season)
+                    (_position(spec, series) % p.season_length).alias(season)
                 )
                 for key, frame in _groups(seasonal, spec):
                     with isolate_contract(spec.label, (spec.dataset,), blocked, affected=[key]):
@@ -1626,29 +1796,3 @@ class LevelShiftRule(_TemporalRule):
             too_short=too_short,
             unit="series",
         )
-
-
-def _best_split(
-    values: np.ndarray, min_segment: int, min_relative_shift: float = 0.0
-) -> tuple[int, float, float, float] | None:
-    """The split maximising the gap between segment medians over the pooled robust spread."""
-    best: tuple[int, float, float, float] | None = None
-    if not len(values) or not bool(np.any(values)):
-        return None
-    values, unit, origin = center_scale_observations(values)
-    exact_unit, exact_origin = Fraction(unit), Fraction(origin)
-    required_relative = Fraction(str(min_relative_shift))
-    for split in range(min_segment, len(values) - min_segment + 1):
-        left, right = values[:split], values[split:]
-        left_median, right_median = float(np.median(left)), float(np.median(right))
-        residuals = np.concatenate([left - left_median, right - right_median])
-        spread = 1.4826 * float(np.median(np.abs(residuals)))
-        gap = abs(right_median - left_median)
-        before = Fraction(left_median) * exact_unit + exact_origin
-        after = Fraction(right_median) * exact_unit + exact_origin
-        if gap == 0 or abs(after - before) < required_relative * abs(before):
-            continue
-        score = math.inf if spread == 0 else gap / spread
-        if best is None or score > best[3]:
-            best = (split, float(before), float(after), score)
-    return best

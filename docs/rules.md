@@ -678,9 +678,24 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `aggregate` | `Literal['sum', 'mean', 'count', 'min', 'max', 'first', 'last', 'weighted_mean', 'none']` | `sum` |  |
 | `weight` | `str \| None` | `None` | Weight column for ``weighted_mean``. |
 | `order_by` | `str \| tuple[str, ...] \| None` | `None` | Column or lexicographic column list for ``first``/``last``. Conflicting values tied at the selected key are rejected; add an explicit tie-break column. |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year). Rates of change are per unit of it. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
 
 *When it fails:* Review the flagged steps against known drivers. A jump in one group only usually means an input for that period was swapped, duplicated or left at a default.
 
@@ -709,9 +724,24 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `aggregate` | `Literal['sum', 'mean', 'count', 'min', 'max', 'first', 'last', 'weighted_mean', 'none']` | `sum` |  |
 | `weight` | `str \| None` | `None` | Weight column for ``weighted_mean``. |
 | `order_by` | `str \| tuple[str, ...] \| None` | `None` | Column or lexicographic column list for ``first``/``last``. Conflicting values tied at the selected key are rejected; add an explicit tie-break column. |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year). Rates of change are per unit of it. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
 
 *When it fails:* Confirm the growth assumptions behind the series. A series moving against its expected direction usually means periods were loaded in the wrong order or a growth factor was applied inversely.
 
@@ -741,9 +771,24 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `aggregate` | `Literal['sum', 'mean', 'count', 'min', 'max', 'first', 'last', 'weighted_mean', 'none']` | `sum` |  |
 | `weight` | `str \| None` | `None` | Weight column for ``weighted_mean``. |
 | `order_by` | `str \| tuple[str, ...] \| None` | `None` | Column or lexicographic column list for ``first``/``last``. Conflicting values tied at the selected key are rejected; add an explicit tie-break column. |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year). Rates of change are per unit of it. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
 
 *When it fails:* A single off-trend period suggests its inputs differ in kind from its neighbours. Compare that period's inputs and processing with the adjacent periods.
 
@@ -756,7 +801,8 @@ Each series group (for example each county and pollutant) has a value for every 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `series` | `tuple[SeriesSpec, ...]` | `[]` | Series to examine; the rule skips until at least one is configured. |
-| `expected_periods` | `tuple[int \| Decimal \| float, ...] \| None` | `None` | Periods every group must have; the union of observed periods when omitted. |
+| `expected_periods` | `tuple[int \| Decimal \| float \| datetime \| date, ...] \| None` | `None` | Periods every group must have; the union of observed periods when omitted. For a bucketed series these are dates or datetimes (each names its bucket), and when omitted every bucket between the first and last observed one is expected. |
+| `max_expected_periods` | `int` | `1000000` | Largest calendar grid of a bucketed series; a longer one is not assessed. |
 | `expected_groups` | `tuple[dict[str, Any], ...] \| None` | `None` | Group combinations that must exist (``{county: 48001, pollutant: 2}``), so a group missing altogether is reported, not only gaps in groups that exist. |
 | `groups_from` | `str \| None` | `None` | A dataset whose distinct combinations of each series' ``group_by`` columns are expected (e.g. an inventory of county x pollutant). |
 
@@ -772,9 +818,24 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `aggregate` | `Literal['sum', 'mean', 'count', 'min', 'max', 'first', 'last', 'weighted_mean', 'none']` | `sum` |  |
 | `weight` | `str \| None` | `None` | Weight column for ``weighted_mean``. |
 | `order_by` | `str \| tuple[str, ...] \| None` | `None` | Column or lexicographic column list for ``first``/``last``. Conflicting values tied at the selected key are rejected; add an explicit tie-break column. |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year). Rates of change are per unit of it. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
 
 *When it fails:* Re-run or re-export the missing periods for the affected groups. Set 'expected_periods' so a period missing from every group is detected as well.
 
@@ -804,9 +865,24 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `aggregate` | `Literal['sum', 'mean', 'count', 'min', 'max', 'first', 'last', 'weighted_mean', 'none']` | `sum` |  |
 | `weight` | `str \| None` | `None` | Weight column for ``weighted_mean``. |
 | `order_by` | `str \| tuple[str, ...] \| None` | `None` | Column or lexicographic column list for ``first``/``last``. Conflicting values tied at the selected key are rejected; add an explicit tie-break column. |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year). Rates of change are per unit of it. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
 
 *When it fails:* Identical values over several periods usually mean an input stopped updating or a step reused last period's output. Check the producing step for the flagged periods; list legitimately constant values in ignore_values.
 
@@ -833,9 +909,24 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `aggregate` | `Literal['sum', 'mean', 'count', 'min', 'max', 'first', 'last', 'weighted_mean', 'none']` | `sum` |  |
 | `weight` | `str \| None` | `None` | Weight column for ``weighted_mean``. |
 | `order_by` | `str \| tuple[str, ...] \| None` | `None` | Column or lexicographic column list for ``first``/``last``. Conflicting values tied at the selected key are rejected; add an explicit tie-break column. |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year). Rates of change are per unit of it. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
 
 *When it fails:* A cumulative value that drops was reset or re-based. Find the producing step's change at that period; set allow_reset_to_zero if resets to zero are expected.
 
@@ -848,7 +939,7 @@ Each value is compared with the values of the same season (month, quarter, weekd
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `series` | `tuple[SeriesSpec, ...]` | `[]` | Series to examine; the rule skips until at least one is configured. |
-| `season_length` | `int` | `12` | Periods per cycle: 12 for monthly data indexed 1..12 or as a running month number, 4 for quarters, 7 for days of the week. The season of a period is ``period mod season_length``. |
+| `season_length` | `int` | `12` | Periods per cycle: 12 for monthly data indexed 1..12 or as a running month number, 4 for quarters, 7 for days of the week. The season of a period is ``period mod season_length`` (the bucket ordinal for a bucketed series, so monthly buckets with 12 give calendar months). |
 | `threshold` | `float` | `3.5` | Modified z-score (median/MAD) above which a value is anomalous for its season. |
 | `min_cycles` | `int` | `4` | Fewest values of a season (one per cycle) needed to judge it. |
 | `min_relative_deviation` | `float` | `0.1` | Also require this relative difference from the season median. |
@@ -865,9 +956,24 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `aggregate` | `Literal['sum', 'mean', 'count', 'min', 'max', 'first', 'last', 'weighted_mean', 'none']` | `sum` |  |
 | `weight` | `str \| None` | `None` | Weight column for ``weighted_mean``. |
 | `order_by` | `str \| tuple[str, ...] \| None` | `None` | Column or lexicographic column list for ``first``/``last``. Conflicting values tied at the selected key are rejected; add an explicit tie-break column. |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year). Rates of change are per unit of it. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
 
 *When it fails:* A value unlike the same season in other years points to a missing or duplicated input for that period, or an event worth documenting.
 
@@ -897,8 +1003,23 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `aggregate` | `Literal['sum', 'mean', 'count', 'min', 'max', 'first', 'last', 'weighted_mean', 'none']` | `sum` |  |
 | `weight` | `str \| None` | `None` | Weight column for ``weighted_mean``. |
 | `order_by` | `str \| tuple[str, ...] \| None` | `None` | Column or lexicographic column list for ``first``/``last``. Conflicting values tied at the selected key are rejected; add an explicit tie-break column. |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year). Rates of change are per unit of it. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
 
 *When it fails:* A sustained step usually follows a method, unit or source change at that period. Confirm whether the change is real before trusting trends across it.
