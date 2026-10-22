@@ -14,7 +14,7 @@ from collections import Counter
 from decimal import Decimal
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from qavf.engine.registry import RuleParams
 from qavf.engine.severity import Severity
@@ -222,6 +222,8 @@ class ComparisonSpec(RuleParams):
     ``derive``, plugin ``steps``, then the ``where`` filters.
     """
 
+    _datasets: tuple[str, ...] = PrivateAttr(default=())
+
     name: str | None = None
     """Comparison label in reports (``baseline vs candidate`` when omitted)."""
     baseline: str
@@ -303,15 +305,23 @@ class ComparisonSpec(RuleParams):
             raise ValueError(
                 f"levels repeat the name(s) {', '.join(repeated)}; give each a distinct 'name'"
             )
+        from qavf.compare.align import ALIGNMENT_STEPS
         from qavf.compare.levels import LEVELS
 
+        components = [LEVELS.create(level.level, level.params) for level in levels]
         problems = [
             f"level {level.label!r}: {problem}"
-            for level in levels
-            for problem in LEVELS.create(level.level, level.params).configuration_errors(self)
+            for level, component in zip(levels, components, strict=True)
+            for problem in component.configuration_errors(self)
         ]
         if problems:
             raise ValueError("; ".join(problems))
+        named = [self.baseline, self.candidate]
+        for step in self.steps:
+            named.extend(sorted(ALIGNMENT_STEPS.create(step.step, step.params).datasets()))
+        for component in components:
+            named.extend(sorted(component.datasets()))
+        self._datasets = tuple(dict.fromkeys(named))
         return self
 
     def selected_levels(self) -> tuple[LevelConfig, ...]:
@@ -325,6 +335,14 @@ class ComparisonSpec(RuleParams):
     def label(self) -> str:
         """Report label of this comparison."""
         return self.name or f"{self.baseline} vs {self.candidate}"
+
+    def datasets(self) -> tuple[str, ...]:
+        """Every configured dataset the comparison reads: both sides, then the further
+        datasets its steps and levels name (zone layers, crosswalks), in order.
+
+        Resolved when the configuration loads, while its plugin components are visible.
+        """
+        return self._datasets
 
     def tolerance(self, column: str | None) -> tuple[float, float]:
         """``(rtol, atol)`` for a column: its own tolerance, else the comparison's."""

@@ -100,7 +100,7 @@ class DatasetComparisonRule(Rule):
     def configuration_errors(self, settings: QAVFSettings) -> list[str]:
         problems = []
         for spec in self.params.comparisons:
-            for dataset in (spec.baseline, spec.candidate):
+            for dataset in spec.datasets():
                 if dataset not in settings.datasets:
                     problems.append(f"comparison {spec.label!r} names unknown dataset {dataset!r}")
         counts = Counter(spec.label for spec in self.params.comparisons)
@@ -113,11 +113,7 @@ class DatasetComparisonRule(Rule):
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements:
         return DataRequirements(
-            frozenset(
-                dataset
-                for spec in self.params.comparisons
-                for dataset in (spec.baseline, spec.candidate)
-            )
+            frozenset(dataset for spec in self.params.comparisons for dataset in spec.datasets())
         )
 
     def evaluate(self, ctx: DataContext) -> Finding | list[Finding]:

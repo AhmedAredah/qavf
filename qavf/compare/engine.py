@@ -99,6 +99,8 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
                     count=_counter(observation),
                     units=_declared(ctx, datasets[side], "unit"),
                     nullable=_declared(ctx, datasets[side], "nullable"),
+                    collect=observation.collect,
+                    data=ctx,
                 )
                 plan = normalized_plan(ctx, datasets[side], observation.scan(), declared_only=True)
                 aligned[side] = align(plan, steps, context)

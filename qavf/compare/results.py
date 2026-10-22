@@ -230,7 +230,7 @@ class _Audited(SnapshotModel):
     """Encode rich values (dates, zoned instants, group keys) in the audit fields."""
 
     @field_serializer(
-        "window_start", "window_end", "group", "peaks", "level_shifts",
+        "window_start", "window_end", "group", "peaks", "level_shifts", "clusters",
         when_used="json", check_fields=False,
     )  # fmt: skip
     def _encode_audited(self, value: Any) -> Any:
@@ -317,6 +317,61 @@ class ShapeResult(LevelResult):
     assessments: list[ShapeAssessment] = Field(default_factory=list)
     series: list[SeriesShape] = Field(default_factory=list)
     """Per-series metrics in group order, bounded by the evidence limit."""
+
+
+# ------------------------------------------------------------------ spatial
+class SpatialResult(LevelResult, _Audited):
+    """Measures per zone on each side, expected zones, and spatial patterns of change."""
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("clusters",)
+
+    zone_column: str = ""
+    zones: str = ""
+    """Where the zones come from: a zone layer, a grid, or the zone column alone."""
+    baseline_zones: int = 0
+    candidate_zones: int = 0
+    only_in_baseline: int = 0
+    only_in_candidate: int = 0
+    expected_zones: int | None = None
+    """Zones of the layer (or the grid's extent) each side should have."""
+    missing: dict[str, int] = Field(default_factory=dict)
+    """Expected zones each side lacks."""
+    measures: list[MeasureComparison] = Field(default_factory=list)
+    """Per measure; its ``significance`` holds the per-zone tests."""
+    pattern_measure: str | None = None
+    """The measure whose per-zone values the pattern checks read."""
+    spearman: float | None = None
+    """Spearman correlation of the zones' values on the two sides."""
+    morans_i: float | None = None
+    """Global Moran's I of the per-zone differences."""
+    weights: str | None = None
+    """The neighbour weights of the pattern checks (method, pairs, islands)."""
+    islands: int = 0
+    """Compared zones without a neighbour."""
+    clusters: list[dict[str, Any]] = Field(default_factory=list)
+    """Zones in significant clusters of change (LISA), bounded by the evidence limit."""
+
+
+# ---------------------------------------------------------------- locations
+class LocationsResult(LevelResult):
+    """Where features matched by key moved, and how polygon features changed."""
+
+    keys: list[str] = Field(default_factory=list)
+    kind: str = ""
+    """``points`` (coordinate columns) or ``geometries`` (a geometry column)."""
+    crs: str = ""
+    unit: str = ""
+    """Unit of distances: metres (haversine) for a geographic CRS, else CRS units."""
+    matched: int = 0
+    """Features on both sides."""
+    unlocated: int = 0
+    """Matched features without a usable location on one or both sides."""
+    moved: int = 0
+    """Features that moved more than ``max_distance``."""
+    max_moved: float | None = None
+    """Largest distance a matched feature moved."""
+    area_changed: int = 0
+    shape_changed: int = 0
 
 
 # --------------------------------------------------------------- comparison

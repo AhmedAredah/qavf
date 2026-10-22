@@ -111,6 +111,10 @@ class ComparisonLevel(Component):
             return ["needs the comparison's 'keys'"]
         return []
 
+    def datasets(self) -> frozenset[str]:
+        """Further configured datasets the level reads (e.g. a zone layer)."""
+        return frozenset()
+
     @abstractmethod
     def evaluate(self, inputs: LevelInputs, name: str) -> LevelResult:
         """Compare the sides; raise for anything that cannot be assessed."""
@@ -127,6 +131,8 @@ LEVELS: ComponentRegistry[ComparisonLevel] = ComponentRegistry(
         "qavf.compare.levels.groups",
         "qavf.compare.levels.temporal",
         "qavf.compare.levels.shape",
+        "qavf.compare.levels.spatial",
+        "qavf.compare.levels.locations",
     ),
 )
 register_level = LEVELS.register

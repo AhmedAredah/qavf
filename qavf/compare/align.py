@@ -24,7 +24,7 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import polars as pl
 from pydantic import Field, field_validator
@@ -35,6 +35,9 @@ from qavf.engine.registry import RuleParams
 from qavf.regression._plan import mapped_schema
 from qavf.temporal import CalendarOffset, TimeBucketing, shifted_time
 from qavf.typed_values import checked_cast, exact_scale, logical_type
+
+if TYPE_CHECKING:
+    from qavf.engine.context import DataContext
 
 
 class AlignmentError(ValueError):
@@ -56,6 +59,11 @@ class AlignmentContext:
     notes: list[str] = field(default_factory=list)
     """What steps did to the data that the configuration alone does not say (rows a
     step was asked to drop, ...); reported with the comparison's alignment."""
+    collect: Callable[[pl.LazyFrame], pl.DataFrame] | None = None
+    """Evaluate a plan derived from this side natively, e.g. its distinct points."""
+    data: DataContext | None = None
+    """The run's data context: other configured datasets (zone layers, crosswalks),
+    path resolution and the native resource policy."""
 
     def refuse(self, message: str) -> AlignmentError:
         return AlignmentError(f"{self.side} {self.dataset!r}: {message}")
@@ -94,9 +102,16 @@ class AlignmentStep(Component):
         options = self.params.model_dump(exclude_defaults=True)
         return f"{self.name}: {options}" if options else self.name
 
+    def datasets(self) -> frozenset[str]:
+        """Further configured datasets the step reads (zone layers, crosswalks)."""
+        return frozenset()
+
 
 ALIGNMENT_STEPS: ComponentRegistry[AlignmentStep] = ComponentRegistry(
-    "alignment step", "qavf.compare.alignment", AlignmentStep, builtins=(__name__,)
+    "alignment step",
+    "qavf.compare.alignment",
+    AlignmentStep,
+    builtins=(__name__, "qavf.compare.zones"),
 )
 register_alignment_step = ALIGNMENT_STEPS.register
 
