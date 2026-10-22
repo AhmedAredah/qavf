@@ -61,17 +61,16 @@ from qavf.compare.levels.groups import (
     compare_measure,
     materiality,
     measure_tests,
+    member_values,
     one_sided_check,
     reduce_groups,
 )
-from qavf.compare.results import CheckResult, LevelResult, SpatialResult
+from qavf.compare.results import CheckResult, LevelResult, SpatialResult, ZoneMap
 from qavf.compare.significance import (
     Inference,
     MeasureTest,
     Member,
-    evidence_fields,
-    judge,
-    summary_metrics,
+    family_check,
 )
 from qavf.compare.spec import ComparisonSpec, InferenceParams, Side
 from qavf.engine.registry import RuleParams
@@ -92,6 +91,7 @@ from qavf.spatial.extension import fetch, spatial_connection
 from qavf.spatial.grid import Grid, cell_centres, grid_cells, label_positions
 from qavf.spatial.hierarchy import pairs_frame
 from qavf.spatial.layers import ZoneLayer, load_zones, zone_ids
+from qavf.spatial.outlines import grid_rings, layer_rings, view_paths
 from qavf.spatial.weights import (
     SpatialWeights,
     WeightsSpec,
@@ -220,6 +220,10 @@ class SpatialParams(InferenceParams):
     rtol: float | None = Field(default=None, ge=0)
     """Default relative tolerance of this level; the comparison's when omitted."""
     atol: float | None = Field(default=None, ge=0)
+    map: bool = True
+    """Keep simplified zone outlines for the report's map (from the layer or grid)."""
+    map_vertices: int = Field(default=20_000, ge=1)
+    """Most outline vertices kept after simplification; a larger map is left out."""
 
     @model_validator(mode="after")
     def _consistent(self) -> SpatialParams:
@@ -323,7 +327,42 @@ class SpatialLevel(ComparisonLevel):
             only_in_candidate=aligned.only_candidate.height,
             measures=comparisons,
             pattern_measure=spec.label,
+            values=[member_values(inputs, aligned, i) for i in range(len(aligned.measures))],
+            outlines=self._outlines(inputs, params, source, aligned) if params.map else None,
             **details,
+        )
+
+    # -------------------------------------------------------------------- map
+    @staticmethod
+    def _outlines(
+        inputs: LevelInputs, params: SpatialParams, source: ZoneSource, aligned: AlignedGroups
+    ) -> ZoneMap:
+        """The zones' simplified outlines for the report, or why there are none."""
+        try:
+            if source.layer is not None:
+                with spatial_connection(inputs.ctx) as con:
+                    loaded = load_zones(con, inputs.ctx, source.layer)
+                    rings = layer_rings(con, loaded.table, loaded.ids)
+            elif source.grid is not None:
+                ids = aligned.joined[params.zone_column].drop_nulls()
+                rings = grid_rings(ids, source.grid)
+            else:
+                return ZoneMap(note="the zones have no geometry (an attribute zone column)")
+            drawn = view_paths(rings)
+        except Exception as exc:
+            return ZoneMap(note=f"no zone outlines: {exc}".rstrip("."))
+        if drawn.vertices > params.map_vertices:
+            return ZoneMap(
+                vertices=drawn.vertices,
+                note=f"too large: {drawn.vertices:,} outline vertices after simplification "
+                f"(map_vertices {params.map_vertices:,})",
+            )
+        return ZoneMap(
+            width=drawn.width,
+            height=drawn.height,
+            paths=drawn.paths,
+            centres=drawn.centres,
+            vertices=drawn.vertices,
         )
 
     # ----------------------------------------------------------- expected zones
@@ -393,68 +432,6 @@ class SpatialLevel(ComparisonLevel):
         series = pl.Series(column, ids, dtype=aligned.both.schema[column])
         return _Zones(series, before, after)
 
-    @staticmethod
-    def _decided(
-        check: str,
-        plan: MeasureTest,
-        inference: Inference,
-        members: list[Member],
-        records: list[dict[str, Any]],
-        limit: int,
-        ok: str,
-        failed: str,
-        noun: str,
-        magnitudes: list[float] | None = None,
-    ) -> CheckResult:
-        """Judge one family and grade it; members failing carry their test as evidence.
-
-        Failures decide the check (with the not-assessed members counted in its
-        message); without failures, members whose test could not run leave it not
-        assessed. Evidence keeps the ``limit`` largest ``magnitudes``.
-        """
-        judgement = judge(plan, inference, members, limit)
-        leaders = LargestEvidence(limit)
-        shown = judgement.failed or judgement.unassessed
-        for position in shown:
-            record = records[position] | evidence_fields(
-                judgement.results[position], judgement.decisions[position]
-            )
-            leaders.add((magnitudes or [0.0] * len(records))[position], position, record)
-        significance = judgement.significance
-        if judgement.unassessed and not judgement.failed:
-            reason = judgement.decisions[judgement.unassessed[0]].reason
-            return CheckResult(
-                check=check,
-                passed=False,
-                assessed=False,
-                message=f"Not assessed: {check}: {plural(len(judgement.unassessed), noun)} need a "
-                f"{plan.name} test that could not run ({reason}).",
-                affected_count=len(judgement.unassessed),
-                total=len(members),
-                unit=f"{noun}s",
-                affected_records=leaders.records,
-                metrics=summary_metrics(significance),
-                significance=significance,
-            )
-        skipped = len(judgement.unassessed)
-        result = graded(
-            check,
-            len(judgement.failed),
-            ok,
-            failed.format(count=plural(len(judgement.failed), noun))
-            + (f" ({skipped:,} not assessed)" if skipped else ""),
-            total=len(members),
-            unit=f"{noun}s",
-            metrics=summary_metrics(significance),
-        )
-        return result.model_copy(
-            update={
-                "affected_records": leaders.records,
-                "truncated": len(judgement.failed) > len(leaders.records),
-                "significance": significance,
-            }
-        )
-
     def _rank(
         self, check: RankCheck, zones: _Zones, inference: Inference, details: dict[str, Any]
     ) -> CheckResult:
@@ -480,7 +457,7 @@ class SpatialLevel(ComparisonLevel):
 
         member = Member(low, "zones", applicable=testable, run=test if testable else None)
         plan = MeasureTest("spearman", None, testable, None if testable else "a side is flat")
-        result = self._decided("rank", plan, inference, [member], [record], 1, ok, bad, "measure")
+        result = family_check("rank", plan, inference, [member], [record], 1, ok, bad, "measure")
         return result.model_copy(update={"metrics": {**result.metrics, **record}})
 
     def _shares(
@@ -553,7 +530,7 @@ class SpatialLevel(ComparisonLevel):
                 "shares", changed, ok, bad.format(count=plural(changed, "zone")),
                 evidence=evidence, total=len(values), unit="zones",
             )  # fmt: skip
-        return self._decided(
+        return family_check(
             "shares",
             plan,
             inference,
@@ -716,7 +693,7 @@ class SpatialLevel(ComparisonLevel):
             )  # fmt: skip
 
         member = Member(material, "differences", run=test)
-        result = SpatialLevel._decided(
+        result = family_check(
             "moran", MeasureTest("morans_i", None), inference, [member], [record], 1, ok, bad,
             "measure",
         )  # fmt: skip
@@ -776,7 +753,7 @@ class SpatialLevel(ComparisonLevel):
             magnitudes.append(abs(float(d[position])))
         ok = f"No zone sits in a significant cluster of material change ({weights.describe()})."
         bad = "{count} sit in significant clusters of material change (" + weights.describe() + ")."
-        check = SpatialLevel._decided(
+        check = family_check(
             "lisa", MeasureTest("local_morans_i", None), inference, members, records, limit, ok,
             bad, "zone", magnitudes=magnitudes,
         )  # fmt: skip

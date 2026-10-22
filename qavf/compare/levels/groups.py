@@ -31,6 +31,7 @@ from qavf.compare.results import (
     GroupsResult,
     LevelResult,
     MeasureComparison,
+    MemberValues,
     RankChange,
 )
 from qavf.compare.significance import (
@@ -51,7 +52,7 @@ from qavf.engine.registry import RuleParams
 from qavf.keys import align_keys
 from qavf.numeric import exact_rational, report_number
 from qavf.rules._grouped import ProjectedRelation, grouped_reduce
-from qavf.rules.helpers import LargestEvidence, fresh_internal, plural
+from qavf.rules.helpers import BoundedEvidence, LargestEvidence, fresh_internal, plural
 
 
 class MeasureSpec(_Configured):
@@ -303,6 +304,35 @@ def measure_tests(
         plan_measure(spec, MEASURES.create(spec.measure, spec.params), relation, inference, rows)
         for spec in specs
     ]
+
+
+def member_values(inputs: LevelInputs, aligned: AlignedGroups, index: int) -> MemberValues:
+    """Measure ``index`` on both sides per key (one-sided keys too), in key order, bounded
+    by the comparison's ``chart_points`` and the evidence byte limit: the report's charts."""
+    spec = aligned.measures[index][0]
+    alias = aligned.aliases[index]
+    left, right = (aligned.columns[side][alias] for side in SIDES)
+    kept = BoundedEvidence(inputs.spec.chart_points, byte_limit=inputs.ctx.evidence_bytes)
+    keys = aligned.keys
+    for row in _rows(aligned.joined, [*keys, left, right]):
+        if len(kept.records) >= kept.limit:
+            kept.count += 1
+            continue
+        values = [exact_rational(value) for value in row[len(keys) :]]
+        kept.append(
+            {
+                **dict(zip(keys, row[: len(keys)], strict=True)),
+                "baseline": report_number(values[0]),
+                "candidate": report_number(values[1]),
+            }
+        )
+    return MemberValues(
+        measure=spec.label,
+        keys=list(keys),
+        points=kept.records,
+        total=kept.count,
+        truncated=kept.truncated,
+    )
 
 
 def one_sided_check(

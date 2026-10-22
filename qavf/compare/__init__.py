@@ -15,6 +15,9 @@ Quick start::
 Over time, the ``temporal`` level compares measures per calendar bucket (or
 cyclic profile) and ``series_shape`` compares the shapes of the bucketed series;
 the ``shift_time`` step compares one version at a shifted time (year over year).
+``distribution``, ``relationships`` and ``contribution`` compare distributions, how
+columns relate and agree, and what explains the total change (mix versus rate);
+``result.write_html(path)`` writes the report's comparison section as a page.
 
 A difference fails when it is material and statistically significant (the
 ``decision`` policy; :mod:`qavf.inference` supplies the tests and corrections).
@@ -47,11 +50,14 @@ from qavf.compare.measures import MEASURES, Measure, MeasureInput, register_meas
 from qavf.compare.registry import ComponentRegistry
 from qavf.compare.results import (
     CheckResult,
+    ContributionResult,
     CoverageResult,
     DatasetComparison,
+    DistributionResult,
     GroupsResult,
     LevelResult,
     RecordsResult,
+    RelationshipsResult,
     SeriesShape,
     ShapeResult,
     Significance,
@@ -74,8 +80,10 @@ __all__ = [
     "ComparisonLevel",
     "ComparisonSpec",
     "ComponentRegistry",
+    "ContributionResult",
     "CoverageResult",
     "DatasetComparison",
+    "DistributionResult",
     "GroupsResult",
     "LevelInputs",
     "LevelResult",
@@ -83,6 +91,7 @@ __all__ = [
     "Measure",
     "MeasureInput",
     "RecordsResult",
+    "RelationshipsResult",
     "SeriesShape",
     "ShapeResult",
     "Significance",

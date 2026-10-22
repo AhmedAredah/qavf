@@ -14,7 +14,9 @@ survives JSON transport from an isolated worker with its types intact.
 from __future__ import annotations
 
 import json
-from typing import Any, ClassVar
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any, ClassVar, Literal
 
 from pydantic import Field, SerializeAsAny, ValidationInfo, field_serializer, field_validator
 
@@ -55,6 +57,9 @@ class LevelResult(SnapshotModel):
     checks: list[CheckResult] = Field(default_factory=list)
     significance: Significance | None = None
 
+    detail_fields: ClassVar[tuple[str, ...]] = ()
+    """Per-member detail (series, zones, chart values) a byte budget may leave out."""
+
     @property
     def assessed(self) -> bool:
         return all(check.assessed for check in self.checks)
@@ -62,6 +67,14 @@ class LevelResult(SnapshotModel):
     @property
     def passed(self) -> bool:
         return all(check.passed for check in self.checks)
+
+    def without_details(self) -> LevelResult:
+        """This result with its :attr:`detail_fields` reset (checks and counts kept)."""
+        fields = type(self).model_fields
+        return self.model_copy(
+            update={name: fields[name].get_default(call_default_factory=True)
+                    for name in self.detail_fields}
+        )  # fmt: skip
 
 
 class _Values(SnapshotModel):
@@ -230,11 +243,29 @@ class _Audited(SnapshotModel):
     """Encode rich values (dates, zoned instants, group keys) in the audit fields."""
 
     @field_serializer(
-        "window_start", "window_end", "group", "peaks", "level_shifts", "clusters",
+        "window_start", "window_end", "group", "peaks", "level_shifts", "clusters", "points",
+        "appeared", "disappeared",
         when_used="json", check_fields=False,
     )  # fmt: skip
     def _encode_audited(self, value: Any) -> Any:
         return encode_non_finite(value)
+
+
+class MemberValues(_Audited):
+    """One measure's value on each side per member (group, bucket, zone), for charts.
+
+    Members are in key order and bounded by the comparison's ``chart_points`` and the
+    evidence byte limit; ``total`` counts them all.
+    """
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("points",)
+
+    measure: str
+    keys: list[str] = Field(default_factory=list)
+    points: list[dict[str, Any]] = Field(default_factory=list)
+    """``{key: ..., "baseline": b, "candidate": c}`` per member (``None``: absent)."""
+    total: int = 0
+    truncated: bool = False
 
 
 # ----------------------------------------------------------------- temporal
@@ -242,6 +273,7 @@ class TemporalResult(LevelResult, _Audited):
     """Measures per time bucket (within ``group_by``) on each side."""
 
     audit_fields: ClassVar[tuple[str, ...]] = ("window_start", "window_end")
+    detail_fields: ClassVar[tuple[str, ...]] = ("values",)
 
     time_column: str = ""
     bucket: str = ""
@@ -261,6 +293,8 @@ class TemporalResult(LevelResult, _Audited):
     """Expected (group, bucket) keys missing on each side."""
     measures: list[MeasureComparison] = Field(default_factory=list)
     """Per measure; its ``significance`` holds the per-bucket tests."""
+    values: list[MemberValues] = Field(default_factory=list)
+    """Each measure's value per (group, bucket) on both sides, for the report's charts."""
 
 
 # ------------------------------------------------------------------ shapes
@@ -304,6 +338,8 @@ class SeriesShape(_Audited):
 class ShapeResult(LevelResult):
     """Shapes of each series (``group_by`` group) of bucketed values compared."""
 
+    detail_fields: ClassVar[tuple[str, ...]] = ("series",)
+
     time_column: str = ""
     bucket: str = ""
     group_by: list[str] = Field(default_factory=list)
@@ -320,10 +356,27 @@ class ShapeResult(LevelResult):
 
 
 # ------------------------------------------------------------------ spatial
+class ZoneMap(SnapshotModel):
+    """Simplified zone outlines for the report's map, in a ``width x height`` view box.
+
+    ``paths`` are SVG path data per zone (its label as text), north up; ``note``
+    says why there is no map (no geometry, no spatial extension, too large).
+    """
+
+    width: float = 0.0
+    height: float = 0.0
+    paths: dict[str, str] = Field(default_factory=dict)
+    centres: dict[str, list[float]] = Field(default_factory=dict)
+    """A label position inside each zone's bounding box."""
+    vertices: int = 0
+    note: str | None = None
+
+
 class SpatialResult(LevelResult, _Audited):
     """Measures per zone on each side, expected zones, and spatial patterns of change."""
 
     audit_fields: ClassVar[tuple[str, ...]] = ("clusters",)
+    detail_fields: ClassVar[tuple[str, ...]] = ("values", "clusters", "outlines")
 
     zone_column: str = ""
     zones: str = ""
@@ -350,6 +403,10 @@ class SpatialResult(LevelResult, _Audited):
     """Compared zones without a neighbour."""
     clusters: list[dict[str, Any]] = Field(default_factory=list)
     """Zones in significant clusters of change (LISA), bounded by the evidence limit."""
+    values: list[MemberValues] = Field(default_factory=list)
+    """Each measure's value per zone on both sides, for the report's charts and map."""
+    outlines: ZoneMap | None = None
+    """The zones' simplified outlines for the report's map (``map: false``: none)."""
 
 
 # ---------------------------------------------------------------- locations
@@ -374,6 +431,259 @@ class LocationsResult(LevelResult):
     shape_changed: int = 0
 
 
+# ------------------------------------------------------------- distribution
+class QuantileDelta(SnapshotModel):
+    """One quantile on each side and whether its change is material."""
+
+    p: float
+    baseline: float
+    candidate: float
+    delta: float
+    material: bool = False
+
+
+class BinShare(SnapshotModel):
+    """A shared bin (or category) and its share of each side's values."""
+
+    label: str
+    baseline: float
+    candidate: float
+
+
+class DistributionMember(_Audited):
+    """One column's distributions in one member (group, zone or bucket) on both sides."""
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("group", "appeared", "disappeared")
+
+    column: str
+    kind: str
+    """``numeric`` or ``categorical``."""
+    group: dict[str, Any] = Field(default_factory=dict)
+    baseline_n: int = 0
+    candidate_n: int = 0
+    psi: float | None = None
+    """Population stability index over the baseline's quantile bins (or the categories)."""
+    ks: float | None = None
+    """Kolmogorov-Smirnov distance (numeric)."""
+    anderson_darling: float | None = None
+    """Anderson-Darling k-sample statistic, when tests run (numeric)."""
+    wasserstein: float | None = None
+    """Earth mover's distance in data units (numeric)."""
+    jensen_shannon: float | None = None
+    """Jensen-Shannon divergence (base 2) on the shared bins or categories."""
+    quantiles: list[QuantileDelta] = Field(default_factory=list)
+    bins: list[BinShare] = Field(default_factory=list)
+    """Each side's share per shared bin or category, for the report's overlays."""
+    appeared: list[Any] = Field(default_factory=list)
+    """Categories only in the candidate (bounded by the evidence limit)."""
+    disappeared: list[Any] = Field(default_factory=list)
+    material: list[str] = Field(default_factory=list)
+    """The metrics beyond their thresholds."""
+    test: TestResult | None = None
+
+
+class ColumnDistribution(SnapshotModel):
+    """How one column's distribution changed across the members compared."""
+
+    column: str
+    kind: str
+    compared: int = 0
+    """Members present on both sides."""
+    material: int = 0
+    """Members with a metric beyond its threshold."""
+    appeared: int = 0
+    """Categories (per member) only in the candidate."""
+    disappeared: int = 0
+    significance: Significance | None = None
+
+
+class DistributionResult(LevelResult):
+    """Per column (and member), distribution distances, quantile deltas and categories."""
+
+    detail_fields: ClassVar[tuple[str, ...]] = ("members",)
+
+    group_by: list[str] = Field(default_factory=list)
+    bucket: str | None = None
+    """How time was bucketed into members, when it was."""
+    only_in_baseline: int = 0
+    only_in_candidate: int = 0
+    columns: list[ColumnDistribution] = Field(default_factory=list)
+    members: list[DistributionMember] = Field(default_factory=list)
+    """Per column and member, in order, bounded by the evidence limit."""
+
+
+# ------------------------------------------------------------ relationships
+class CorrelationChange(_Audited):
+    """One pair of columns' correlation on each side within one member."""
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("group",)
+
+    group: dict[str, Any] = Field(default_factory=dict)
+    method: str
+    columns: list[str]
+    baseline: float | None = None
+    candidate: float | None = None
+    pairs: dict[str, int] = Field(default_factory=dict)
+    change: float | None = None
+    material: bool = False
+    test: TestResult | None = None
+
+
+class RatioChange(_Audited):
+    """A declared ratio ``sum(numerator) / sum(denominator)`` per member on each side."""
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("group",)
+
+    name: str
+    group: dict[str, Any] = Field(default_factory=dict)
+    baseline: float | None = None
+    candidate: float | None = None
+    change: float | None = None
+    """``candidate - baseline``."""
+    material: bool = False
+    test: TestResult | None = None
+
+
+class Agreement(_Audited):
+    """How a column's matched values agree, candidate against baseline, in one member."""
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("group",)
+
+    column: str
+    group: dict[str, Any] = Field(default_factory=dict)
+    pairs: int = 0
+    bias: float | None = None
+    """Mean of ``candidate - baseline`` (Bland-Altman)."""
+    sd: float | None = None
+    lower: float | None = None
+    """Lower 95 % limit of agreement."""
+    upper: float | None = None
+    ccc: float | None = None
+    """Lin's concordance correlation."""
+    mae: float | None = None
+    rmse: float | None = None
+    mape: float | None = None
+    smape: float | None = None
+    r_squared: float | None = None
+    slope: float | None = None
+    """``candidate = intercept + slope * baseline`` (``fit``: OLS or Deming)."""
+    intercept: float | None = None
+    fit: str = "ols"
+    material: list[str] = Field(default_factory=list)
+    """The metrics beyond their thresholds."""
+    test: TestResult | None = None
+
+
+class RelationshipsResult(LevelResult):
+    """Correlation changes, ratio invariants and agreement of matched values."""
+
+    detail_fields: ClassVar[tuple[str, ...]] = ("correlations", "ratios", "agreement")
+
+    group_by: list[str] = Field(default_factory=list)
+    bucket: str | None = None
+    correlations: list[CorrelationChange] = Field(default_factory=list)
+    """Per method, pair and member, in order, bounded by the evidence limit."""
+    ratios: list[RatioChange] = Field(default_factory=list)
+    agreement: list[Agreement] = Field(default_factory=list)
+    matched: int | None = None
+    """Keyed rows on both sides (the agreement metrics use these)."""
+
+
+# ------------------------------------------------------------- contribution
+class MemberContribution(_Audited):
+    """One member's change of the total and its share of the total change."""
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("group",)
+
+    group: dict[str, Any] = Field(default_factory=dict)
+    baseline: float | int = 0
+    candidate: float | int = 0
+    change: float | int = 0
+    exact_change: str = "0"
+    """The change as an exact rational, ``"7/2"``."""
+    share: float | None = None
+    """``change / total change`` (``None`` when the total did not change)."""
+    cumulative: float | None = None
+    """Share of the total change explained by this and every larger contribution."""
+    in_minimal_set: bool = False
+
+
+class DimensionContribution(SnapshotModel):
+    """What explains the total change along one dimension (columns, buckets or both)."""
+
+    dimension: str
+    keys: list[str] = Field(default_factory=list)
+    members: int = 0
+    total_change: float | int = 0
+    exact_total_change: str = "0"
+    minimal_set: int | None = None
+    """Fewest members whose changes explain ``share`` of the total change."""
+    explained: float | None = None
+    """Share of the total change the minimal set explains."""
+    contributions: list[MemberContribution] = Field(default_factory=list)
+    """Largest contributions first, bounded by the comparison's ``chart_points``."""
+    truncated: bool = False
+    significance: Significance | None = None
+
+
+class RateEffect(_Audited):
+    """One stratum's weights and rates on each side and its parts of the rate change."""
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("group",)
+
+    group: dict[str, Any] = Field(default_factory=dict)
+    baseline_weight: float = 0.0
+    candidate_weight: float = 0.0
+    baseline_rate: float | None = None
+    candidate_rate: float | None = None
+    mix: float = 0.0
+    rate: float = 0.0
+    interaction: float = 0.0
+
+
+class RateDecompositionResult(SnapshotModel):
+    """An overall rate's change split exactly into mix, rate and interaction effects."""
+
+    name: str
+    numerator: str
+    denominator: str
+    dimension: str
+    method: str
+    baseline_rate: float = 0.0
+    candidate_rate: float = 0.0
+    change: float = 0.0
+    mix: float = 0.0
+    rate: float = 0.0
+    interaction: float = 0.0
+    exact: dict[str, str] = Field(default_factory=dict)
+    """``change``, ``mix``, ``rate`` and ``interaction`` as exact rationals; ``mix + rate +
+    interaction == change`` holds exactly."""
+    strata: list[RateEffect] = Field(default_factory=list)
+    """Largest effects first, bounded by the evidence limit."""
+    truncated: bool = False
+
+
+class ContributionResult(LevelResult):
+    """Each member's contribution to the total change, and mix versus rate effects."""
+
+    measure: str = ""
+    share: float = 0.8
+    """The share of the total change the minimal sets explain."""
+    baseline_total: float | int | None = None
+    candidate_total: float | int | None = None
+    total_change: float | int | None = None
+    dimensions: list[DimensionContribution] = Field(default_factory=list)
+    rates: list[RateDecompositionResult] = Field(default_factory=list)
+
+    def without_details(self) -> LevelResult:
+        return self.model_copy(
+            update={
+                "dimensions": [d.model_copy(update={"contributions": []}) for d in self.dimensions],
+                "rates": [r.model_copy(update={"strata": []}) for r in self.rates],
+            }
+        )
+
+
 # --------------------------------------------------------------- comparison
 class DatasetComparison(SnapshotModel):
     """Outcome of comparing a candidate dataset with its baseline."""
@@ -393,6 +703,8 @@ class DatasetComparison(SnapshotModel):
     levels: list[SerializeAsAny[LevelResult]] = Field(default_factory=list)
     execution_limits: dict[str, Any] = Field(default_factory=dict)
     """Effective isolated worker controls; empty for in-process comparisons."""
+    omitted: list[str] = Field(default_factory=list)
+    """Detail left out to fit a byte budget (see :meth:`bounded`); empty when complete."""
 
     @field_validator("levels", mode="before")
     @classmethod
@@ -451,3 +763,114 @@ class DatasetComparison(SnapshotModel):
         if not failed:
             return f"{self.name}: datasets agree ({len(self.levels)} level(s) compared)"
         return f"{self.name}: differs: " + "; ".join(failed)
+
+    @property
+    def verdict(self) -> Literal["passed", "failed", "incomplete"]:
+        """``failed`` when an assessed check failed, else ``incomplete`` when something
+        was not assessed, else ``passed``."""
+        failed = any(
+            check.assessed and not check.passed for level in self.levels for check in level.checks
+        )
+        if failed:
+            return "failed"
+        return "passed" if self.passed else "incomplete"
+
+    @property
+    def exit_code(self) -> int:
+        """``0`` when every check was assessed and passed, else ``1`` (as ``qavf run``)."""
+        return 0 if self.passed else 1
+
+    # ------------------------------------------------------------ reporting
+    def bounded(self, max_bytes: int) -> DatasetComparison:
+        """This comparison within ``max_bytes`` of JSON, leaving out detail in order.
+
+        First the levels' per-member detail (series, zones, chart values), then the
+        leading tests of each family, then the checks' evidence records; each step
+        taken is disclosed in :attr:`omitted`. Verdicts, counts and messages always
+        stay. The result may still exceed ``max_bytes`` when they alone do.
+        """
+        if self.json_size_bytes() <= max_bytes:
+            return self
+        steps: list[tuple[str, Any]] = [
+            ("per-member level details", lambda level: level.without_details()),
+            ("tests listed in each significance summary", _without_tests),
+            ("check evidence records", _without_evidence),
+        ]
+        current = self
+        omitted = list(self.omitted)
+        for disclosure, strip in steps:
+            omitted.append(disclosure)
+            current = current.model_copy(
+                update={"levels": [strip(level) for level in current.levels], "omitted": omitted}
+            )
+            if current.json_size_bytes() <= max_bytes:
+                break
+        return current
+
+    def iter_json_chunks(self) -> Iterator[bytes]:
+        """The compact UTF-8 JSON encoding (as :meth:`QAReport.iter_json_chunks`)."""
+        from qavf.reports.models import _iter_snapshot_json
+
+        buffer = bytearray()
+        for chunk in _iter_snapshot_json(self):
+            if buffer and len(buffer) + len(chunk) > 32_768:
+                yield bytes(buffer)
+                buffer.clear()
+            buffer.extend(chunk)
+        if buffer:
+            yield bytes(buffer)
+
+    def json_size_bytes(self) -> int:
+        return sum(len(chunk) for chunk in self.iter_json_chunks())
+
+    def write_json(self, path: str | Path, *, max_bytes: int = 16_777_216) -> Path:
+        """Write the comparison as JSON, within ``max_bytes`` (detail left out is disclosed
+        in ``omitted``); read it back with ``DatasetComparison.model_validate_json``.
+
+        Raises:
+            ResourceLimitError: when verdicts, counts and messages alone exceed it.
+        """
+        from qavf.engine.resources import ResourceLimitError
+        from qavf.io import atomic_stream
+
+        fitted = self.bounded(max_bytes)
+        size = fitted.json_size_bytes()
+        if size > max_bytes:
+            raise ResourceLimitError(
+                f"the comparison needs {size:,} bytes of JSON without its details; "
+                f"max_bytes is {max_bytes:,}"
+            )
+        with atomic_stream(path) as stream:
+            for chunk in fitted.iter_json_chunks():
+                stream.write(chunk)
+        return Path(path)
+
+    def render_html(self, title: str | None = None, *, limits: Any = None) -> str:
+        """This comparison as a self-contained HTML page (the report's comparison section)."""
+        from qavf.reports.comparison import render_comparison
+
+        return render_comparison(self, title, limits=limits)
+
+    def write_html(self, path: str | Path, title: str | None = None, *, limits: Any = None) -> Path:
+        """Write :meth:`render_html` to ``path``, creating parent directories."""
+        from qavf.reports.comparison import write_comparison
+
+        return write_comparison(self, path, title, limits=limits)
+
+
+def _without_tests(level: LevelResult) -> LevelResult:
+    def lean(significance: Significance | None) -> Significance | None:
+        return None if significance is None else significance.model_copy(update={"tests": []})
+
+    checks = [c.model_copy(update={"significance": lean(c.significance)}) for c in level.checks]
+    return level.model_copy(update={"checks": checks, "significance": lean(level.significance)})
+
+
+def _without_evidence(level: LevelResult) -> LevelResult:
+    checks = [
+        check.model_copy(
+            update={"affected_records": [], "truncated": bool(check.affected_records)}
+        )
+        for check in level.checks
+    ]
+    return level.model_copy(update={"checks": checks})

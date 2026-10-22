@@ -30,6 +30,7 @@ import polars as pl
 
 from qavf.aggregation import numeric_expr
 from qavf.compare.measures import Measure, MeasureInput
+from qavf.compare.results import CheckResult
 from qavf.compare.spec import ComparisonSpec, Side
 from qavf.inference.decision import Decision, decide, needs_test
 from qavf.inference.independent import Moments
@@ -43,6 +44,7 @@ from qavf.inference.results import (
     not_assessed,
 )
 from qavf.rules._grouped import ProjectedRelation
+from qavf.rules.helpers import LargestEvidence, plural
 from qavf.stats import checked_float_series
 
 type Extra = Callable[[ProjectedRelation, bool], pl.Expr]
@@ -123,6 +125,17 @@ def _lossy(relation: ProjectedRelation, column: str) -> pl.Expr:
     return (value.is_not_null() & changed).sum().cast(pl.UInt64)
 
 
+def sample_extras(column: str) -> dict[str, Extra]:
+    """The reductions that collect a column's values per group: ``values`` (non-missing,
+    as Float64) and ``lossy`` (integers that Float64 cannot hold exactly)."""
+
+    def values(side: ProjectedRelation, grouped: bool) -> pl.Expr:
+        kept = _values(side, column).drop_nulls()
+        return kept if grouped else kept.implode()
+
+    return {"lossy": lambda side, grouped: _lossy(side, column), "values": values}
+
+
 @dataclass(frozen=True)
 class MeasureTest:
     """How one measure's members (groups, buckets) are tested."""
@@ -182,12 +195,7 @@ def plan_measure(
         extras["lossy"] = lambda side, grouped: _lossy(side, column)
     if test.needs == "samples":
         assert column is not None
-
-        def values(side: ProjectedRelation, grouped: bool) -> pl.Expr:
-            kept = _values(side, column).drop_nulls()
-            return kept if grouped else kept.implode()
-
-        extras["values"] = values
+        extras = sample_extras(column)
     elif test.needs == "moments":
         assert column is not None
 
@@ -423,6 +431,102 @@ def summary_metrics(significance: Significance) -> dict[str, Any]:
         "significant": significance.significant,
         "not_assessed": significance.not_assessed,
     }
+
+
+def family_check(
+    check: str,
+    plan: MeasureTest,
+    inference: Inference,
+    members: Sequence[Member],
+    records: Sequence[dict[str, Any]],
+    limit: int,
+    ok: str,
+    failed: str,
+    noun: str,
+    magnitudes: Sequence[float] | None = None,
+    unmeasured: Sequence[dict[str, Any]] = (),
+) -> CheckResult:
+    """Judge one family and grade it; failing members carry their test as evidence.
+
+    Failures decide the check (the members not assessed are counted in its
+    message); without failures, members whose test could not run, or that could
+    not be measured at all (``unmeasured`` records, each with a ``reason``),
+    leave it not assessed: never a pass. Evidence keeps the ``limit`` largest
+    ``magnitudes``. Under ``material`` no test runs and material members fail.
+    ``failed`` may name the failing members as ``{count}``.
+    """
+    from qavf.compare.levels import graded, not_assessed
+
+    if not members and not unmeasured:
+        return not_assessed(check, f"no {noun} to compare on both sides")
+    sizes = list(magnitudes) if magnitudes is not None else [0.0] * len(records)
+    leaders = LargestEvidence(limit)
+    significance: Significance | None = None
+    metrics: dict[str, Any] = {}
+    reason = None
+    if inference.tests:
+        judgement = judge(plan, inference, members, limit)
+        failing, unassessed = judgement.failed, judgement.unassessed
+        significance = judgement.significance
+        metrics = summary_metrics(significance)
+        for position in failing or unassessed:
+            record = records[position] | evidence_fields(
+                judgement.results[position], judgement.decisions[position]
+            )
+            leaders.add(sizes[position], position, record)
+        if unassessed:
+            reason = judgement.decisions[unassessed[0]].reason
+    else:
+        failing = [i for i, member in enumerate(members) if member.material]
+        unassessed = []
+        for position in failing:
+            leaders.add(sizes[position], position, records[position])
+    total = len(members) + len(unmeasured)
+    if (unassessed or unmeasured) and not failing:
+        evidence = [*leaders.records, *unmeasured][:limit]
+        if unassessed:
+            message = (
+                f"Not assessed: {check}: {plural(len(unassessed), noun)} need a "
+                f"{plan.name} test that could not run ({reason})."
+            )
+            if unmeasured:
+                message = message[:-1] + f"; {plural(len(unmeasured), noun)} not measured."
+        else:
+            message = (
+                f"Not assessed: {check}: {plural(len(unmeasured), noun)} could not be "
+                f"measured ({unmeasured[0].get('reason')})."
+            )
+        return CheckResult(
+            check=check,
+            passed=False,
+            assessed=False,
+            message=message,
+            affected_count=len(unassessed) + len(unmeasured),
+            total=total,
+            unit=f"{noun}s",
+            affected_records=evidence,
+            truncated=len(unassessed) + len(unmeasured) > len(evidence),
+            metrics=metrics,
+            significance=significance,
+        )
+    skipped = len(unassessed) + len(unmeasured)
+    result = graded(
+        check,
+        len(failing),
+        ok,
+        failed.format(count=plural(len(failing), noun))
+        + (f" ({skipped:,} not assessed)" if skipped else ""),
+        total=total,
+        unit=f"{noun}s",
+        metrics=metrics,
+    )
+    return result.model_copy(
+        update={
+            "affected_records": leaders.records,
+            "truncated": len(failing) > len(leaders.records),
+            "significance": significance,
+        }
+    )
 
 
 def label(keys: Sequence[str], values: Sequence[Any]) -> str | None:

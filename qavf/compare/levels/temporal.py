@@ -37,6 +37,7 @@ from qavf.compare.levels.groups import (
     compare_measure,
     materiality,
     measure_tests,
+    member_values,
     one_sided_check,
     reduce_groups,
 )
@@ -134,6 +135,53 @@ def bucketed_sides(inputs: LevelInputs, params: TimeAxisParams) -> BucketedSides
     return BucketedSides(relations, column, labels["baseline"], raw)
 
 
+class TimeMembers(TimeBucketing):
+    """Time buckets as members of a level: ``{time_column: day, bucket: month}``."""
+
+    time_column: str
+    """Date, Datetime, text (with ``time_format``) or numeric period column."""
+    max_buckets: int = Field(default=1_000_000, ge=1)
+
+
+@dataclass(frozen=True)
+class KeyedSides:
+    """The members a level compares: ``group_by`` columns, then a bucket label if any."""
+
+    keys: list[str]
+    relations: dict[Side, ProjectedRelation] | None = None
+    """Both sides with the bucket label added (``None``: the aligned sides)."""
+    bucket: str | None = None
+    """How time was bucketed, e.g. ``month in UTC``."""
+
+
+def keyed_sides(
+    inputs: LevelInputs, group_by: tuple[str, ...], time: TimeMembers | None
+) -> KeyedSides:
+    """Members keyed by ``group_by`` and, with ``time``, a time bucket (:func:`bucketed_sides`).
+
+    Zones are group columns too (an attribute or the ``assign_zones`` step's), so
+    ``group_by: [zone]`` with ``time`` keys members by zone and bucket.
+
+    Raises:
+        ValueError: as :func:`bucketed_sides`, or for a missing group column.
+    """
+    for side in SIDES:
+        if absent := [c for c in group_by if c not in inputs.schema(side)]:
+            raise ValueError(f"{side} lacks column(s) {', '.join(absent)}")
+    if time is None:
+        return KeyedSides(list(group_by))
+    axis = TimeAxisParams(
+        time_column=time.time_column,
+        group_by=group_by,
+        max_buckets=time.max_buckets,
+        bucket=time.bucket,
+        time_zone=time.time_zone,
+        time_format=time.time_format,
+    )
+    sides = bucketed_sides(inputs, axis)
+    return KeyedSides([*group_by, sides.column], sides.relations, time.describe())
+
+
 class TemporalParams(TimeAxisParams, InferenceParams):
     """Parameters of the ``temporal`` level."""
 
@@ -214,6 +262,7 @@ class TemporalLevel(ComparisonLevel):
             only_in_baseline=aligned.only_baseline.height,
             only_in_candidate=aligned.only_candidate.height,
             measures=comparisons,
+            values=[member_values(inputs, aligned, i) for i in range(len(aligned.measures))],
             **window,
         )
 

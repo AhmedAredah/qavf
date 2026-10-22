@@ -133,6 +133,9 @@ LEVELS: ComponentRegistry[ComparisonLevel] = ComponentRegistry(
         "qavf.compare.levels.shape",
         "qavf.compare.levels.spatial",
         "qavf.compare.levels.locations",
+        "qavf.compare.levels.distribution",
+        "qavf.compare.levels.relationships",
+        "qavf.compare.levels.contribution",
     ),
 )
 register_level = LEVELS.register

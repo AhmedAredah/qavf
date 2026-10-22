@@ -275,6 +275,9 @@ class ComparisonSpec(RuleParams):
     max_work: int = Field(default=DEFAULT_MAX_WORK, ge=1)
     """Largest work (resamples x values, or values collected) of one test; a larger
     test is not assessed rather than slow."""
+    chart_points: int = Field(default=500, ge=0)
+    """Most per-member values (buckets, zones, contributions) a level keeps for the
+    report's charts, within the evidence byte limit; 0 keeps none."""
 
     @field_validator("derive")
     @classmethod
