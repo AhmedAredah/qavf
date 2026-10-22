@@ -47,7 +47,6 @@ from qavf.inference.resampling import (
     interval_p_value,
     newey_west_slope,
     ols_slope,
-    permutation_p_value,
 )
 from qavf.inference.results import Alternative, Dependence, TestResult
 from qavf.stats import center_scale_observations
@@ -288,33 +287,31 @@ def slope_difference(
             statistic=t, p_value=1.0 if slope == 0 else t_p_value(t, df, alternative),
             ci_low=point, ci_high=point, notes=["the difference is exactly linear"], **common,
         )  # fmt: skip
+    resampled: dict[str, int] = {}
     if dependence == "block":
         length = min(len(x), default_block_length(len(x)) if block is None else block)
-        check_work(resamples * len(x), max_work, "block bootstrap")
-        # Null-imposed block bootstrap: blocks of the centred difference (no trend),
-        # at the fixed positions, give the slope's distribution under no trend.
-        # Residuals around the fitted line would lose the low-frequency variation
-        # the fitted slope absorbed and make the test liberal.
-        indices = block_indices(generator(seed), len(x), resamples, length)
+        longer = min(len(x), 2 * length)
+        check_work(2 * resamples * len(x), max_work, "block bootstrap")
+        # Null-imposed: blocks of the centred difference (no trend) at the fixed
+        # positions give the slope's spread without a trend. (Residuals around the
+        # fitted line would lose the low-frequency variation the slope absorbed.)
+        rng = generator(seed)
         xc = sx - sx.mean()
-        errors = (d - d.mean())[indices]
-        distribution = (errors - errors.mean(axis=1, keepdims=True)) @ xc / float(xc @ xc)
-        low, high = percentile_interval(distribution, confidence)
-        if alternative == "two-sided":
-            p = permutation_p_value(np.abs(distribution), abs(slope), "greater")
-        else:
-            p = permutation_p_value(distribution, slope, alternative)
-        return TestResult(
-            statistic=slope * scale,
-            p_value=p,
-            ci_low=(slope - high) * scale,
-            ci_high=(slope - low) * scale,
-            assumptions=[f"null-imposed circular block bootstrap, block length {length}"],
-            seed=seed,
-            resamples=resamples,
-            **{**common, "statistic_name": "slope_difference"},
+        centred = d - d.mean()
+        variances = []
+        for size in (length, longer):
+            errors = centred[block_indices(rng, len(x), resamples, size)]
+            slopes = (errors - errors.mean(axis=1, keepdims=True)) @ xc / float(xc @ xc)
+            variances.append(float(slopes.var(ddof=1)))
+        # A block bootstrap variance is biased low by O(1/l); extrapolating from
+        # blocks of l and 2l removes the leading term (Richardson extrapolation).
+        se = math.sqrt(max(2 * variances[1] - variances[0], variances[1]))
+        assumption = (
+            f"null-imposed circular block bootstrap standard error, blocks of {length} "
+            f"and {longer} extrapolated"
         )
-    if dependence == "hac":
+        resampled = {"seed": seed, "resamples": resamples}
+    elif dependence == "hac":
         _, se = newey_west_slope(sx, d, lags)
         used = default_hac_lags(len(x)) if lags is None else lags
         assumption = f"Newey-West HAC errors, {used} lag(s)"
@@ -330,6 +327,7 @@ def slope_difference(
         ci_high=high * scale,
         assumptions=[assumption, "linear trends"],
         **common,
+        **resampled,
     )
 
 

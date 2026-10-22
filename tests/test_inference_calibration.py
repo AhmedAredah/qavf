@@ -107,7 +107,7 @@ def _ar1(rng: np.random.Generator, n: int, phi: float) -> np.ndarray:
 
 
 def test_block_bootstrap_holds_its_level_on_ar1_where_iid_over_rejects():
-    reps, n = 300, 120
+    reps, n = 800, 120
     positions = np.arange(n, dtype=float)
     rng = np.random.default_rng(11)
     rejected = {"block": 0, "none": 0}
@@ -115,7 +115,7 @@ def test_block_bootstrap_holds_its_level_on_ar1_where_iid_over_rejects():
         difference = _ar1(rng, n, 0.5)
         for dependence in rejected:
             result = slope_difference(
-                positions, np.zeros(n), difference, dependence=dependence, resamples=999, seed=rep
+                positions, np.zeros(n), difference, dependence=dependence, resamples=499, seed=rep
             )
             rejected[dependence] += result.p_value < ALPHA
     _calibrated(rejected["block"] / reps, reps)
