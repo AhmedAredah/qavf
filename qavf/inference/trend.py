@@ -483,9 +483,13 @@ def compare_correlations(
     candidate: tuple[float, int],
     *,
     alternative: Alternative = "two-sided",
+    variance: float = 1.0,
 ) -> TestResult:
     """Fisher's z test of two independent correlations ``(r, n)``: does the
-    candidate's differ from the baseline's? At least 4 pairs each."""
+    candidate's differ from the baseline's? At least 4 pairs each.
+
+    ``variance`` scales ``var(atanh(r)) = variance / (n - 3)``: 1 for Pearson's
+    correlation, :data:`FIELLER_VARIANCE` (1.06) for Spearman's."""
     (rb, nb), (rc, nc) = baseline, candidate
     n = {"baseline": nb, "candidate": nc}
     if nb < 4 or nc < 4:
@@ -493,7 +497,9 @@ def compare_correlations(
     if not (-1 <= rb <= 1 and -1 <= rc <= 1):
         raise ValueError("correlations must lie in [-1, 1]")
     gap = _fisher(rc) - _fisher(rb)
-    se = math.sqrt(1 / (nb - 3) + 1 / (nc - 3))
+    if variance <= 0:
+        raise ValueError("the variance factor must be positive")
+    se = math.sqrt(variance * (1 / (nb - 3) + 1 / (nc - 3)))
     z = gap / se if math.isfinite(gap) else (0.0 if math.isnan(gap) else gap)
     return TestResult(
         method="fisher_z",
@@ -504,7 +510,12 @@ def compare_correlations(
         effect=rc - rb,
         effect_name="correlation_difference",
         n=n,
-        assumptions=["independent samples", "approximately bivariate normal"],
+        assumptions=[
+            "independent samples",
+            "approximately bivariate normal"
+            if variance == 1
+            else f"Fieller-Hartley-Pearson variance {variance:g}/(n - 3)",
+        ],
     )
 
 

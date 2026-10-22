@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -11,8 +10,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import polars as pl
 
+from qavf.inference.effects import population_stability
 from qavf.inference.independent import ks_asymptotic_p_value, ks_two_sample
-from qavf.statistics.ordered import power_of_two, quantiles, scaled
+from qavf.statistics.ordered import bin_index, power_of_two, quantile_cutpoints, scaled
 from qavf.stats import checked_float_series
 
 if TYPE_CHECKING:
@@ -62,18 +62,13 @@ class Distribution:
             # miss information lost at other points in a wide dynamic range.
             for value, _, _ in self.rows():
                 scaled(value, 0.0, unit)
-            edges = np.unique(
-                quantiles(
-                    ((scaled(v, 0.0, unit), r) for v, r, _ in self.rows(0)),
-                    self.sizes[0],
-                    np.linspace(0, 1, bins + 1).tolist(),
-                )
+            cutpoints = quantile_cutpoints(
+                ((scaled(v, 0.0, unit), r) for v, r, _ in self.rows(0)), self.sizes[0], bins
             )
-            cutpoints = np.concatenate((edges[:-1], [np.nextafter(edges[-1], np.inf)]))
             expected = [0] * (len(cutpoints) + 1)
             actual = [0] * len(expected)
             for value, ref, cur in self.rows():
-                bucket = int(np.searchsorted(cutpoints, scaled(value, 0.0, unit), side="right"))
+                bucket = int(bin_index(cutpoints, scaled(value, 0.0, unit)))
                 expected[bucket] += ref
                 actual[bucket] += cur
             pairs = zip(expected, actual, strict=True)
@@ -83,14 +78,8 @@ class Distribution:
             pairs = ((r, c) for _, r, c in self.rows())
             count = self.store.execute("SELECT count(*) FROM counts").fetchone()[0]
             policy = "distinct_values"
-
-        def terms():
-            for ref, cur in pairs:
-                expected = max(ref / self.sizes[0], 1e-6)
-                actual = max(cur / self.sizes[1], 1e-6)
-                yield (actual - expected) * math.log(actual / expected)
-
-        return math.fsum(terms()), count, policy
+        sizes = (self.sizes[0], self.sizes[1])
+        return population_stability(pairs, sizes), count, policy
 
     def ks(self, stack: Any = None) -> tuple[float, float, str]:
         """Match the documented SciPy auto policy with an exact streamed EDF.

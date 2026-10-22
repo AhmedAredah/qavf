@@ -11,6 +11,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
+from typing import Any
 
 import numpy as np
 
@@ -54,6 +55,27 @@ def quantiles(rows: CountStream, size: int, probabilities: Sequence[float]) -> n
     # extreme values before this operation so subtraction cannot overflow.
     distance = b - a
     return np.where(fraction >= 0.5, b - distance * (1 - fraction), a + distance * fraction)
+
+
+def quantile_cutpoints(rows: CountStream, size: int, bins: int) -> np.ndarray:
+    """Bin edges at a reference's ``bins`` quantiles, with open support tails.
+
+    The edges are the distinct NumPy linear quantiles at ``0, 1/bins, ..., 1`` of
+    the reference's sorted value-frequency ``rows``; the last one moves just above
+    the maximum, so the maximum falls in the last interior bin. A value's bin is
+    :func:`bin_index`: below the reference's minimum is bin 0 and above its
+    maximum the last bin, the support tails another sample may occupy. STA-002
+    and the ``distribution`` comparison level bin with it.
+    """
+    if bins < 1:
+        raise ValueError("quantile bins need a positive bin count")
+    edges = np.unique(quantiles(rows, size, np.linspace(0, 1, bins + 1).tolist()))
+    return np.concatenate((edges[:-1], [np.nextafter(edges[-1], np.inf)]))
+
+
+def bin_index(cutpoints: np.ndarray, values: Any) -> Any:
+    """The bin of each value (``0`` to ``len(cutpoints)``) for :func:`quantile_cutpoints`."""
+    return np.searchsorted(cutpoints, values, side="right")
 
 
 def quantile_ranks(size: int, probability: float | Decimal) -> tuple[int, int, Fraction]:

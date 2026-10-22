@@ -5,7 +5,11 @@ rank-biserial correlation means the candidate tends to be larger, a rate or
 odds ratio above 1 that its rate or odds are higher. Agreement metrics compare
 paired values with the baseline as the reference: ``bias`` is the mean of
 ``candidate - baseline`` and ``r_squared`` how much of the baseline's variance
-the candidate reproduces. None of these is a test; they never need SciPy.
+the candidate reproduces. Distribution distances compare two samples as a
+whole: the population stability index and Jensen-Shannon divergence of shared
+bins, the Kolmogorov-Smirnov and Wasserstein distances of the empirical
+distribution functions, and quantile-by-quantile deltas. None of these is a
+test; they never need SciPy.
 
 Undefined values (a zero pooled spread, a zero baseline for MAPE) are
 ``None`` rather than infinite or NaN.
@@ -14,6 +18,7 @@ Undefined values (a zero pooled spread, a zero baseline for MAPE) are
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 import numpy as np
@@ -206,3 +211,93 @@ def r_squared(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | None
     if total == 0:
         return None
     return 1 - float(((sc - sb) ** 2).sum()) / total
+
+
+# ------------------------------------------------------------ distributions
+def population_stability(
+    pairs: Iterable[tuple[float, float]], totals: tuple[float, float], floor: float = 1e-6
+) -> float:
+    """Population stability index ``sum((a - e) * ln(a / e))`` over bins or categories.
+
+    ``pairs`` are ``(baseline, candidate)`` counts per bin (streamed, in order) and
+    ``totals`` the sides' sizes; ``e`` and ``a`` are the shares, raised to ``floor``
+    so an empty bin stays finite. Summed with ``math.fsum``: STA-002's formula.
+    """
+    if totals[0] <= 0 or totals[1] <= 0:
+        raise ValueError("PSI needs a nonempty sample on each side")
+
+    def terms() -> Iterator[float]:
+        for reference, current in pairs:
+            expected = max(reference / totals[0], floor)
+            actual = max(current / totals[1], floor)
+            yield (actual - expected) * math.log(actual / expected)
+
+    return math.fsum(terms())
+
+
+def jensen_shannon(baseline_counts: npt.ArrayLike, candidate_counts: npt.ArrayLike) -> float:
+    """Jensen-Shannon divergence (base 2, from 0 to 1) of two count vectors on shared bins.
+
+    ``(KL(p || m) + KL(q || m)) / 2`` with ``m`` the mean of the two share vectors;
+    SciPy's ``jensenshannon`` distance is its square root.
+    """
+    b, c = (np.asarray(counts, dtype=float) for counts in (baseline_counts, candidate_counts))
+    if b.shape != c.shape or b.ndim != 1 or (b < 0).any() or (c < 0).any():
+        raise ValueError("Jensen-Shannon needs two count vectors of the same length")
+    if b.sum() <= 0 or c.sum() <= 0:
+        raise ValueError("Jensen-Shannon needs a nonempty sample on each side")
+    p, q = b / b.sum(), c / c.sum()
+    m = (p + q) / 2
+
+    def kl(x: np.ndarray) -> float:
+        kept = x > 0
+        return float(np.sum(x[kept] * np.log2(x[kept] / m[kept])))
+
+    return min(1.0, max(0.0, (kl(p) + kl(q)) / 2))
+
+
+def _distribution_functions(
+    baseline: npt.ArrayLike, candidate: npt.ArrayLike
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Both empirical distribution functions on the pooled sorted (scaled) values."""
+    b, c = _pair(baseline, candidate)
+    if not len(b) or not len(c):
+        raise ValueError("distribution distances need a nonempty sample on each side")
+    sb, sc, unit = _scaled_pair(b, c)
+    sb, sc = np.sort(sb), np.sort(sc)
+    pooled = np.sort(np.concatenate([sb, sc]))
+    below_b = np.searchsorted(sb, pooled, side="right") / len(sb)
+    below_c = np.searchsorted(sc, pooled, side="right") / len(sc)
+    return pooled, below_b, below_c, unit
+
+
+def ks_distance(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
+    """Kolmogorov-Smirnov distance: the largest gap between the two empirical CDFs."""
+    _, below_b, below_c, _ = _distribution_functions(baseline, candidate)
+    return float(np.abs(below_b - below_c).max())
+
+
+def wasserstein(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
+    """First Wasserstein (earth mover's) distance, in data units.
+
+    The area between the empirical CDFs, ``sum |F_b - F_c| dx`` over the pooled
+    sorted values, as SciPy's ``wasserstein_distance`` of the two samples.
+    """
+    pooled, below_b, below_c, unit = _distribution_functions(baseline, candidate)
+    gaps = np.diff(pooled)
+    return float(np.sum(np.abs(below_b[:-1] - below_c[:-1]) * gaps)) * unit
+
+
+def quantile_deltas(
+    baseline: npt.ArrayLike, candidate: npt.ArrayLike, probabilities: Iterable[float]
+) -> list[tuple[float, float, float]]:
+    """``(p, baseline quantile, candidate quantile)`` per probability (NumPy's linear)."""
+    b, c = _pair(baseline, candidate)
+    if not len(b) or not len(c):
+        raise ValueError("quantiles need a nonempty sample on each side")
+    found = []
+    for p in probabilities:
+        if not 0 <= p <= 1:
+            raise ValueError("quantile probabilities must lie in [0, 1]")
+        found.append((float(p), float(np.quantile(b, p)), float(np.quantile(c, p))))
+    return found
