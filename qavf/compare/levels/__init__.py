@@ -125,6 +125,8 @@ LEVELS: ComponentRegistry[ComparisonLevel] = ComponentRegistry(
         "qavf.compare.levels.coverage",
         "qavf.compare.levels.records",
         "qavf.compare.levels.groups",
+        "qavf.compare.levels.temporal",
+        "qavf.compare.levels.shape",
     ),
 )
 register_level = LEVELS.register

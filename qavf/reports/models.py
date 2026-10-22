@@ -117,13 +117,14 @@ def _iter_snapshot_json(value: Any) -> Iterator[bytes]:
     if isinstance(value, SnapshotModel):
         yield b"{"
         names = (*type(value).model_fields, *type(value).model_computed_fields)
+        audited = type(value).audit_fields
         for index, name in enumerate(names):
             if index:
                 yield b","
             yield from iter_json_string(name)
             yield b":"
             child = getattr(value, name)
-            if name in _AUDIT_JSON_FIELDS:
+            if name in _AUDIT_JSON_FIELDS or name in audited:
                 yield from iter_audit_json(child)
             else:
                 yield from _iter_snapshot_json(child)

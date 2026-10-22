@@ -10,7 +10,7 @@ Only the reported value is rounded, once.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import total_ordering
@@ -140,7 +140,7 @@ def spearman(x: Sequence[Exact], y: Sequence[Exact]) -> Correlation | None:
 
 
 def lagged_pairs(
-    baseline: dict[int, Exact], candidate: dict[int, Exact], lag: int, period: int | None
+    baseline: Mapping[int, Exact], candidate: Mapping[int, Exact], lag: int, period: int | None
 ) -> tuple[list[Exact], list[Exact]]:
     """Pairs ``(baseline[t], candidate[t + lag])`` over positions present in both.
 
@@ -167,8 +167,8 @@ class Lag:
 
 
 def best_lag(
-    baseline: dict[int, Exact],
-    candidate: dict[int, Exact],
+    baseline: Mapping[int, Exact],
+    candidate: Mapping[int, Exact],
     max_lag: int,
     min_pairs: int,
     period: int | None = None,

@@ -110,6 +110,8 @@ def test_disabled_plugins_are_never_imported_by_compare_datasets(plugin):
         compare_datasets(FRAME, FRAME, levels=["fake_parity"], entry_points=False)
     # Built-in lookups (and their entire comparison) import no plugin code either.
     assert compare_datasets(FRAME, FRAME, keys="k", entry_points=False).passed
+    temporal = [{"level": "temporal", "time_column": "k", "measures": ["sum(v)"]}]
+    assert compare_datasets(FRAME, FRAME, levels=temporal, entry_points=False).passed
     assert MODULE not in sys.modules and _imported(plugin) == []
 
 

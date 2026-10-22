@@ -225,6 +225,98 @@ class GroupsResult(LevelResult):
     rank: RankChange | None = None
 
 
+class _Audited(SnapshotModel):
+    """Encode rich values (dates, zoned instants, group keys) in the audit fields."""
+
+    @field_serializer(
+        "window_start", "window_end", "group", "peaks", "level_shifts",
+        when_used="json", check_fields=False,
+    )  # fmt: skip
+    def _encode_audited(self, value: Any) -> Any:
+        return encode_non_finite(value)
+
+
+# ----------------------------------------------------------------- temporal
+class TemporalResult(LevelResult, _Audited):
+    """Measures per time bucket (within ``group_by``) on each side."""
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("window_start", "window_end")
+
+    time_column: str = ""
+    bucket: str = ""
+    """How time was bucketed, e.g. ``day in America/Chicago``."""
+    group_by: list[str] = Field(default_factory=list)
+    baseline_buckets: int = 0
+    """Distinct (group, bucket) keys of the baseline."""
+    candidate_buckets: int = 0
+    only_in_baseline: int = 0
+    only_in_candidate: int = 0
+    window_start: Any = None
+    """First bucket of the window searched for gaps (the sides' common span unless set)."""
+    window_end: Any = None
+    expected_buckets: int | None = None
+    """Buckets of the expected grid in the window, for each group."""
+    gaps: dict[str, int] = Field(default_factory=dict)
+    """Expected (group, bucket) keys missing on each side."""
+    measures: list[MeasureComparison] = Field(default_factory=list)
+    """Per measure; its ``significance`` slot is for per-bucket tests."""
+
+
+# ------------------------------------------------------------------ shapes
+class ShapeAssessment(SnapshotModel):
+    """How many series one shape check assessed and found different."""
+
+    check: str
+    assessed: int = 0
+    different: int = 0
+    significance: Significance | None = None
+
+
+class SeriesShape(_Audited):
+    """Shape metrics of one series (one ``group_by`` group) on both sides."""
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("group", "peaks", "level_shifts")
+
+    group: dict[str, Any] = Field(default_factory=dict)
+    buckets: int = 0
+    """Buckets present on both sides (the paired metrics use these)."""
+    pearson: float | None = None
+    spearman: float | None = None
+    slope_baseline: float | None = None
+    """Least-squares change per bucket."""
+    slope_candidate: float | None = None
+    profile_distance: float | None = None
+    """Half the summed absolute differences of the normalized cyclic profiles (0 to 1)."""
+    peaks: dict[str, Any] = Field(default_factory=dict)
+    """Bucket of each side's peak."""
+    peak_shift: int | None = None
+    """Candidate peak position minus baseline peak position, in buckets."""
+    lag: int | None = None
+    """Best-correlated lag: the candidate follows the baseline by this many buckets."""
+    lag_correlation: float | None = None
+    level_shifts: dict[str, Any] = Field(default_factory=dict)
+    """First bucket after each side's level shift (``None``: no shift)."""
+    significance: Significance | None = None
+
+
+class ShapeResult(LevelResult):
+    """Shapes of each series (``group_by`` group) of bucketed values compared."""
+
+    time_column: str = ""
+    bucket: str = ""
+    group_by: list[str] = Field(default_factory=list)
+    measure: str = ""
+    compared: int = 0
+    """Series on both sides."""
+    only_in_baseline: int = 0
+    only_in_candidate: int = 0
+    too_short: int = 0
+    """Series on both sides with too few common buckets (not assessed)."""
+    assessments: list[ShapeAssessment] = Field(default_factory=list)
+    series: list[SeriesShape] = Field(default_factory=list)
+    """Per-series metrics in group order, bounded by the evidence limit."""
+
+
 # --------------------------------------------------------------- comparison
 class DatasetComparison(SnapshotModel):
     """Outcome of comparing a candidate dataset with its baseline."""
@@ -235,7 +327,7 @@ class DatasetComparison(SnapshotModel):
     keys: list[str] = Field(default_factory=list)
     column_map: dict[str, str] = Field(default_factory=dict)
     alignment: list[str] = Field(default_factory=list)
-    """The alignment steps applied, in order."""
+    """The alignment steps applied, in order, then their data-dependent notes."""
     baseline_rows: int | None = None
     """Rows after alignment (``None`` when alignment did not complete)."""
     candidate_rows: int | None = None

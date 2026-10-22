@@ -12,6 +12,10 @@ Quick start::
     )
     print(result.summary())
 
+Over time, the ``temporal`` level compares measures per calendar bucket (or
+cyclic profile) and ``series_shape`` compares the shapes of the bucketed series;
+the ``shift_time`` step compares one version at a shifted time (year over year).
+
 Alignment steps, measures, comparators and levels are registered components;
 plugins add their own with the ``register_*`` decorators or the
 ``qavf.compare.alignment``, ``qavf.compare.measures``, ``qavf.compare.comparators``
@@ -44,8 +48,11 @@ from qavf.compare.results import (
     GroupsResult,
     LevelResult,
     RecordsResult,
+    SeriesShape,
+    ShapeResult,
     Significance,
     StructureResult,
+    TemporalResult,
 )
 from qavf.compare.spec import ComparisonSpec
 
@@ -72,8 +79,11 @@ __all__ = [
     "Measure",
     "MeasureInput",
     "RecordsResult",
+    "SeriesShape",
+    "ShapeResult",
     "Significance",
     "StructureResult",
+    "TemporalResult",
     "compare_datasets",
     "register_alignment_step",
     "register_comparator",

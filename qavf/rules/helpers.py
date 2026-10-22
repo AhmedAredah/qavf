@@ -327,8 +327,8 @@ def annotate(row: Mapping[str, Any], **fields: Any) -> dict[str, Any]:
 
 
 def plural(count: int, noun: str) -> str:
-    """``"1 row"`` / ``"3 rows"``."""
-    return f"{count:,} {noun}{'' if count == 1 else 's'}"
+    """``"1 row"`` / ``"3 rows"`` (``series`` is its own plural)."""
+    return f"{count:,} {noun}{'' if count == 1 or noun.endswith('series') else 's'}"
 
 
 def shared[T](
