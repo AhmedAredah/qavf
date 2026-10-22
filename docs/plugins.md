@@ -235,7 +235,16 @@ Contracts:
   `qavf.temporal`, shared with the TMP series rules. Pick the position you mean:
   `sequence_positions` for spacing in time (rates, slopes, lags) and
   `calendar_position` for cycles and seasons; they differ for sub-day buckets
-  across DST changes ([two positions](comparison.md#buckets)).
+  across DST changes ([two positions](comparison.md#buckets)). The spatial
+  counterpart is `qavf.spatial` ([spatial data](spatial.md)): zone layers,
+  point-to-zone assignment (`assign`, the one point-in-polygon path), grid cells,
+  crosswalks, haversine distance and neighbour weights, shared with GEO-001 and
+  SPA-003. Open a geometry connection with `spatial_connection(ctx)`; it raises
+  `SpatialUnavailable` without DuckDB's spatial extension, which a level reports as
+  not assessed.
+- **Further datasets.** A step or level that reads other configured datasets (a zone
+  layer, a crosswalk) names them in `datasets()`; CMP-001 then requires them, plans
+  their loading and reports an unknown name as a configuration error.
 
 A custom measure and a custom level:
 
@@ -329,10 +338,10 @@ what it `needs` from its caller and a `run(data) -> TestResult` method; an
 
 | `needs` | `TestInput` fields | Supplied by |
 |---|---|---|
-| `samples` | `baseline`, `candidate` (raw values), `statistic`, `probability` | `groups`, `temporal` measures with a column |
-| `moments` | `moments` (size, mean, variance per side) | `groups`, `temporal` measures with a column |
+| `samples` | `baseline`, `candidate` (raw values), `statistic`, `probability` | `groups`, `temporal`, `spatial` measures with a column |
+| `moments` | `moments` (size, mean, variance per side) | `groups`, `temporal`, `spatial` measures with a column |
 | `counts` | `counts` (events), `totals` (exposure) | measures whose values are counts (`count`, `sum`, `null_count`) |
-| `proportions` | `counts` (successes), `totals` (trials) | `share`, `null_count` |
+| `proportions` | `counts` (successes), `totals` (trials) | `share`, `null_count`, the `spatial` `shares` check |
 | `paired` | `baseline`, `candidate` in pair order | the `records` shift check |
 
 Every input also carries `seed`, `max_work`, `confidence` and, for equivalence,

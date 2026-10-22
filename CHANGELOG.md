@@ -6,6 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Add spatial comparison. `qavf.spatial` holds the shared building blocks: zone layers
+  from a configured dataset (WKB or WKT), GeoParquet, GeoJSON or a shapefile, validated
+  (`ST_IsValid`; invalid geometry is refused unless `repair: true`), with declared CRSs
+  (a file's own CRS must agree); x-first (`always_xy`) transforms; one haversine
+  distance for floats, arrays and Polars expressions; point-to-zone assignment through
+  a DuckDB spatial join with a bounding-box prefilter and explicit policies for
+  boundaries (`intersects` or `contains`, ties to the lowest zone id), overlapping
+  zones (`error`, `first`, `all`) and unassigned points (`max_unassigned`); regular
+  grid cells with labels and an expected grid; crosswalks and hierarchies with split
+  weights proven to sum to 1, and exact aggregation up a hierarchy; and neighbour
+  weights (queen and rook contiguity, nearest neighbours, distance bands, tables) with
+  islands reported.
+- Add the `assign_zones` alignment step (a layer per side when zones were re-drawn,
+  grid cells, or attribute zones, plus a crosswalk), the `spatial` level (measures per
+  zone, one-sided and expected zones, Spearman rank correlation, share redistribution,
+  global Moran's I of the changes and LISA clusters of change, corrected for multiple
+  testing) and the `locations` level (distance moved by keyed features, area and shape
+  changes of geometries). `assign_zones` with `temporal` compares zones bucket by
+  bucket. Steps and levels name the further datasets they read (`datasets()`), which
+  CMP-001 requires and validates.
+- Add `local_morans_i` (LISA with conditional permutation p-values and quadrants),
+  `morans_statistic` and `rank_correlation_test` (Spearman, Fisher z with the
+  Fieller-Hartley-Pearson variance) to `qavf.inference`.
+- GEO-001 takes an optional `within` zone layer or study area per point set (a
+  separate check; `boundary: intersects` or `contains`), and SPA-003 an optional
+  `zone_layer` whose ids are the expected entities. Existing configurations are
+  unchanged.
+- Geometry needs DuckDB's `spatial` extension: the Docker image and
+  `scripts/verify_release.py extensions` (now also run by the CI test job) install it.
+  Without it, every check that needs geometry is not assessed, with the reason;
+  attribute zones, grids in the data's CRS and tables work without it.
+
 - Add `qavf.inference`, a statistical inference library shared by comparisons and
   rules: paired (t, Wilcoxon, sign, permutation, bootstrap), equivalence (TOST),
   independent-sample (Welch t, Mann-Whitney, KS, Anderson-Darling, Brown-Forsythe,

@@ -70,6 +70,37 @@ Which groups lead by one measure, compared between the sides.
 | `top_k` | `int` | `10` |  |
 | `descending` | `bool` | `True` | Largest values lead (``false``: smallest). |
 
+### `locations`
+
+Distance moved per keyed feature; area and shape changes of geometries.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `x` | `str \| None` | `None` | Longitude or easting column. |
+| `y` | `str \| None` | `None` | Latitude or northing column. |
+| `geometry` | `str \| None` | `None` | A WKB geometry column instead of ``x``/``y`` (points, lines or polygons). |
+| `crs` | `str` | `EPSG:4326` | CRS of both sides' locations. |
+| `max_distance` | `float` | `0.0` | Largest move (point, or centroid) that is no change: metres for a geographic CRS. |
+| `area` | `AreaCheck \| None` | `{'rtol': 0.0, 'atol': 0.0}` | Area changes of geometries; ``null`` leaves the check out. |
+| `shape` | `ShapeCheck \| None` | `{'max_difference': 0.0}` | Shape changes of geometries; ``null`` leaves the check out. |
+
+#### `AreaCheck`
+
+A geometry's area may change within ``max(atol, rtol * max(\|a\|, \|b\|))``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `rtol` | `float` | `0.0` | Relative tolerance of the areas. |
+| `atol` | `float` | `0.0` | Absolute tolerance: square metres for a geographic CRS, else square CRS units. |
+
+#### `ShapeCheck`
+
+Geometries are equal, or differ by at most ``max_difference`` of area.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_difference` | `float` | `0.0` | Largest symmetric-difference area (the units of ``area``). |
+
 ### `records`
 
 Rows added, removed, changed and unchanged, with per-column change detail.
@@ -221,6 +252,142 @@ Level shifts (TMP-008's screen) appear on both sides, at most ``max_offset`` apa
 | `threshold` | `float` | `5.0` | Gap in medians, in pooled robust spreads, that makes a shift. |
 | `min_relative_shift` | `float` | `0.2` | Also require the medians to differ by this fraction of the earlier one. |
 | `max_offset` | `int` | `0` | Buckets between the two sides' shifts still counted as the same shift. |
+
+### `spatial`
+
+Measures per zone, zones on one side or missing, rank, share and cluster changes.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `decision` | `Literal['material', 'significant', 'material_and_significant', 'equivalence'] \| None` | `None` | ``material_and_significant`` (default), ``material``, ``significant`` or ``equivalence``. |
+| `alpha` | `float \| None` | `None` |  |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by'] \| None` | `None` | Multiple-testing correction across each check's family of tests. |
+| `seed` | `int \| None` | `None` |  |
+| `max_work` | `int \| None` | `None` |  |
+| `zone_column` | `str` | `zone` | The zone id column (an attribute, or the ``assign_zones`` step's ``column``). |
+| `measures` | `tuple[MeasureSpec, ...]` | `(MeasureSpec(measure='count', column=None, name=None, comparators=('diff', 'rel_diff'), rtol=None, atol=None, exact=False, test=None, params={}),)` | Measures compared per zone (``count``, ``sum(x)``, ...). |
+| `missing_zones` | `Literal['fail', 'ignore']` | `fail` | A zone present on one side only: a difference or left out. |
+| `expected` | `bool \| None` | `None` | Report expected zones (the layer's, or the grid extent's cells) a side lacks: whenever zones are known by default, ``true`` to require it, ``false`` to skip. |
+| `allow_missing` | `bool` | `False` | Report missing expected zones without failing. |
+| `layer` | `ZoneLayer \| None` | `None` | The zones, when not from an ``assign_zones`` step. |
+| `grid` | `Grid \| None` | `None` | Grid cells as zones, when not from an ``assign_zones`` step. |
+| `weights` | `WeightsSpec` | `{'method': 'queen', 'k': 4, 'distance': None, 'row_standardize': True, 'table': None}` | Neighbours of the ``moran`` and ``lisa`` checks. |
+| `pattern_measure` | `str \| None` | `None` | The measure label the pattern checks read; the first measure by default. |
+| `difference` | `str` | `diff` | Comparator turning a zone's two values into the difference ``moran`` and ``lisa`` read (``diff``, ``rel_diff``, ``log_ratio``, ...). |
+| `permutations` | `int` | `999` | Permutations of the Moran and LISA tests. |
+| `rank` | `RankCheck \| None` | `{'min_spearman': 0.9}` | Spearman correlation of the zones; ``null`` leaves the check out (so for each). |
+| `shares` | `ShareCheck \| None` | `{'max_change': 0.01}` | Zones that gained or lost share of their side's total. |
+| `moran` | `MoranCheck \| None` | `{'min_i': 0.1}` | Global Moran's I of the per-zone differences. |
+| `lisa` | `LisaCheck \| None` | `{}` | Local Moran's I: the zones in significant clusters of material change. |
+| `rtol` | `float \| None` | `None` | Default relative tolerance of this level; the comparison's when omitted. |
+| `atol` | `float \| None` | `None` |  |
+
+#### `MeasureSpec`
+
+A measure and how its change is judged: ``sum(x)``-style or a mapping.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `measure` | `str` | **required** |  |
+| `column` | `str \| None` | `None` |  |
+| `name` | `str \| None` | `None` | Label in reports; ``measure(column)`` when omitted. |
+| `comparators` | `tuple[str, ...]` | `('diff', 'rel_diff')` |  |
+| `rtol` | `float \| None` | `None` | Relative tolerance; the column's, then the level's, then the comparison's. |
+| `atol` | `float \| None` | `None` |  |
+| `exact` | `bool` | `False` |  |
+| `test` | `TestConfig \| None` | `None` | Significance test of the change per group; the measure's default when omitted (``mean``: ``welch_t``, ``median``: ``mann_whitney``, ``count``: ``poisson``, ...), ``none``: judged by materiality alone. |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+#### `TestConfig`
+
+A significance test: ``welch_t``, ``{test: bootstrap, resamples: 999}`` or ``none``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `test` | `str` | **required** | A registered test (``qavf.inference.TESTS``), or ``none``: no test applies. |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+#### `ZoneLayer`
+
+Zone polygons: ``{dataset: name}`` or ``{path: file}``, with an ``id`` column.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dataset` | `str \| None` | `None` | A configured dataset holding the zones (an id and a WKB or WKT geometry column). |
+| `path` | `str \| None` | `None` | A local GeoParquet, GeoJSON, shapefile or other ``ST_Read`` file (relative to the configuration). |
+| `id` | `str` | `zone` | Zone id column. |
+| `geometry` | `str \| None` | `None` | Geometry column: ``geometry`` for datasets and GeoParquet, ``geom`` for ``ST_Read``. |
+| `crs` | `str` | `EPSG:4326` | CRS of the polygons; a file declaring another one is refused. |
+| `layer` | `str \| None` | `None` | Layer of a multi-layer file (``ST_Read``'s ``layer``). |
+| `repair` | `bool` | `False` | Replace invalid geometries with ``ST_MakeValid`` (recorded) instead of refusing them. |
+
+#### `Grid`
+
+Square cells of ``size`` CRS units from ``origin``, optionally over an ``extent``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `size` | `float` | **required** | Cell width in CRS units (metres for a projected CRS, degrees for a geographic one). |
+| `crs` | `str \| None` | `None` | CRS of the grid; points are transformed to it. The points' own CRS when omitted. |
+| `origin` | `tuple[float, float]` | `(0.0, 0.0)` | ``(x, y)`` of a cell corner. |
+| `extent` | `tuple[float, float, float, float] \| None` | `None` | ``(xmin, ymin, xmax, ymax)``: the cells expected to be present (all cells it overlaps). |
+| `max_cells` | `int` | `1000000` | Largest expected grid; a larger one is not assessed. |
+
+#### `WeightsSpec`
+
+How zones' neighbours are found: contiguity, nearest neighbours, a band or a table.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `method` | `Literal['queen', 'rook', 'knn', 'distance_band', 'table']` | `queen` | ``queen``/``rook`` contiguity (zone polygons, or grid cells), ``knn`` and ``distance_band`` (zone centroids or cell centres), or a ``table`` of pairs. |
+| `k` | `int` | `4` | Neighbours per zone for ``knn``. |
+| `distance` | `float \| None` | `None` | Band for ``distance_band``: metres for a geographic CRS, else CRS units. |
+| `row_standardize` | `bool` | `True` | Divide each zone's weights by their total. |
+| `table` | `Crosswalk \| None` | `None` | For ``table``: ``from``/``to`` (``weight``) pairs of zone ids, as a crosswalk is written (``{dataset: name}``, ``{path: file}`` or ``{pairs: [[a, b], ...]}``); the weights need not sum to 1. |
+
+#### `Crosswalk`
+
+Zone ``from`` -> zone ``to`` (with a split ``weight``), from a dataset, file or list.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dataset` | `str \| None` | `None` | A configured dataset holding the pairs. |
+| `path` | `str \| None` | `None` | A local CSV or Parquet file holding the pairs. |
+| `pairs` | `tuple[tuple[Any, Any] \| tuple[Any, Any, float], ...] \| None` | `None` | Inline ``[from, to]`` or ``[from, to, weight]`` pairs. |
+| `from_column` | `str` | `from` | Column of the child (or old) zone ids. |
+| `to_column` | `str` | `to` | Column of the parent (or new) zone ids. |
+| `weight_column` | `str \| None` | `None` | Split shares of each ``from`` zone; weight 1 for every pair when omitted. |
+| `tolerance` | `float` | `1e-09` | How far a ``from`` zone's weights may sum from 1. |
+
+#### `RankCheck`
+
+The zones rank alike: Spearman's correlation of their values reaches a minimum.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `min_spearman` | `float` | `0.9` | Lowest Spearman correlation of the zones' values on the two sides. |
+
+#### `ShareCheck`
+
+No zone's share of its side's total changes by more than ``max_change``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_change` | `float` | `0.01` | Largest change of a zone's share (0.01: one percentage point). |
+
+#### `MoranCheck`
+
+The per-zone differences are not spatially clustered (global Moran's I).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `min_i` | `float` | `0.1` | Moran's I at or above which clustering of the differences is material. |
+
+#### `LisaCheck`
+
+No zone sits in a significant cluster of material changes (local Moran's I).
+
+*No parameters.*
 
 ### `structure`
 
@@ -433,6 +600,73 @@ Change of the value's share of its side's total (``c/C - b/B``).
 ## Alignment steps
 
 Entry-point group: `qavf.compare.alignment`.
+
+### `assign_zones`
+
+Each row's zone id from a layer, a grid or an attribute column, plus a crosswalk.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `predicate` | `Literal['intersects', 'contains']` | `intersects` | ``intersects``: boundary points belong to the zone; ``contains``: interior only. |
+| `overlap` | `Literal['error', 'first', 'all']` | `error` | A point inside several zones: refuse, the lowest zone id, or every such zone. |
+| `max_unassigned` | `float` | `0.0` | Largest fraction of rows without a zone; more leaves the result not assessed. |
+| `column` | `str` | `zone` | The zone column added (or, with ``zones``, the column the crosswalk rewrites). |
+| `x` | `str \| None` | `None` | Longitude or easting column of each row's point. |
+| `y` | `str \| None` | `None` | Latitude or northing column. |
+| `geometry` | `str \| None` | `None` | A WKB point column instead of ``x``/``y``. |
+| `crs` | `str` | `EPSG:4326` | CRS of the points; transformed (x first) to the layer's or grid's CRS. |
+| `baseline_crs` | `str \| None` | `None` | The baseline's points' CRS when it differs from ``crs``. |
+| `candidate_crs` | `str \| None` | `None` |  |
+| `layer` | `ZoneLayer \| None` | `None` | Zone polygons of both sides. |
+| `baseline_layer` | `ZoneLayer \| None` | `None` | The baseline's zones, when the zones were re-drawn (with ``candidate_layer``). |
+| `candidate_layer` | `ZoneLayer \| None` | `None` |  |
+| `grid` | `Grid \| None` | `None` | Regular grid cells instead of polygons. |
+| `zones` | `str \| None` | `None` | An attribute zone column already in the data (county, TAZ, link id). |
+| `crosswalk` | `Crosswalk \| None` | `None` | Maps ``crosswalk_side``'s zone ids to the other side's (or both sides' zones to their parents). |
+| `crosswalk_side` | `Literal['baseline', 'candidate', 'both']` | `baseline` | The side whose zones the crosswalk rewrites, or ``both`` (a hierarchy: links to zones, zones to counties). |
+| `apportion` | `tuple[str, ...]` | `[]` | Columns a split zone's rows divide by the split weight (e.g. trips). |
+| `weight_column` | `str \| None` | `None` | Add each row's split weight (1 when not split), e.g. for ``sum(weight)``. |
+| `unmapped` | `Literal['error', 'drop']` | `error` | Rows whose zone the crosswalk lacks: refuse, or drop them (recorded). |
+
+#### `ZoneLayer`
+
+Zone polygons: ``{dataset: name}`` or ``{path: file}``, with an ``id`` column.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dataset` | `str \| None` | `None` | A configured dataset holding the zones (an id and a WKB or WKT geometry column). |
+| `path` | `str \| None` | `None` | A local GeoParquet, GeoJSON, shapefile or other ``ST_Read`` file (relative to the configuration). |
+| `id` | `str` | `zone` | Zone id column. |
+| `geometry` | `str \| None` | `None` | Geometry column: ``geometry`` for datasets and GeoParquet, ``geom`` for ``ST_Read``. |
+| `crs` | `str` | `EPSG:4326` | CRS of the polygons; a file declaring another one is refused. |
+| `layer` | `str \| None` | `None` | Layer of a multi-layer file (``ST_Read``'s ``layer``). |
+| `repair` | `bool` | `False` | Replace invalid geometries with ``ST_MakeValid`` (recorded) instead of refusing them. |
+
+#### `Grid`
+
+Square cells of ``size`` CRS units from ``origin``, optionally over an ``extent``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `size` | `float` | **required** | Cell width in CRS units (metres for a projected CRS, degrees for a geographic one). |
+| `crs` | `str \| None` | `None` | CRS of the grid; points are transformed to it. The points' own CRS when omitted. |
+| `origin` | `tuple[float, float]` | `(0.0, 0.0)` | ``(x, y)`` of a cell corner. |
+| `extent` | `tuple[float, float, float, float] \| None` | `None` | ``(xmin, ymin, xmax, ymax)``: the cells expected to be present (all cells it overlaps). |
+| `max_cells` | `int` | `1000000` | Largest expected grid; a larger one is not assessed. |
+
+#### `Crosswalk`
+
+Zone ``from`` -> zone ``to`` (with a split ``weight``), from a dataset, file or list.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dataset` | `str \| None` | `None` | A configured dataset holding the pairs. |
+| `path` | `str \| None` | `None` | A local CSV or Parquet file holding the pairs. |
+| `pairs` | `tuple[tuple[Any, Any] \| tuple[Any, Any, float], ...] \| None` | `None` | Inline ``[from, to]`` or ``[from, to, weight]`` pairs. |
+| `from_column` | `str` | `from` | Column of the child (or old) zone ids. |
+| `to_column` | `str` | `to` | Column of the parent (or new) zone ids. |
+| `weight_column` | `str \| None` | `None` | Split shares of each ``from`` zone; weight 1 for every pair when omitted. |
+| `tolerance` | `float` | `1e-09` | How far a ``from`` zone's weights may sum from 1. |
 
 ### `cast`
 

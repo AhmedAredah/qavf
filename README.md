@@ -22,6 +22,11 @@ pass for a check it could not assess.
   units or codes differ: structure, key coverage, record-level changes, grouped
   measures and time series, a difference failing when it is both material (beyond a
   tolerance) and statistically significant.
+- **Spatial data.** Coordinates inside a study area, points assigned to zone
+  polygons or grid cells, per-zone comparisons with expected zones, rank and share
+  changes, and Moran's I and LISA naming the clusters of change; features that moved
+  or changed shape. Geometry uses DuckDB's `spatial` extension, and without it those
+  checks are not assessed, never passed.
 - **Reports and CI gates.** HTML and JSON reports, deterministic evidence and exit codes.
 - **Extensible.** Rules, sources, comparison levels, measures, comparators and
   statistical tests are plain classes discovered from packages, files or entry points.
@@ -220,6 +225,14 @@ material and statistically significant (with p-values, effects and intervals; th
 missing mapped column makes the comparison not assessed, never a pass. In a configuration, `CMP-001` compares configured datasets. See
 [dataset comparison](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison.md).
 
+Spatially, the `assign_zones` step gives points the zone they fall in (a polygon
+layer from GeoParquet, GeoJSON or a shapefile, or grid cells), and the `spatial`
+level compares zones: one-sided and missing zones, measures per zone, rank and share
+changes, and whether the changes cluster (Moran's I, and LISA naming hot and cold
+spots after a multiple-testing correction). The `locations` level reports keyed
+features that moved (haversine metres) or changed area or shape. See
+[spatial data](https://github.com/AhmedAredah/qavf/blob/main/docs/spatial.md).
+
 ## CLI
 
 | Command | Purpose |
@@ -243,6 +256,8 @@ resource error.
 - [Dataset comparison](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison.md),
   its [component reference](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison_reference.md)
   and [statistical inference](https://github.com/AhmedAredah/qavf/blob/main/docs/inference.md)
+- [Spatial data](https://github.com/AhmedAredah/qavf/blob/main/docs/spatial.md): zone
+  layers, CRS, assignment policies, grids, crosswalks, weights and the spatial levels
 - [Rules reference](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md) and
   [writing plugins](https://github.com/AhmedAredah/qavf/blob/main/docs/plugins.md)
 - [Cloud storage](https://github.com/AhmedAredah/qavf/blob/main/docs/cloud_storage.md)

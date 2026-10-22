@@ -63,16 +63,28 @@ def test_full_example_runs_clean(tmp_path) -> None:
     report = _run(config, frames)
     _assert_clean(report)
     # The configured temporal, spatial and statistical checks were all assessed.
-    for rule_id in ("TMP-001", "TMP-004", "SPA-001", "SPA-003", "STA-001"):
+    for rule_id in ("TMP-001", "TMP-004", "SPA-001", "SPA-003", "STA-001", "GEO-001"):
         assert report.get(rule_id).status is Status.PASS, rule_id
     assert report.get("TMP-001").total_records == len(STATIONS) * 9
     assert report.get("TMP-004").total_records == len(STATIONS)  # bucketed datetimes
-    # The example comparison ran every configured level and every check passed.
+    assert report.get("GEO-001").metrics["passed_checks"] == [
+        "sites(latitude, longitude)", "sites(latitude, longitude) within zones"
+    ]  # fmt: skip
+    # The example comparisons ran every configured level and every check passed.
     compared = [r for r in report.results if r.rule_id == "CMP-001"]
-    assert {r.check.split(": ")[1] for r in compared} == {
+    levels = {tuple(r.check.split(": ")[:2]) for r in compared}
+    assert {level for name, level in levels if name == "daily v1 vs v2"} == {
         "structure", "coverage", "records", "groups", "temporal", "series_shape"
-    }
-    assert all(r.status is Status.PASS for r in compared)
+    }  # fmt: skip
+    assert {level for name, level in levels if name == "daily by zone"} == {
+        "spatial", "temporal", "locations"
+    }  # fmt: skip
+    zoned = [r for r in compared if r.check.startswith("daily by zone: spatial")]
+    spatial = {r.check.split(": ")[2] for r in zoned}
+    assert spatial >= {"zones", "expected", "rank", "shares", "moran", "lisa"}
+    assert all(r.status is Status.PASS for r in compared), [
+        r.message for r in compared if r.status is not Status.PASS
+    ]
 
 
 def test_minimal_example_runs_clean(tmp_path) -> None:

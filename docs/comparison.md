@@ -44,7 +44,8 @@ alone exactly as before and runs no test.
 ## Fail-closed results
 
 A `DatasetComparison` holds one typed result per level (`StructureResult`,
-`CoverageResult`, `RecordsResult`, `GroupsResult`, `TemporalResult`, `ShapeResult`),
+`CoverageResult`, `RecordsResult`, `GroupsResult`, `TemporalResult`, `ShapeResult`,
+`SpatialResult`, `LocationsResult`),
 each with graded checks. A check
 has an exact `affected_count` and bounded `affected_records`: evidence follows the
 run's `max_affected_records` and `max_evidence_bytes` limits and is ordered
@@ -69,7 +70,7 @@ level parameters) uses **candidate names**.
 | `units` | Multiply one side's column by an exact factor; integers and decimals stay exact. `from_unit` must match the declared `unit`; `to_unit` becomes it. | `{mass: {factor: 1000, to_unit: kg}}` |
 | `recode` | Replace values through a map; unmapped values are kept, made null or refused. | `{fc: {values: {"1": interstate}}}` |
 | `derive` | Add the same Polars SQL expression on both sides. | `{total: "cars + trucks"}` |
-| `steps` | Plugin (or built-in) steps, `{step: name, ...}`, e.g. `shift_time` ([calendar alignment](#calendar-alignment)). | `[{step: trim, columns: [name]}]` |
+| `steps` | Plugin (or built-in) steps, `{step: name, ...}`, e.g. `shift_time` ([calendar alignment](#calendar-alignment)) or `assign_zones` ([in space](#in-space)). | `[{step: trim, columns: [name]}]` |
 | `baseline_where`, `candidate_where`, `where` | Keep only rows in scope on one or both sides. | `"year >= 2020"` |
 
 Dataset-level `rename`, `missing_values` and `canonical_columns` apply before the
@@ -85,6 +86,8 @@ pipeline, exactly as for every other rule.
 | `groups` | Measures per `group_by` group on each side; groups on one side only; material changes per measure; optional top-k rank changes | `groups`, one per measure, `rank: <measure>` |
 | `temporal` | Measures per time bucket (and `group_by` group) on each side: buckets on one side only, expected-grid gaps on each side, material changes per measure with the largest first | `buckets`, one per measure, `gaps` |
 | `series_shape` | Each group's bucketed series on both sides: correlation, trend, cyclic profile, peak, lag, level shifts | `series`, `correlation`, `trend`, `profile`, `peak`, `lag`, `level shift` (and `too short`) |
+| `spatial` | Measures per zone (an attribute or `assign_zones`): zones on one side only, expected zones a side lacks, material changes per measure, rank correlation, share redistribution, global Moran's I of the changes and LISA clusters of change | `zones`, one per measure, `expected`, `rank`, `shares`, `moran`, `lisa` |
+| `locations` | Features matched by key: located on one side only, distance moved (metres for longitude/latitude), area and shape changes of geometries | `located`, `moved`, `area`, `shape` |
 
 `allow_added` / `allow_removed` accept one-sided columns, keys or rows where they are
 expected. Every level's parameters are listed in the
@@ -253,6 +256,34 @@ alignment, or with `unaligned: drop` is dropped and counted in
 `DatasetComparison.alignment`. As an alignment step it applies before every level, so
 keyed `records` can be compared year over year too.
 
+## In space
+
+Zones are group keys: an attribute (`county`, `taz`, a link id) compares directly,
+and the `assign_zones` step gives points the id of the zone polygon (or grid cell)
+they fall in, before any level runs, so `groups`, `temporal`, `records` and the
+`spatial` level can all group by zone:
+
+```python
+result = compare_datasets(
+    "v1/trips.parquet",
+    "v2/trips.parquet",
+    keys=["trip_id"],
+    steps=[{"step": "assign_zones", "x": "lon", "y": "lat",
+            "layer": {"path": "zones/taz.geojson", "id": "taz"}}],
+    levels=[
+        {"level": "spatial", "measures": ["count"], "weights": {"method": "rook"}},
+        {"level": "temporal", "time_column": "day", "bucket": "week", "group_by": ["zone"]},
+        {"level": "locations", "x": "lon", "y": "lat", "max_distance": 25},
+    ],
+)
+```
+
+Point-in-polygon, zone layers from GeoJSON or shapefiles, CRS transforms and
+polygon contiguity need DuckDB's `spatial` extension; without it those checks are
+not assessed, never passed, while attribute zones keep working. Zone layers,
+assignment policies (boundaries, overlaps, unassigned points), grids, crosswalks,
+neighbour weights and both levels are described in [spatial data](spatial.md).
+
 ## Significance
 
 A material difference can still be chance: two versions drawn from the same process
@@ -268,15 +299,16 @@ differences and decides with a [policy](inference.md#decision-policies):
 
 Each check is one family for the multiple-testing `correction` (`bh` by default;
 `by`, `holm`, `bonferroni`, `none`) at level `alpha` (0.05): the groups of a measure,
-the buckets of a temporal measure, the series of a shape check, the columns of the
-record shift. Members that needed no test (immaterial under the default) count as
-`p = 1`, which keeps the correction valid.
+the buckets of a temporal measure, the zones of a spatial measure or of `lisa`, the
+series of a shape check, the columns of the record shift. Members that needed no test
+(immaterial under the default) count as `p = 1`, which keeps the correction valid.
 
 | Level | What is tested |
 |---|---|
 | `groups`, `temporal` | each group or bucket's change of a measure, from both sides' values in it, by the measure's default test (`mean`: Welch's t, `median`: Mann-Whitney, `count` and integer `sum`: Poisson, other `sum` and `quantile`: bootstrap, `share` and `null_count`: two-proportion, `std`: Brown-Forsythe), or `test:` per measure |
 | `records` | the `shift` check: per numeric column (and `shift_by` group), a paired test (`test: paired_t` by default; `wilcoxon`, `sign`, `paired_permutation`, `paired_bootstrap`) of `candidate - baseline` over matched rows, with the mean difference judged by the column's tolerance; value changes stay facts, reported whatever the policy |
 | `series_shape` | `correlation`: Fisher z of the Pearson correlation against `min_pearson` with Bartlett's effective sample size; `trend`: the slope difference with a block bootstrap (`dependence: block`, or `hac`, `none`); `lag`: a block bootstrap of the best lag's correlation gain; `profile`, `peak` and `level shift` have no test and are judged by threshold |
+| `spatial` | each zone's change of a measure, as for `groups`; `rank`: Fisher z of Spearman's correlation against `min_spearman`; `shares`: two-proportion per zone (counts); `moran`: a permutation test of the global Moran's I of the changes; `lisa`: conditional permutation tests of the local Moran's I per zone, corrected across zones |
 
 `min`, `max`, `distinct_count` and `weighted_mean` have no sound test: they are
 judged by materiality under every policy, and their `significance` says so

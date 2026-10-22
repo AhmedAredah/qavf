@@ -9,8 +9,8 @@ to matter?) with **significance** (is it larger than chance explains?).
 
 Distribution functions come from SciPy, the `stats` extra (`pip install
 'qavf[stats]'`). Without SciPy every test is reported as **not assessed**, with that
-reason, and is never treated as a pass. Permutation-only methods (Moran's I) and the
-effect sizes need no SciPy.
+reason, and is never treated as a pass. Permutation-only methods (Moran's I, global and
+local) and the effect sizes need no SciPy.
 
 ## Calling the library
 
@@ -89,7 +89,9 @@ reported in data units.
 | `correlation_test` | | Fisher z of a correlation against `rho` | 4 pairs (effective size above 3) | constant series: not assessed |
 | `compare_correlations` | | Fisher z of two independent correlations | 4 pairs each | |
 | `lag_test` | | gain in correlation of a lag over lag 0 (block bootstrap) | `minimum` positions | constant series: not assessed |
+| `rank_correlation_test` | | Fisher z of Spearman's correlation against `rho` (Fieller-Hartley-Pearson variance `1.06 / (n - 3)`) | 4 pairs | constant side: not assessed |
 | `morans_i` | | spatial autocorrelation from given weights (permutation) | 3 locations | constant values or no neighbours: not assessed |
+| `local_morans_i` | | local Moran's I (LISA) per location with its quadrant (HH, LL, HL, LH), conditional permutation; returns a `LocalMoran` of raw p-values to correct | 3 locations | islands and constant values: not assessed |
 
 Components (the second column) are the tests a comparison measure can select with
 `test:`; the [component reference](comparison_reference.md#statistical-tests) lists
@@ -138,6 +140,7 @@ by default:
 | `correlation_test` (`series_shape` correlation) | `effective_n`: Bartlett's effective sample size `n / (1 + 2 sum r_x(k) r_y(k))` over `n // 5` lags | `none` |
 | `lag_test` (`series_shape` lag) | circular block bootstrap of the correlation gain | |
 | `morans_i` | spatial permutation | |
+| `local_morans_i` | conditional permutation (each location's value fixed, one draw shared by all locations) | |
 
 Tests of groups and buckets treat the rows within one group as independent.
 
@@ -167,6 +170,15 @@ level from about 100 buckets and is moderately liberal for short series. The Fis
 test of two independent AR(1) series (autocorrelation 0.7, 60 buckets) rejected at
 0.053 with the effective sample size and 0.258 without. Benjamini-Hochberg kept the
 false discovery rate at 0.033 in a family of 20 tests with 5 real effects.
+
+Under spatial randomness (`tests/test_spatial_inference.py`, rook weights, fixed
+seeds), global Moran's I on an 8 x 8 lattice (199 permutations, 2,000 replications)
+rejected at 0.038 two-sided and 0.041 one-sided; local Moran's I on a 6 x 6 lattice
+(1,999 permutations, 1,000 replications) rejected 0.050 of its 36,000 location tests
+before correction, and some location of a lattice was named significant in 0.026 of
+the replications after Benjamini-Hochberg (0.023 with Holm, 0 with
+Benjamini-Yekutieli). The Spearman rank test rejected at 0.044 with 25 pairs and with
+10 pairs (4,000 replications).
 
 ## Effect sizes and agreement
 
@@ -199,11 +211,18 @@ whenever the policy needs it; it is never a pass.
 Comparisons and each of their levels take `decision`, `alpha` (0.05), `correction`
 (`bh`), `seed` (0) and `max_work`; a level's own value overrides the comparison's.
 Each check is one family: the groups of one measure, the buckets of one temporal
-measure, the series of one shape check, the columns (and `shift_by` groups) of the
-record shift check. Failing members carry `test`, `p_value`, `adjusted_p`, `effect`,
-`ci_low`, `ci_high` and the decision's reason as evidence; the check's `significance`
-and `metrics` summarize the family. Under `material`, no test runs and every slot
-stays empty, exactly as before inference.
+measure, the zones of one spatial measure, of the `shares` check or of `lisa`, the
+series of one shape check, the columns (and `shift_by` groups) of the record shift
+check. Failing members carry `test`, `p_value`, `adjusted_p`, `effect`, `ci_low`,
+`ci_high` and the decision's reason as evidence; the check's `significance` and
+`metrics` summarize the family. Under `material`, no test runs and every slot stays
+empty, exactly as before inference.
+
+The `spatial` level's pattern checks use the spatial tests: `rank` the Spearman
+test, `moran` the global Moran's I of the per-zone differences (one-sided: are they
+clustered?), and `lisa` the local Moran's I of each zone, corrected across zones, so
+the zones in significant clusters of material change are named
+([spatial data](spatial.md#spatial)).
 
 Each measure names its default test, which `test:` overrides (`test: none` declares
 that no test applies):
@@ -279,7 +298,11 @@ They follow `plugins.entry_points` exactly like comparison components, are recor
   autocorrelated rows inside one bucket can be liberal.
 * Short autocorrelated series (fewer than about 100 buckets) remain moderately liberal
   even with the block bootstrap (see the calibration table).
-* Spearman's correlation has no test in `series_shape`; a low Spearman correlation
-  alone is judged by its threshold. Peaks, profiles and level shifts have no test.
-* Moran's I takes explicit neighbour weights; building weights from geometry, and
-  spatial comparison levels, are a later phase.
+* Spearman's correlation has no test in `series_shape` (its buckets are dependent);
+  a low Spearman correlation alone is judged by its threshold there. Peaks, profiles
+  and level shifts have no test. The `spatial` level tests the zones' Spearman
+  correlation with `rank_correlation_test`, treating zones as independent pairs.
+* Moran's I and LISA take explicit neighbour weights; `qavf.spatial.weights` builds
+  them from polygons, grid cells, centroids or tables ([spatial data](spatial.md)).
+* LISA p-values are no smaller than `1 / (permutations + 1)`; a large family of zones
+  needs more permutations for the correction to name any cluster.
