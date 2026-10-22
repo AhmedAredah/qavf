@@ -81,7 +81,7 @@ def compile_rules(
     Raises:
         ConfigurationError: for unknown rule ids or invalid rule parameters.
     """
-    from qavf.compare.registry import entry_point_scope
+    from qavf.plugins.registry import entry_point_scope
 
     with entry_point_scope(settings.plugins.entry_points):
         return _compile_rules(settings, registry, sources)
@@ -194,7 +194,7 @@ def plugin_status(
     """Every entry point tried, as ``rules:name`` / ``sources:name`` /
     ``compare.<kind>:name`` -> status. ``comparison_plugins`` is the run's
     ``plugins.entry_points``: a run without plugins reports no comparison plugin."""
-    from qavf.compare.registry import plugin_status as comparison_status
+    from qavf.plugins.registry import plugin_status as comparison_status
 
     status = {f"rules:{name}": state for name, state in getattr(registry, "plugins", {}).items()}
     status |= {f"sources:{name}": state for name, state in getattr(sources, "plugins", {}).items()}
@@ -209,9 +209,9 @@ def check_required_plugins(
     if not required:
         return
     if settings.plugins.entry_points:
-        from qavf.compare.registry import load_entry_points
+        from qavf.plugins.registry import load_entry_points
 
-        load_entry_points()  # judge comparison components after discovering them
+        load_entry_points()  # judge components after discovering them
     status = plugin_status(registry, sources, comparison_plugins=settings.plugins.entry_points)
     problems: dict[str, str] = {}
     for required_name in required:
