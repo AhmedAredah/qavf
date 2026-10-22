@@ -238,8 +238,9 @@ resource error.
 
 - [Python API](https://github.com/AhmedAredah/qavf/blob/main/docs/api.md) and
   [sources](https://github.com/AhmedAredah/qavf/blob/main/docs/sources.md)
-- [Dataset comparison](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison.md) and
+- [Dataset comparison](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison.md),
   its [component reference](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison_reference.md)
+  and [statistical inference](https://github.com/AhmedAredah/qavf/blob/main/docs/inference.md)
 - [Rules reference](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md) and
   [writing plugins](https://github.com/AhmedAredah/qavf/blob/main/docs/plugins.md)
 - [Cloud storage](https://github.com/AhmedAredah/qavf/blob/main/docs/cloud_storage.md)

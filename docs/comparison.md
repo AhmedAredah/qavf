@@ -36,6 +36,11 @@ Inputs take every form `validate` accepts: paths, `File`, `Dataset` (its schema'
 Polars, pandas or Arrow frames. `resources=ResourceLimits(...)` applies the same
 resource policy, including isolated execution for file and query inputs.
 
+By default a difference fails only when it is **material and statistically
+significant** ([significance](#significance)). Significance needs the `stats` extra
+(SciPy); a core install should set `decision="material"`, which judges materiality
+alone exactly as before and runs no test.
+
 ## Fail-closed results
 
 A `DatasetComparison` holds one typed result per level (`StructureResult`,
@@ -76,7 +81,7 @@ pipeline, exactly as for every other rule.
 |---|---|---|
 | `structure` | Columns added or removed after mapping, suggested renames (similar names and similar value samples, never applied), type, declared-unit and nullability changes, row counts (exact unless `rows: {rtol: ...}`), key uniqueness per side | `columns`, `types`, `units`, `nullability`, `rows`, `keys` |
 | `coverage` | Keys only in the baseline or only in the candidate, overall and by `group_by`; changes of each column's missing-value rate beyond `max_null_rate_change` | `keys`, `null rates` |
-| `records` | Keyed match through the regression engine: rows added, removed, changed, unchanged; per-column change counts and rates; largest absolute and relative differences; null and NaN transitions; categorical transitions (`max_transitions` most frequent, with the total count); the `top_n` largest numeric changes beyond tolerance as evidence | `rows`, `values` |
+| `records` | Keyed match through the regression engine: rows added, removed, changed, unchanged; per-column change counts and rates; largest absolute and relative differences; null and NaN transitions; categorical transitions (`max_transitions` most frequent, with the total count); the `top_n` largest numeric changes beyond tolerance as evidence; a systematic shift of each numeric column (paired test, unless `decision: material`) | `rows`, `values`, `shift` |
 | `groups` | Measures per `group_by` group on each side; groups on one side only; material changes per measure; optional top-k rank changes | `groups`, one per measure, `rank: <measure>` |
 | `temporal` | Measures per time bucket (and `group_by` group) on each side: buckets on one side only, expected-grid gaps on each side, material changes per measure with the largest first | `buckets`, one per measure, `gaps` |
 | `series_shape` | Each group's bucketed series on both sides: correlation, trend, cyclic profile, peak, lag, level shifts | `series`, `correlation`, `trend`, `profile`, `peak`, `lag`, `level shift` (and `too short`) |
@@ -110,8 +115,8 @@ Tolerances resolve from the most specific setting: a measure's own `rtol`/`atol`
 then the comparison's `rtol` (1e-6) and `atol` (1e-9). Record values use the
 comparison's and per-column tolerances, with the regression engine's exact arithmetic.
 
-Results carry an empty `significance` slot for statistical tests, which a later
-release adds as a separate judgement from materiality.
+Materiality is one half of the default decision; [significance](#significance) is
+the other.
 
 ## Over time
 
@@ -222,9 +227,10 @@ against a varying one does not. A series without enough common buckets is report
 in a `too short` check that is **not assessed**, never passed; a series on one side
 only fails the `series` check (`missing_series: ignore` to accept).
 
-`ShapeResult.series` lists each series' metrics (bounded by the evidence limit), and
-both levels keep typed results with empty `significance` slots (per measure and per
-series) for the statistical tests of a later release.
+`ShapeResult.series` lists each series' metrics (bounded by the evidence limit) and
+its tests (`SeriesShape.significance`); `TemporalResult.measures` and
+`ShapeResult.assessments` carry each family's `significance`
+([significance](#significance)).
 
 ### Calendar alignment
 
@@ -246,6 +252,68 @@ elapsed time. A value without an exact counterpart (29 February a year earlier, 
 alignment, or with `unaligned: drop` is dropped and counted in
 `DatasetComparison.alignment`. As an alignment step it applies before every level, so
 keyed `records` can be compared year over year too.
+
+## Significance
+
+A material difference can still be chance: two versions drawn from the same process
+differ in every group. Unless `decision` is `material`, each check also tests its
+differences and decides with a [policy](inference.md#decision-policies):
+
+| `decision` | A difference fails when |
+|---|---|
+| `material_and_significant` (default) | it is material **and** significant after the correction |
+| `material` | it is material (no test runs; for a core install without the stats extra) |
+| `significant` | it is significant, however small |
+| `equivalence` | equivalence within the tolerance is **not** shown (TOST-style) |
+
+Each check is one family for the multiple-testing `correction` (`bh` by default;
+`by`, `holm`, `bonferroni`, `none`) at level `alpha` (0.05): the groups of a measure,
+the buckets of a temporal measure, the series of a shape check, the columns of the
+record shift. Members that needed no test (immaterial under the default) count as
+`p = 1`, which keeps the correction valid.
+
+| Level | What is tested |
+|---|---|
+| `groups`, `temporal` | each group or bucket's change of a measure, from both sides' values in it, by the measure's default test (`mean`: Welch's t, `median`: Mann-Whitney, `count` and integer `sum`: Poisson, other `sum` and `quantile`: bootstrap, `share` and `null_count`: two-proportion, `std`: Brown-Forsythe), or `test:` per measure |
+| `records` | the `shift` check: per numeric column (and `shift_by` group), a paired test (`test: paired_t` by default; `wilcoxon`, `sign`, `paired_permutation`, `paired_bootstrap`) of `candidate - baseline` over matched rows, with the mean difference judged by the column's tolerance; value changes stay facts, reported whatever the policy |
+| `series_shape` | `correlation`: Fisher z of the Pearson correlation against `min_pearson` with Bartlett's effective sample size; `trend`: the slope difference with a block bootstrap (`dependence: block`, or `hac`, `none`); `lag`: a block bootstrap of the best lag's correlation gain; `profile`, `peak` and `level shift` have no test and are judged by threshold |
+
+`min`, `max`, `distinct_count` and `weighted_mean` have no sound test: they are
+judged by materiality under every policy, and their `significance` says so
+(`applicable: false`). A test that should apply but cannot run (no SciPy, too few
+values, values that are not counts, beyond `max_work`) leaves the check **not
+assessed**, never passed.
+
+```yaml
+comparisons:
+  - name: counts 2024 vs 2025
+    baseline: v1
+    candidate: v2
+    decision: material_and_significant   # the default
+    correction: bh
+    alpha: 0.05
+    seed: 0                     # resampling tests reproduce exactly
+    levels:
+      - level: groups
+        group_by: [county]
+        measures:
+          - sum(aadt)                                   # Poisson for integer sums
+          - {measure: mean, column: speed}              # Welch's t
+          - {measure: median, column: speed, test: bootstrap}
+          - {measure: mean, column: speed, name: speed distribution, test: ks}
+      - {level: records, shift_by: [county]}
+      - {level: series_shape, time_column: day, bucket: week, measure: sum(aadt),
+         trend: {dependence: block}, decision: significant, alpha: 0.01}
+```
+
+Evidence of a failing group, bucket or column adds `test`, `p_value`, `adjusted_p`,
+`effect`, `ci_low`, `ci_high` and the decision's reason, within the evidence limits;
+the check's `significance` and `metrics` summarize the family (test, policy, alpha,
+correction, family size, significant and not assessed counts), and so do
+`MeasureComparison.significance`, `ColumnChanges.significance`,
+`RecordsResult.significance`, `ShapeAssessment.significance` and
+`SeriesShape.significance`. The tests, their defaults and calibration are described
+in [statistical inference](inference.md).
 
 ## In a configuration: CMP-001
 
@@ -285,5 +353,5 @@ Keys, ignored columns and tolerances then use the new names.
 
 ## Extending
 
-Alignment steps, measures, comparators and levels are registered components; see
-[writing plugins](plugins.md#comparison-components).
+Alignment steps, measures, comparators, levels and statistical tests are registered
+components; see [writing plugins](plugins.md#comparison-components).

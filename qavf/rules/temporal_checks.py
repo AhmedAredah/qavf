@@ -797,7 +797,8 @@ class TrendOutlierParams(SeriesParams):
     min_points: int = Field(default=5, ge=4)
     """Fewest periods needed to fit and test a trend."""
     alpha: float = Field(default=0.05, gt=0, lt=1)
-    """Significance level of the Bonferroni-adjusted studentized-residual outlier test."""
+    """Significance level of the corrected (Bonferroni by default) studentized-residual
+    outlier test."""
     min_relative_deviation: float = Field(default=0.05, ge=0)
     """A period is only flagged if it also departs from the fitted trend by at least this
     fraction, so statistically detectable but immaterial wobbles on a near-perfect

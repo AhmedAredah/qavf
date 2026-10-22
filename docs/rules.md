@@ -71,6 +71,11 @@ Two datasets compared at several levels after an alignment pipeline.
 | `tolerances` | `dict[str, ColumnTolerance]` | `{}` | Per-column tolerances, e.g. ``{share: {atol: 0.001}, code: {exact: true}}``. |
 | `levels` | `tuple[LevelConfig, ...] \| None` | `None` | Levels to compare; ``structure, coverage, records`` (``structure`` without keys). |
 | `min_rows` | `int` | `1` | Fewest aligned rows on each side for the comparison to be assessed. |
+| `decision` | `Literal['material', 'significant', 'material_and_significant', 'equivalence']` | `material_and_significant` | How materiality and significance combine: ``material_and_significant`` (fail only when a difference is material and significant), ``material`` (no tests; for a core install without the stats extra), ``significant`` or ``equivalence`` (pass only when equivalence within the tolerance is shown). |
+| `alpha` | `float` | `0.05` | Significance level, applied after the correction. |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by']` | `bh` | Multiple-testing correction across each check's family (groups, buckets, series, columns): ``bh`` (Benjamini-Hochberg), ``by``, ``holm``, ``bonferroni`` or ``none``. |
+| `seed` | `int` | `0` | Seed of resampling tests; the same seed reproduces a comparison exactly. |
+| `max_work` | `int` | `20000000` | Largest work (resamples x values, or values collected) of one test; a larger test is not assessed rather than slow. |
 
 #### `CastSpec`
 
@@ -631,6 +636,7 @@ Each configured column's distribution stays close to a reference dataset's, by p
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `comparisons` | `tuple[DriftComparison, ...]` | `[]` |  |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by']` | `bonferroni` | Multiple-testing correction across the KS comparisons (``holm``, ``bh``, ``by``, ``none``); a comparison drifts when its adjusted p-value is below its ``alpha``. |
 
 #### `DriftComparison`
 
@@ -711,6 +717,7 @@ Series declared as increasing or decreasing do not trend the opposite way (Kenda
 | `min_points` | `int` | `3` |  |
 | `min_tau` | `float` | `0.5` | Kendall's tau magnitude, in the wrong direction, at which a series is flagged. |
 | `alpha` | `float \| None` | `None` | When set, additionally require the wrong-way trend to be significant at this level. |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by']` | `none` | Multiple-testing correction of the Kendall p-values across every series examined (``bh``, ``by``, ``holm``, ``bonferroni``); applies with ``alpha``. |
 
 #### `SeriesSpec`
 
@@ -755,9 +762,10 @@ No period is both a statistically significant outlier from its series' fitted tr
 |---|---|---|---|
 | `series` | `tuple[SeriesSpec, ...]` | `[]` | Series to examine; the rule skips until at least one is configured. |
 | `min_points` | `int` | `5` | Fewest periods needed to fit and test a trend. |
-| `alpha` | `float` | `0.05` | Significance level of the Bonferroni-adjusted studentized-residual outlier test. |
+| `alpha` | `float` | `0.05` | Significance level of the corrected (Bonferroni by default) studentized-residual outlier test. |
 | `min_relative_deviation` | `float` | `0.05` | A period is only flagged if it also departs from the fitted trend by at least this fraction, so statistically detectable but immaterial wobbles on a near-perfect trend are not reported. |
 | `log_transform` | `bool` | `True` | Fit the trend on log(value) when every value is positive (multiplicative change). |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by']` | `bonferroni` | Multiple-testing correction of the residual p-values within each series (``holm``, ``bh``, ``by``, ``none``). |
 
 #### `SeriesSpec`
 

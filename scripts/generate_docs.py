@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from qavf.compare import ALIGNMENT_STEPS, COMPARATORS, LEVELS, MEASURES  # noqa: E402
 from qavf.docgen import comparison_markdown, rules_markdown, sources_markdown  # noqa: E402
+from qavf.inference import TESTS  # noqa: E402
 from qavf.sources import SourceRegistry  # noqa: E402
 from qavf.testing import discovered_rules  # noqa: E402
 
@@ -35,6 +36,7 @@ def pages() -> dict[Path, str]:
                 "Measures": MEASURES.discover(use_entry_points=False),
                 "Comparators": COMPARATORS.discover(use_entry_points=False),
                 "Alignment steps": ALIGNMENT_STEPS.discover(use_entry_points=False),
+                "Statistical tests": TESTS.discover(use_entry_points=False),
             },
             "Built-in comparison components",
         ),

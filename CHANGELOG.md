@@ -6,6 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+- Add `qavf.inference`, a statistical inference library shared by comparisons and
+  rules: paired (t, Wilcoxon, sign, permutation, bootstrap), equivalence (TOST),
+  independent-sample (Welch t, Mann-Whitney, KS, Anderson-Darling, Brown-Forsythe,
+  permutation, bootstrap), categorical (chi-square, Fisher, G, McNemar,
+  Stuart-Maxwell), count and rate (two-proportion, exact conditional Poisson), trend
+  and series (Mann-Kendall with Sen slope, seasonal Kendall, slope differences, Fisher
+  z, lag significance) and spatial (Moran's I from given weights) tests with a typed
+  `TestResult`; Bonferroni, Holm, Benjamini-Hochberg and Benjamini-Yekutieli
+  corrections; analytic, percentile and BCa intervals; seeded block bootstraps,
+  Newey-West errors and a work budget; effect sizes and agreement metrics; and
+  decision policies combining materiality with significance. Without the `stats`
+  extra a test is not assessed. Tests are pluggable (`register_test`, the
+  `qavf.inference.tests` entry-point group, `plugins.required: inference.tests:name`).
+- Comparisons now decide `material_and_significant` by default: a difference fails
+  only when it is material and statistically significant after a Benjamini-Hochberg
+  correction across each check's family. `decision`, `alpha`, `correction`, `seed`
+  and `max_work` are set per comparison or level, and `test:` per measure; each
+  measure has a default test (`mean`: Welch, `median`: Mann-Whitney, `count` and
+  integer `sum`: Poisson, other `sum` and `quantile`: bootstrap, `share` and
+  `null_count`: two-proportion, `std`: Brown-Forsythe), and `min`, `max` and
+  `distinct_count` are judged by materiality alone. `records` gains a `shift` check
+  of paired tests per column (and `shift_by` group); `series_shape` tests correlation
+  (Fisher z with an effective sample size), trend (block bootstrap or HAC) and lag
+  (block bootstrap). Evidence carries p-values, adjusted p-values, effects and
+  intervals, and every `significance` slot is filled. A core install without the
+  `stats` extra should set `decision: material`, the previous behaviour.
+- TMP-002, TMP-003 and STA-002 use the shared tests and corrections, gain an optional
+  `correction` (defaults unchanged) and report `p_value`, `adjusted_p` and `effect`
+  in their evidence.
+- Move the component registry to `qavf.plugins.registry`, shared by comparison
+  components and statistical tests; `qavf.compare.registry` re-exports it.
 - Add dataset comparison: `compare_datasets` (also `qavf.compare`) and the `CMP-001`
   rule compare a candidate dataset with a baseline after an alignment pipeline
   (column mapping, lossless casts, exact unit scaling, recoding, derived columns,

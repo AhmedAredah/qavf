@@ -12,7 +12,8 @@ each input form.
 `qavf.sources` exports source classes and parameter models; `qavf.regression`
 exports comparison functions and result models; `qavf.compare` exports
 `compare_datasets`, the comparison configuration and result models, and the four
-component registries. `qavf.rules.input_checks`
+component registries; `qavf.inference` exports the statistical tests, corrections,
+intervals, effects, decision policies and the test registry. `qavf.rules.input_checks`
 exports the input rule classes. Internal modules are implementation details;
 the unreleased package does not retain aliases for former private locations.
 
@@ -40,16 +41,18 @@ the unreleased package does not retain aliases for former private locations.
 | Input profiling | `profiling/` | Bounded per-column state and common input preparation for API and CLI profiles. |
 | Presentation | `reports/presentation.py`, `html.py` | Shared report context, sparse evidence selection and bounded HTML publication. |
 | Regression | `regression/_plan.py`, `_inputs.py`, `_streaming.py`, `_comparison.py` | Schema-only planning (including baseline column maps), policy-preserving dispatch, native joined batches and shared exact comparison state; typed indexed alignment and bounded baseline staging; numeric/cell/evidence modules retain their policies. |
-| Dataset comparison | `compare/spec.py`, `align.py`, `measures.py`, `comparators.py`, `levels/`, `results.py`, `engine.py`, `registry.py`, `api.py` | Configuration validated at load; ordered alignment steps; per-group measures over the shared exact reductions; comparators and materiality; one module per level; typed bounded results; one observation and aligned snapshot per side; component registries with entry-point discovery; the public facade. Keyed record classification is the regression engine's. |
+| Dataset comparison | `compare/spec.py`, `align.py`, `measures.py`, `comparators.py`, `significance.py`, `levels/`, `results.py`, `engine.py`, `registry.py`, `api.py` | Configuration validated at load; ordered alignment steps; per-group measures over the shared exact reductions; comparators and materiality; each measure's test, its natively reduced inputs and the family decisions; one module per level; typed bounded results; one observation and aligned snapshot per side; component registries with entry-point discovery; the public facade. Keyed record classification is the regression engine's. |
+| Statistical inference | `inference/results.py`, `paired.py`, `independent.py`, `equivalence.py`, `categorical.py`, `counts.py`, `trend.py`, `spatial.py`, `multiple.py`, `intervals.py`, `resampling.py`, `pvalues.py`, `effects.py`, `decision.py`, `registry.py`, `components.py` | Arrays in, typed results out, independent of comparisons: one module per test family; corrections; intervals, seeded resampling and the work budget; effect sizes; decision policies; test components and their registry. SciPy supplies every distribution function. |
+| Component registries | `plugins/registry.py` | One registry implementation, discovery transaction and `plugins.entry_points` scope for comparison components and statistical tests. |
 | Typed values | `typed_values.py` | Lossless temporal normalization, checked casts with per-row loss flags, exact numeric scaling. |
 
 Concrete SQL source classes share their loading, budget, snapshot and connection
 ownership behavior through `SQLSource`; each supplies its own query construction.
 `DataContext` composes a connection owner instead of inheriting connection behavior.
 Input rule categories and comparison stages use explicit function dependencies.
-Dataset comparison components share one small registry class
-(`compare/registry.py`) that mirrors rule and source discovery; there are no mixin
-hierarchies.
+Dataset comparison components and statistical tests share one small registry
+class (`plugins/registry.py`, re-exported by `compare/registry.py`) that mirrors rule
+and source discovery; there are no mixin hierarchies.
 
 ## Input and planning boundaries
 

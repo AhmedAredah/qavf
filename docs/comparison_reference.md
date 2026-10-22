@@ -23,8 +23,13 @@ Measures per group compared with comparators, materiality and rank changes.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `decision` | `Literal['material', 'significant', 'material_and_significant', 'equivalence'] \| None` | `None` | ``material_and_significant`` (default), ``material``, ``significant`` or ``equivalence``. |
+| `alpha` | `float \| None` | `None` |  |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by'] \| None` | `None` | Multiple-testing correction across each check's family of tests. |
+| `seed` | `int \| None` | `None` |  |
+| `max_work` | `int \| None` | `None` |  |
 | `group_by` | `tuple[str, ...]` | `[]` | Group columns (empty: compare whole-dataset measures). |
-| `measures` | `tuple[MeasureSpec, ...]` | `(MeasureSpec(measure='count', column=None, name=None, comparators=('diff', 'rel_diff'), rtol=None, atol=None, exact=False, params={}),)` | Measures compared per group (``count``, ``sum(x)``, ``{measure: quantile, column: x, p: 0.9}``, ...); rows per group when omitted. |
+| `measures` | `tuple[MeasureSpec, ...]` | `(MeasureSpec(measure='count', column=None, name=None, comparators=('diff', 'rel_diff'), rtol=None, atol=None, exact=False, test=None, params={}),)` | Measures compared per group (``count``, ``sum(x)``, ``{measure: quantile, column: x, p: 0.9}``, ...); rows per group when omitted. |
 | `missing_groups` | `Literal['fail', 'ignore']` | `fail` | A group present on one side only: a difference (``fail``) or left out. |
 | `rtol` | `float \| None` | `None` | Default relative tolerance of this level; the comparison's when omitted. |
 | `atol` | `float \| None` | `None` |  |
@@ -43,6 +48,16 @@ A measure and how its change is judged: ``sum(x)``-style or a mapping.
 | `rtol` | `float \| None` | `None` | Relative tolerance; the column's, then the level's, then the comparison's. |
 | `atol` | `float \| None` | `None` |  |
 | `exact` | `bool` | `False` |  |
+| `test` | `TestConfig \| None` | `None` | Significance test of the change per group; the measure's default when omitted (``mean``: ``welch_t``, ``median``: ``mann_whitney``, ``count``: ``poisson``, ...), ``none``: judged by materiality alone. |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+#### `TestConfig`
+
+A significance test: ``welch_t``, ``{test: bootstrap, resamples: 999}`` or ``none``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `test` | `str` | **required** | A registered test (``qavf.inference.TESTS``), or ``none``: no test applies. |
 | `params` | `dict[str, Any]` | `{}` |  |
 
 #### `RankSpec`
@@ -61,12 +76,28 @@ Rows added, removed, changed and unchanged, with per-column change detail.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `decision` | `Literal['material', 'significant', 'material_and_significant', 'equivalence'] \| None` | `None` | ``material_and_significant`` (default), ``material``, ``significant`` or ``equivalence``. |
+| `alpha` | `float \| None` | `None` |  |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by'] \| None` | `None` | Multiple-testing correction across each check's family of tests. |
+| `seed` | `int \| None` | `None` |  |
+| `max_work` | `int \| None` | `None` |  |
 | `allow_added` | `bool` | `False` | Rows only in the candidate are acceptable. |
 | `allow_removed` | `bool` | `False` | Rows only in the baseline are acceptable. |
 | `schema` | `Literal['compatible', 'strict', 'ignore']` | `compatible` | ``schema`` in configuration: columns whose types differ in kind are not value-compared (the structure level reports them). |
 | `top_n` | `int` | `10` | Largest numeric changes kept per column as evidence. |
 | `max_transitions` | `int` | `20` | Most frequent value transitions kept per categorical column. |
 | `categorical` | `tuple[str, ...] \| None` | `None` | Columns whose value transitions are counted; text, categorical and boolean columns when omitted. |
+| `test` | `TestConfig` | `{'test': 'paired_t', 'params': {}}` | Paired test of each numeric column's shift (``paired_t``, ``wilcoxon``, ``sign``, ``paired_permutation``, ``paired_bootstrap``). |
+| `shift_by` | `tuple[str, ...]` | `[]` | Also test the shift within groups of these key or compared columns (candidate values). |
+
+#### `TestConfig`
+
+A significance test: ``welch_t``, ``{test: bootstrap, resamples: 999}`` or ``none``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `test` | `str` | **required** | A registered test (``qavf.inference.TESTS``), or ``none``: no test applies. |
+| `params` | `dict[str, Any]` | `{}` |  |
 
 ### `series_shape`
 
@@ -74,17 +105,22 @@ Correlation, trend, profile, peak, lag and level-shift differences per series.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `decision` | `Literal['material', 'significant', 'material_and_significant', 'equivalence'] \| None` | `None` | ``material_and_significant`` (default), ``material``, ``significant`` or ``equivalence``. |
+| `alpha` | `float \| None` | `None` |  |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by'] \| None` | `None` | Multiple-testing correction across each check's family of tests. |
+| `seed` | `int \| None` | `None` |  |
+| `max_work` | `int \| None` | `None` |  |
 | `time_column` | `str` | **required** | Date, Datetime, text (with ``time_format``) or numeric period column. |
 | `group_by` | `tuple[str, ...]` | `[]` | One series per combination of these columns. |
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
 | `max_buckets` | `int` | `1000000` | Largest expected bucket grid; a longer one is not assessed. |
-| `measure` | `MeasureSpec` | `{'measure': 'count', 'column': None, 'name': None, 'comparators': ['diff', 'rel_diff'], 'rtol': None, 'atol': None, 'exact': False, 'params': {}}` | The series value per bucket (``sum(x)``, ``mean(x)``, ...; rows by default). |
+| `measure` | `MeasureSpec` | `{'measure': 'count', 'column': None, 'name': None, 'comparators': ['diff', 'rel_diff'], 'rtol': None, 'atol': None, 'exact': False, 'test': None, 'params': {}}` | The series value per bucket (``sum(x)``, ``mean(x)``, ...; rows by default). |
 | `min_buckets` | `int` | `4` | Fewest buckets both sides must have for a series to be assessed. |
 | `missing_series` | `Literal['fail', 'ignore']` | `fail` | A series (group) on one side only: a difference or left out. |
-| `correlation` | `CorrelationCheck \| None` | `{'min_pearson': 0.9, 'min_spearman': 0.9}` | Pearson and Spearman correlation; ``null`` leaves the check out (so for each). |
-| `trend` | `TrendCheck \| None` | `{'rtol': 0.1, 'atol': 0.0}` | Least-squares slope per bucket on each side. |
+| `correlation` | `CorrelationCheck \| None` | `{'min_pearson': 0.9, 'min_spearman': 0.9, 'dependence': 'effective_n'}` | Pearson and Spearman correlation; ``null`` leaves the check out (so for each). |
+| `trend` | `TrendCheck \| None` | `{'rtol': 0.1, 'atol': 0.0, 'dependence': 'block'}` | Least-squares slope per bucket on each side. |
 | `profile` | `ProfileCheck \| None` | `None` | Cyclic profile of the buckets (off unless configured). |
 | `peak` | `PeakCheck \| None` | `{'max_shift': 0, 'rtol': 0.1, 'atol': 0.0}` | Peak timing and magnitude. |
 | `lag` | `LagCheck \| None` | `{'max_lag': 3, 'allowed': 0}` | Best cross-correlation lag. |
@@ -115,6 +151,16 @@ A measure and how its change is judged: ``sum(x)``-style or a mapping.
 | `rtol` | `float \| None` | `None` | Relative tolerance; the column's, then the level's, then the comparison's. |
 | `atol` | `float \| None` | `None` |  |
 | `exact` | `bool` | `False` |  |
+| `test` | `TestConfig \| None` | `None` | Significance test of the change per group; the measure's default when omitted (``mean``: ``welch_t``, ``median``: ``mann_whitney``, ``count``: ``poisson``, ...), ``none``: judged by materiality alone. |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+#### `TestConfig`
+
+A significance test: ``welch_t``, ``{test: bootstrap, resamples: 999}`` or ``none``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `test` | `str` | **required** | A registered test (``qavf.inference.TESTS``), or ``none``: no test applies. |
 | `params` | `dict[str, Any]` | `{}` |  |
 
 #### `CorrelationCheck`
@@ -125,6 +171,7 @@ Both correlations must reach their minimum (``null`` skips one).
 |---|---|---|---|
 | `min_pearson` | `float \| None` | `0.9` | Lowest Pearson correlation of the paired bucket values. |
 | `min_spearman` | `float \| None` | `0.9` | Lowest Spearman (rank) correlation. |
+| `dependence` | `Literal['effective_n', 'none']` | `effective_n` | Sample size of the Fisher z test: Bartlett's effective size for autocorrelated buckets, or the bucket count. |
 
 #### `TrendCheck`
 
@@ -134,6 +181,7 @@ The slopes differ materially beyond ``max(atol, rtol * max(\|b\|, \|c\|))``.
 |---|---|---|---|
 | `rtol` | `float` | `0.1` | Relative tolerance of the least-squares slopes (change per bucket). |
 | `atol` | `float` | `0.0` |  |
+| `dependence` | `Literal['block', 'hac', 'none']` | `block` | Uncertainty of the slope difference: a null-imposed circular block bootstrap, Newey-West HAC errors, or independent residuals. |
 
 #### `ProfileCheck`
 
@@ -205,13 +253,18 @@ Measures per time bucket compared, with one-sided buckets and grid gaps.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `decision` | `Literal['material', 'significant', 'material_and_significant', 'equivalence'] \| None` | `None` | ``material_and_significant`` (default), ``material``, ``significant`` or ``equivalence``. |
+| `alpha` | `float \| None` | `None` |  |
+| `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by'] \| None` | `None` | Multiple-testing correction across each check's family of tests. |
+| `seed` | `int \| None` | `None` |  |
+| `max_work` | `int \| None` | `None` |  |
 | `time_column` | `str` | **required** | Date, Datetime, text (with ``time_format``) or numeric period column. |
 | `group_by` | `tuple[str, ...]` | `[]` | One series per combination of these columns. |
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
 | `max_buckets` | `int` | `1000000` | Largest expected bucket grid; a longer one is not assessed. |
-| `measures` | `tuple[MeasureSpec, ...]` | `(MeasureSpec(measure='count', column=None, name=None, comparators=('diff', 'rel_diff'), rtol=None, atol=None, exact=False, params={}),)` | Measures compared per bucket (``count``, ``sum(x)``, ``mean(x)``, ...). |
+| `measures` | `tuple[MeasureSpec, ...]` | `(MeasureSpec(measure='count', column=None, name=None, comparators=('diff', 'rel_diff'), rtol=None, atol=None, exact=False, test=None, params={}),)` | Measures compared per bucket (``count``, ``sum(x)``, ``mean(x)``, ...). |
 | `missing_buckets` | `Literal['fail', 'ignore']` | `fail` | A (group, bucket) present on one side only: a difference or left out. |
 | `gaps` | `bool` | `True` | Report buckets of the expected calendar grid that a side lacks. |
 | `allow_gaps` | `bool` | `False` | Report gaps without failing. |
@@ -245,6 +298,16 @@ A measure and how its change is judged: ``sum(x)``-style or a mapping.
 | `rtol` | `float \| None` | `None` | Relative tolerance; the column's, then the level's, then the comparison's. |
 | `atol` | `float \| None` | `None` |  |
 | `exact` | `bool` | `False` |  |
+| `test` | `TestConfig \| None` | `None` | Significance test of the change per group; the measure's default when omitted (``mean``: ``welch_t``, ``median``: ``mann_whitney``, ``count``: ``poisson``, ...), ``none``: judged by materiality alone. |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+#### `TestConfig`
+
+A significance test: ``welch_t``, ``{test: bootstrap, resamples: 999}`` or ``none``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `test` | `str` | **required** | A registered test (``qavf.inference.TESTS``), or ``none``: no test applies. |
 | `params` | `dict[str, Any]` | `{}` |  |
 
 ## Measures
@@ -478,3 +541,119 @@ Multiply one side's column by ``factor`` so both sides share a unit.
 | `side` | `Literal['baseline', 'candidate']` | `baseline` |  |
 | `from_unit` | `str \| None` | `None` | The unit the column must be declared in (``schema.columns.<c>.unit``), if declared. |
 | `to_unit` | `str \| None` | `None` | The unit after conversion, compared with the other side's declared unit. |
+
+## Statistical tests
+
+Entry-point group: `qavf.inference.tests`.
+
+### `anderson_darling`
+
+Anderson-Darling k-sample test of a common distribution (tail-sensitive).
+
+*No parameters.*
+
+### `bootstrap`
+
+Bootstrap of the difference of the measure's statistic (sum, median, quantile...).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+| `resamples` | `int` | `2000` | Random resamples (more: steadier p-values, more work). |
+| `interval` | `Literal['percentile', 'bca']` | `percentile` | Confidence interval of the difference (BCa costs ``n^2`` jackknife work). |
+
+### `brown_forsythe`
+
+Brown-Forsythe test of a difference of spread.
+
+*No parameters.*
+
+### `ks`
+
+Two-sample Kolmogorov-Smirnov test of any difference of distribution.
+
+*No parameters.*
+
+### `mann_whitney`
+
+Mann-Whitney U: does one side tend to have larger values?
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+
+### `paired_bootstrap`
+
+Bootstrap of the mean (or another statistic) of matched differences.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+| `resamples` | `int` | `2000` | Random resamples (more: steadier p-values, more work). |
+| `interval` | `Literal['percentile', 'bca']` | `percentile` | Confidence interval of the difference (BCa costs ``n^2`` jackknife work). |
+
+### `paired_permutation`
+
+Sign-flip permutation test of the mean difference of matched values.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+| `resamples` | `int` | `2000` | Random resamples (more: steadier p-values, more work). |
+
+### `paired_t`
+
+Paired t-test of the mean difference of matched values.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+
+### `permutation`
+
+Permutation test of the difference of the measure's statistic.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+| `resamples` | `int` | `2000` | Random resamples (more: steadier p-values, more work). |
+
+### `poisson`
+
+Exact conditional test of two Poisson rates (counts per exposure).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+
+### `sign`
+
+Exact sign test of matched values.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+
+### `two_proportion`
+
+Pooled two-proportion z-test of two shares.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+
+### `welch_t`
+
+Welch's t-test of the difference of means (from each side's moments).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |
+
+### `wilcoxon`
+
+Wilcoxon signed-rank test of matched values.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `alternative` | `Literal['two-sided', 'less', 'greater']` | `two-sided` | ``greater``: the candidate is larger; ``less``: smaller. |

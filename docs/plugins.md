@@ -303,6 +303,10 @@ acme = "qavf_acme.measures"      # a module (scanned) or a single component clas
 acme = "qavf_acme.levels"
 ```
 
+The registries share one implementation, `qavf.plugins.registry`
+(`ComponentRegistry`, `Component`, `entry_point_scope`); `qavf.compare.registry`
+re-exports it under the comparison names.
+
 Comparison entry points follow `plugins.entry_points` exactly like rules and sources.
 When it is true, the `qavf.compare.*` groups load while the configuration is compiled,
 before `CMP-001` parameters are validated, so a plugin level named there resolves. When
@@ -314,6 +318,35 @@ Each entry point tried is recorded in `metadata.plugins` as `compare.<kind>:<nam
 broken one leaves no partial registration, and `plugins.required: [compare.levels:acme]`
 stops a run whose level plugin is missing, broken or disabled. Components registered in
 code with the decorators (for example from `plugins.modules`) are always available.
+
+## Statistical tests
+
+Significance tests are components too (see [statistical inference](inference.md)): a
+subclass of `qavf.inference.InferenceTest` with a `name`, an optional `Params` model,
+what it `needs` from its caller and a `run(data) -> TestResult` method; an
+`equivalent(data)` method (with `supports_equivalence = True`) adds a TOST form for
+`decision: equivalence`.
+
+| `needs` | `TestInput` fields | Supplied by |
+|---|---|---|
+| `samples` | `baseline`, `candidate` (raw values), `statistic`, `probability` | `groups`, `temporal` measures with a column |
+| `moments` | `moments` (size, mean, variance per side) | `groups`, `temporal` measures with a column |
+| `counts` | `counts` (events), `totals` (exposure) | measures whose values are counts (`count`, `sum`, `null_count`) |
+| `proportions` | `counts` (successes), `totals` (trials) | `share`, `null_count` |
+| `paired` | `baseline`, `candidate` in pair order | the `records` shift check |
+
+Every input also carries `seed`, `max_work`, `confidence` and, for equivalence,
+`margin`. A test must return a not-assessed `TestResult` (never raise) for data it
+cannot use; set `uses_statistic = True` when it compares `data.statistic`. Register
+with `register_test` or advertise a module or class under the `qavf.inference.tests`
+entry-point group; tests follow `plugins.entry_points` and `plugins.required`
+(`inference.tests:name`) exactly like comparison components, and their entry points
+are recorded in `metadata.plugins` as `inference.tests:<name>`.
+
+```toml
+[project.entry-points."qavf.inference.tests"]
+acme = "qavf_acme.tests"
+```
 
 ## Packaging a plugin
 
@@ -362,7 +395,7 @@ and entry points.
 ## Required components and discovery transactions
 
 `plugins.required` accepts entry-point names or qualified `rules:name` / `sources:name`
-/ `compare.<kind>:name` entries. An unqualified name requires all advertised components of that name; a source
+/ `compare.<kind>:name` / `inference.tests:name` entries. An unqualified name requires all advertised components of that name; a source
 component cannot satisfy a failed rule component. Duplicate entry-point names within a
 group are rejected before either entry point loads.
 

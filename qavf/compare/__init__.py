@@ -16,6 +16,10 @@ Over time, the ``temporal`` level compares measures per calendar bucket (or
 cyclic profile) and ``series_shape`` compares the shapes of the bucketed series;
 the ``shift_time`` step compares one version at a shifted time (year over year).
 
+A difference fails when it is material and statistically significant (the
+``decision`` policy; :mod:`qavf.inference` supplies the tests and corrections).
+``decision="material"`` judges materiality alone and needs no SciPy.
+
 Alignment steps, measures, comparators and levels are registered components;
 plugins add their own with the ``register_*`` decorators or the
 ``qavf.compare.alignment``, ``qavf.compare.measures``, ``qavf.compare.comparators``

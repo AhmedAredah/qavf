@@ -203,14 +203,24 @@ rules:
           # derive: {total: "a + b"}  baseline_where / candidate_where / where: SQL
           # steps: [{step: shift_time, column: day, offset: {years: 1}}]  # year over year
           rtol: 1.0e-9                  # default tolerance; per column: tolerances
+          # A difference fails when material and significant (the stats extra).
+          # decision: material | significant | equivalence; material runs no test.
+          decision: material_and_significant
+          correction: bh                # bh | by | holm | bonferroni | none, per check
+          alpha: 0.05
+          seed: 0                       # resampling tests reproduce exactly
           levels:
             - structure                 # columns, types, units, nullability, rows, keys
             - coverage                  # keys on one side only; null-rate changes
-            - {level: records, top_n: 5}  # changed values with the largest changes
+            - {level: records, top_n: 5}  # changed values; shift: paired test per column
             - level: groups             # measures per group, materiality, rank changes
               severity: WARNING
               group_by: [station_id]
-              measures: [count, sum(value_milli), {measure: quantile, column: value_milli, p: 0.9}]
+              measures:
+                - count                 # Poisson test of the counts
+                - sum(value_milli)      # integer sums: Poisson; others: bootstrap
+                - {measure: quantile, column: value_milli, p: 0.9}  # bootstrap
+                - {measure: mean, column: value_milli, test: welch_t}  # the default
               rank: {measure: sum(value_milli), top_k: 3}
             - level: temporal           # measures per calendar bucket; gaps in the grid
               time_column: day
@@ -222,6 +232,7 @@ rules:
               bucket: day
               group_by: [station_id]
               measure: mean(value_milli)
+              trend: {dependence: block}  # slope difference: block bootstrap (or hac)
               lag: {max_lag: 2}         # profile: {profile: day_of_week} compares cycles
 
 # ---------------------------------------------------------------------------
