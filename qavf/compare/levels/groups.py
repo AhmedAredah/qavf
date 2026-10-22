@@ -9,22 +9,29 @@ top-k membership changes are reported as rank changes.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from fractions import Fraction
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Protocol
 
 import polars as pl
 from pydantic import Field, model_validator
 
 from qavf.compare.comparators import COMPARATORS, ComparatorContext, Materiality
 from qavf.compare.levels import SIDES, ComparisonLevel, LevelInputs, graded, register_level
-from qavf.compare.measures import MEASURES, MeasureInput
-from qavf.compare.results import GroupsResult, LevelResult, MeasureComparison, RankChange
+from qavf.compare.measures import MEASURES, Measure, MeasureInput
+from qavf.compare.results import (
+    CheckResult,
+    GroupsResult,
+    LevelResult,
+    MeasureComparison,
+    RankChange,
+)
 from qavf.compare.spec import ComparisonSpec, Side, _Configured
 from qavf.engine.registry import RuleParams
 from qavf.keys import align_keys
 from qavf.numeric import exact_rational, report_number
-from qavf.rules._grouped import grouped_reduce
+from qavf.rules._grouped import ProjectedRelation, grouped_reduce
 from qavf.rules.helpers import LargestEvidence, fresh_internal, plural
 
 
@@ -114,14 +121,27 @@ class GroupsParams(RuleParams):
         return self
 
 
-def _materiality(spec: ComparisonSpec, params: GroupsParams, measure: MeasureSpec) -> Materiality:
+class _LevelTolerance(Protocol):
+    """A level's own default tolerances (``None``: the comparison's)."""
+
+    @property
+    def rtol(self) -> float | None: ...
+
+    @property
+    def atol(self) -> float | None: ...
+
+
+def materiality(
+    spec: ComparisonSpec, level: _LevelTolerance, measure: MeasureSpec
+) -> Materiality:
+    """The measure's tolerance: its own, the column's, the level's, then the comparison's."""
     if measure.exact:
         return Materiality(0.0, 0.0)
     rtol, atol = spec.tolerance(measure.column)
     column = spec.tolerances.get(measure.column) if measure.column is not None else None
     if column is None:
-        rtol = params.rtol if params.rtol is not None else rtol
-        atol = params.atol if params.atol is not None else atol
+        rtol = level.rtol if level.rtol is not None else rtol
+        atol = level.atol if level.atol is not None else atol
     return Materiality(
         measure.rtol if measure.rtol is not None else rtol,
         measure.atol if measure.atol is not None else atol,
@@ -131,6 +151,182 @@ def _materiality(spec: ComparisonSpec, params: GroupsParams, measure: MeasureSpe
 def _rows(frame: pl.DataFrame, columns: list[str]) -> Iterator[tuple[Any, ...]]:
     for batch in frame.select(columns).iter_slices(16_384):
         yield from batch.iter_rows()
+
+
+@dataclass(frozen=True)
+class AlignedGroups:
+    """Both sides reduced per group and aligned by group (a full outer join).
+
+    Only the G-row aggregates are in memory. Levels that compare other keyed
+    reductions (time buckets, series) build on this rather than reducing again.
+    """
+
+    keys: list[str]
+    measures: list[tuple[MeasureSpec, Measure]]
+    aliases: list[str]
+    """Value column of each measure in ``frames``."""
+    presence: str
+    """Row-count column in ``frames``."""
+    frames: dict[Side, pl.DataFrame]
+    """Per side: the keys, the row count and one column per measure alias."""
+    columns: dict[Side, dict[str, str]]
+    """Each side's column in ``joined`` for the row count and every measure alias."""
+    joined: pl.DataFrame
+    only_baseline: pl.DataFrame
+    only_candidate: pl.DataFrame
+    both: pl.DataFrame
+
+
+def reduce_groups(
+    inputs: LevelInputs,
+    keys: list[str],
+    specs: tuple[MeasureSpec, ...],
+    relations: Mapping[Side, ProjectedRelation] | None = None,
+) -> AlignedGroups:
+    """Reduce each side natively per ``keys`` group and align the groups losslessly.
+
+    ``relations`` replaces the aligned sides, e.g. with a derived bucket column;
+    measures read them through the same :class:`MeasureInput` contract.
+    """
+    measures = [(spec, MEASURES.create(spec.measure, spec.params)) for spec in specs]
+    sides = {side: (relations or {}).get(side) or inputs.relation(side) for side in SIDES}
+    taken = [*sides["baseline"].schema, *sides["candidate"].schema]
+    presence = fresh_internal("group_rows", taken)
+    aliases: list[str] = []
+    for index in range(len(measures)):
+        aliases.append(fresh_internal(f"measure_{index}", [*taken, presence, *aliases]))
+    frames: dict[Side, pl.DataFrame] = {}
+    for side in SIDES:
+        relation = sides[side]
+        needed = [*keys, *(c for spec, m in measures for c in m.columns(spec.column))]
+        if absent := sorted({c for c in needed if c not in relation.schema}):
+            raise ValueError(f"{side} lacks column(s) {', '.join(absent)}")
+        frame = grouped_reduce(relation, keys, {presence: pl.len().cast(pl.UInt64)})
+        for (spec, measure), alias in zip(measures, aliases, strict=True):
+            data = MeasureInput(relation, tuple(keys), spec.column, alias, side)
+            measure.check(data)
+            values = measure.compute(data).select([*keys, alias])
+            frame = (
+                frame.join(values, on=keys, how="left", nulls_equal=True)
+                if keys
+                else pl.concat([frame, values], how="horizontal")
+            )
+        frames[side] = frame
+    names = {
+        side: {
+            column: fresh_internal(f"{side}_{column}", [*taken, *keys])
+            for column in [presence, *aliases]
+        }
+        for side in SIDES
+    }
+    base = frames["baseline"].rename(names["baseline"])
+    cand = frames["candidate"].rename(names["candidate"])
+    if keys:
+        base, cand = align_keys(base, cand, keys)
+        joined = base.join(cand, on=keys, how="full", coalesce=True, nulls_equal=True)
+    else:
+        joined = pl.concat([base, cand], how="horizontal")
+    joined = joined.sort(keys, nulls_last=True) if keys else joined
+    b_present = pl.col(names["baseline"][presence]).is_not_null()
+    c_present = pl.col(names["candidate"][presence]).is_not_null()
+    return AlignedGroups(
+        keys=keys,
+        measures=measures,
+        aliases=aliases,
+        presence=presence,
+        frames=frames,
+        columns=names,
+        joined=joined,
+        only_baseline=joined.filter(b_present & ~c_present),
+        only_candidate=joined.filter(~b_present & c_present),
+        both=joined.filter(b_present & c_present),
+    )
+
+
+def one_sided_check(
+    inputs: LevelInputs, aligned: AlignedGroups, check: str, noun: str, allowed: bool
+) -> CheckResult:
+    """Keys present on one side only, with bounded evidence in key order."""
+    evidence = inputs.evidence()
+    only_b, only_c = aligned.only_baseline, aligned.only_candidate
+    for label, frame in (("only in baseline", only_b), ("only in candidate", only_c)):
+        for record in frame.select(aligned.keys).iter_rows(named=True):
+            evidence.append({**record, check: label})
+    return graded(
+        check,
+        only_b.height + only_c.height,
+        f"Both sides have the same {plural(aligned.both.height, noun)}.",
+        f"{plural(only_b.height, noun)} only in the baseline, "
+        f"{plural(only_c.height, noun)} only in the candidate.",
+        evidence=evidence,
+        total=aligned.joined.height,
+        unit=f"{noun}s",
+        allowed=allowed,
+    )
+
+
+def compare_measure(
+    inputs: LevelInputs,
+    aligned: AlignedGroups,
+    index: int,
+    judged: Materiality,
+    noun: str = "group",
+) -> tuple[MeasureComparison, CheckResult]:
+    """Compare measure ``index`` key by key: comparators, materiality, largest changes."""
+    spec = aligned.measures[index][0]
+    alias = aligned.aliases[index]
+    left, right = aligned.columns["baseline"][alias], aligned.columns["candidate"][alias]
+    both, keys = aligned.both, aligned.keys
+    comparators = [(name, COMPARATORS.create(name)) for name in spec.comparators]
+    context = ComparatorContext()
+    if "share_change" in spec.comparators:
+        totals = []
+        for column in (left, right):
+            values = (exact_rational(value) for (value,) in _rows(both, [column]))
+            totals.append(sum((v for v in values if v is not None), Fraction(0)))
+        context = ComparatorContext(totals[0], totals[1])
+    leaders = LargestEvidence(inputs.ctx.evidence_limit)
+    material = 0
+    for position, row in enumerate(_rows(both, [*keys, left, right])):
+        *key, before, after = row
+        if not judged.material(before, after):
+            continue
+        material += 1
+        b, c = exact_rational(before), exact_rational(after)
+        record: dict[str, Any] = dict(zip(keys, key, strict=True))
+        record["measure"] = spec.label
+        record["baseline"] = report_number(b) if b is not None else before
+        record["candidate"] = report_number(c) if c is not None else after
+        magnitude = 0.0
+        if b is not None and c is not None:
+            for name, comparator in comparators:
+                record[name] = report_number(comparator.compare(b, c, context))
+            magnitude = float(report_number(abs(c - b)) or 0)
+        leaders.add(magnitude, position, record)
+    evidence = inputs.evidence()
+    evidence.extend(leaders.records)
+    evidence.count = material
+    comparison = MeasureComparison(
+        label=spec.label,
+        measure=spec.measure,
+        column=spec.column,
+        comparators=list(spec.comparators),
+        compared=both.height,
+        material=material,
+        rtol=judged.rtol,
+        atol=judged.atol,
+    )
+    check = graded(
+        spec.label,
+        material,
+        f"{spec.label} agrees in {plural(both.height, noun)} "
+        f"(rtol={judged.rtol:g}, atol={judged.atol:g}).",
+        f"{spec.label} changed materially in {plural(material, noun)} of {both.height:,}.",
+        evidence=evidence,
+        total=both.height,
+        unit=f"{noun}s",
+    )
+    return comparison, check
 
 
 @register_level
@@ -148,160 +344,35 @@ class GroupsLevel(ComparisonLevel):
     def evaluate(self, inputs: LevelInputs, name: str) -> GroupsResult:
         params: GroupsParams = self.params  # type: ignore[assignment]
         group_by = list(params.group_by)
-        measures = [(spec, MEASURES.create(spec.measure, spec.params)) for spec in params.measures]
-        taken = [*inputs.schema("baseline"), *inputs.schema("candidate")]
-        presence = fresh_internal("group_rows", taken)
-        aliases: list[str] = []
-        for index in range(len(measures)):
-            aliases.append(fresh_internal(f"measure_{index}", [*taken, presence, *aliases]))
-        frames: dict[Side, pl.DataFrame] = {}
-        for side in SIDES:
-            relation = inputs.relation(side)
-            needed = [*group_by, *(c for spec, m in measures for c in m.columns(spec.column))]
-            if absent := sorted({c for c in needed if c not in relation.schema}):
-                raise ValueError(f"{side} lacks column(s) {', '.join(absent)}")
-            frame = grouped_reduce(relation, group_by, {presence: pl.len().cast(pl.UInt64)})
-            for (spec, measure), alias in zip(measures, aliases, strict=True):
-                data = MeasureInput(relation, tuple(group_by), spec.column, alias, side)
-                measure.check(data)
-                values = measure.compute(data).select([*group_by, alias])
-                frame = (
-                    frame.join(values, on=group_by, how="left", nulls_equal=True)
-                    if group_by
-                    else pl.concat([frame, values], how="horizontal")
-                )
-            frames[side] = frame
-        names = {
-            side: {
-                column: fresh_internal(f"{side}_{column}", [*taken, *group_by])
-                for column in [presence, *aliases]
-            }
-            for side in SIDES
-        }
-        base = frames["baseline"].rename(names["baseline"])
-        cand = frames["candidate"].rename(names["candidate"])
-        if group_by:
-            base, cand = align_keys(base, cand, group_by)
-            joined = base.join(cand, on=group_by, how="full", coalesce=True, nulls_equal=True)
-        else:
-            joined = pl.concat([base, cand], how="horizontal")
-        joined = joined.sort(group_by, nulls_last=True) if group_by else joined
-        b_present = pl.col(names["baseline"][presence]).is_not_null()
-        c_present = pl.col(names["candidate"][presence]).is_not_null()
-        only_b = joined.filter(b_present & ~c_present)
-        only_c = joined.filter(~b_present & c_present)
-        both = joined.filter(b_present & c_present)
-        checks = []
-        evidence = inputs.evidence()
-        for label, frame in (("only in baseline", only_b), ("only in candidate", only_c)):
-            for record in frame.select(group_by).iter_rows(named=True):
-                evidence.append({**record, "groups": label})
-        one_sided = only_b.height + only_c.height
-        checks.append(
-            graded(
-                "groups",
-                one_sided,
-                f"Both sides have the same {plural(both.height, 'group')}.",
-                f"{plural(only_b.height, 'group')} only in the baseline, "
-                f"{plural(only_c.height, 'group')} only in the candidate.",
-                evidence=evidence,
-                total=joined.height,
-                unit="groups",
-                allowed=params.missing_groups == "ignore",
-            )
-        )
+        aligned = reduce_groups(inputs, group_by, params.measures)
+        checks = [
+            one_sided_check(inputs, aligned, "groups", "group", params.missing_groups == "ignore")
+        ]
         comparisons = []
-        for (spec, _), alias in zip(measures, aliases, strict=True):
-            comparison, check = self._measure(
-                inputs,
-                params,
-                spec,
-                both,
-                group_by,
-                names["baseline"][alias],
-                names["candidate"][alias],
-            )
+        for index, (spec, _) in enumerate(aligned.measures):
+            judged = materiality(inputs.spec, params, spec)
+            comparison, check = compare_measure(inputs, aligned, index, judged)
             comparisons.append(comparison)
             checks.append(check)
         rank = None
         if params.rank is not None:
-            alias = aliases[[spec.label for spec, _ in measures].index(params.rank.measure)]
-            rank, check = self._rank(inputs, params, frames, group_by, alias)
+            labels = [spec.label for spec, _ in aligned.measures]
+            alias = aligned.aliases[labels.index(params.rank.measure)]
+            rank, check = self._rank(inputs, params, aligned.frames, group_by, alias)
             checks.append(check)
         return GroupsResult(
             level=self.name,
             name=name,
             checks=checks,
             group_by=group_by,
-            baseline_groups=frames["baseline"].height,
-            candidate_groups=frames["candidate"].height,
-            only_in_baseline=only_b.height,
-            only_in_candidate=only_c.height,
+            baseline_groups=aligned.frames["baseline"].height,
+            candidate_groups=aligned.frames["candidate"].height,
+            only_in_baseline=aligned.only_baseline.height,
+            only_in_candidate=aligned.only_candidate.height,
             measures=comparisons,
             rank=rank,
         )
 
-    @staticmethod
-    def _measure(
-        inputs: LevelInputs,
-        params: GroupsParams,
-        spec: MeasureSpec,
-        both: pl.DataFrame,
-        group_by: list[str],
-        left: str,
-        right: str,
-    ):
-        materiality = _materiality(inputs.spec, params, spec)
-        comparators = [(name, COMPARATORS.create(name)) for name in spec.comparators]
-        context = ComparatorContext()
-        if "share_change" in spec.comparators:
-            totals = []
-            for column in (left, right):
-                values = (exact_rational(value) for (value,) in _rows(both, [column]))
-                totals.append(sum((v for v in values if v is not None), Fraction(0)))
-            context = ComparatorContext(totals[0], totals[1])
-        leaders = LargestEvidence(inputs.ctx.evidence_limit)
-        material = 0
-        for position, row in enumerate(_rows(both, [*group_by, left, right])):
-            *keys, before, after = row
-            if not materiality.material(before, after):
-                continue
-            material += 1
-            b, c = exact_rational(before), exact_rational(after)
-            record: dict[str, Any] = dict(zip(group_by, keys, strict=True))
-            record["measure"] = spec.label
-            record["baseline"] = report_number(b) if b is not None else before
-            record["candidate"] = report_number(c) if c is not None else after
-            magnitude = 0.0
-            if b is not None and c is not None:
-                for name, comparator in comparators:
-                    record[name] = report_number(comparator.compare(b, c, context))
-                magnitude = float(report_number(abs(c - b)) or 0)
-            leaders.add(magnitude, position, record)
-        evidence = inputs.evidence()
-        evidence.extend(leaders.records)
-        evidence.count = material
-        comparison = MeasureComparison(
-            label=spec.label,
-            measure=spec.measure,
-            column=spec.column,
-            comparators=list(spec.comparators),
-            compared=both.height,
-            material=material,
-            rtol=materiality.rtol,
-            atol=materiality.atol,
-        )
-        check = graded(
-            spec.label,
-            material,
-            f"{spec.label} agrees in {plural(both.height, 'group')} "
-            f"(rtol={materiality.rtol:g}, atol={materiality.atol:g}).",
-            f"{spec.label} changed materially in {plural(material, 'group')} of {both.height:,}.",
-            evidence=evidence,
-            total=both.height,
-            unit="groups",
-        )
-        return comparison, check
 
     @staticmethod
     def _rank(
