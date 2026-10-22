@@ -41,6 +41,11 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
+from qavf.inference._support import scipy_stats
+from qavf.inference.multiple import adjust
+from qavf.inference.pvalues import t_p_value
+from qavf.inference.results import Correction
+from qavf.inference.trend import kendall_tau
 from qavf.numeric import exact_number, numeric_close
 from qavf.redaction import exception_details
 from qavf.rules._contracts import isolate_contract, unassessed_contract
@@ -92,15 +97,6 @@ CATEGORY = "temporal"
 def _name(spec: SeriesSpec, role: str) -> str:
     """Allocate intermediate roles independently of user key/time names."""
     return fresh_internal(role, (*spec.group_by, spec.time_column))
-
-
-def _stats_stack() -> Any:
-    """Load only the optional SciPy routines used by the rules."""
-    try:
-        from scipy import stats
-    except ImportError:
-        return None
-    return stats
 
 
 _MISSING_STATS = "Not assessed: this rule needs the stats extra (pip install 'qavf[stats]')."
@@ -696,6 +692,9 @@ class TrendDirectionParams(SeriesParams):
     """Kendall's tau magnitude, in the wrong direction, at which a series is flagged."""
     alpha: float | None = Field(default=None, gt=0, lt=1)
     """When set, additionally require the wrong-way trend to be significant at this level."""
+    correction: Correction = "none"
+    """Multiple-testing correction of the Kendall p-values across every series examined
+    (``bh``, ``by``, ``holm``, ``bonferroni``); applies with ``alpha``."""
 
 
 class TrendDirectionRule(_TemporalRule):
@@ -719,15 +718,17 @@ class TrendDirectionRule(_TemporalRule):
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         if not any(spec.expected_trend for spec in self.params.series):
             return [Finding.skip("No series declares an expected trend.")]
-        stack = _stats_stack()
-        if stack is None:
+        if scipy_stats() is None:
             return [Finding.unassessed(_MISSING_STATS)]
-        sps = stack
         records = BoundedEvidence(ctx.evidence_limit)
         blocked: list[Finding] = []
         used: list[SeriesSpec] = []
         examined = 0
         too_short = 0
+        family: list[float] = []
+        """Kendall p-values of every examined series with a defined tau."""
+        against: list[tuple[int, float, dict[str, Any]]] = []
+        """Wrong-way series: their place in ``family``, tau and evidence."""
         for spec in self.params.series:
             with isolate_contract(spec.label, (spec.dataset,), blocked):
                 if spec.expected_trend is None:
@@ -742,28 +743,41 @@ class TrendDirectionRule(_TemporalRule):
                         if frame.height < self.params.min_points:
                             too_short += 1
                             continue
-                        result = sps.kendalltau(
+                        result = kendall_tau(
                             _sequence(spec, frame).to_numpy(),
                             frame[_name(spec, "value")].to_numpy(),
                         )
                         examined += 1
-                        tau, p_value = float(result.statistic), float(result.pvalue)
-                        if np.isnan(tau) or sign * tau > -self.params.min_tau:
+                        if not result.assessed:  # an undefined tau (constant values)
                             continue
-                        if self.params.alpha is not None and p_value > self.params.alpha:
+                        assert result.statistic is not None and result.p_value is not None
+                        family.append(result.p_value)
+                        tau = result.statistic
+                        if sign * tau > -self.params.min_tau:
                             continue
-                        records.append(
-                            annotate(
-                                key,
-                                series=spec.label,
-                                expected=spec.expected_trend,
-                                kendall_tau=round(tau, 4),
-                                p_value=round(p_value, 6),
-                                periods=frame.height,
-                                first_value=frame[_name(spec, "value")][0],
-                                last_value=frame[_name(spec, "value")][-1],
-                            )
+                        record = annotate(
+                            key,
+                            series=spec.label,
+                            expected=spec.expected_trend,
+                            kendall_tau=round(tau, 4),
+                            periods=frame.height,
+                            first_value=frame[_name(spec, "value")][0],
+                            last_value=frame[_name(spec, "value")][-1],
                         )
+                        against.append((len(family) - 1, tau, record))
+        adjusted = adjust(family, self.params.correction)
+        for index, tau, record in against:
+            if self.params.alpha is not None and adjusted[index] > self.params.alpha:
+                continue
+            records.append(
+                {
+                    **record,
+                    "p_value": round(family[index], 6),
+                    "adjusted_p": round(float(adjusted[index]), 6),
+                    "correction": self.params.correction,
+                    "effect": round(tau, 4),
+                }
+            )
         return _outcome(
             records,
             used,
@@ -790,6 +804,9 @@ class TrendOutlierParams(SeriesParams):
     trend are not reported."""
     log_transform: bool = True
     """Fit the trend on log(value) when every value is positive (multiplicative change)."""
+    correction: Correction = "bonferroni"
+    """Multiple-testing correction of the residual p-values within each series
+    (``holm``, ``bh``, ``by``, ``none``)."""
 
 
 class TrendOutlierRule(_TemporalRule):
@@ -813,8 +830,7 @@ class TrendOutlierRule(_TemporalRule):
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         if not self.params.series:
             return [Finding.skip("No series are configured.")]
-        stack = _stats_stack()
-        if stack is None:
+        if scipy_stats() is None:
             return [Finding.unassessed(_MISSING_STATS)]
         records = BoundedEvidence(ctx.evidence_limit)
         blocked: list[Finding] = []
@@ -850,6 +866,7 @@ class TrendOutlierRule(_TemporalRule):
                             values,
                             self.params.log_transform,
                             self.params.min_relative_deviation,
+                            self.params.correction,
                         )
                         if test is None:
                             blocked.append(
@@ -885,6 +902,9 @@ class TrendOutlierRule(_TemporalRule):
                                     ),
                                     studentized_residual=round(float(test.residuals[index]), 3),
                                     adjusted_p=float(test.adjusted_p[index]),
+                                    p_value=float(test.p_value[index]),
+                                    correction=self.params.correction,
+                                    effect=round(float(test.relative_deviation[index]), 4),
                                 )
                             )
         return _outcome(
@@ -907,6 +927,8 @@ class _TrendTest:
     relative_deviation: np.ndarray
     residuals: np.ndarray
     adjusted_p: np.ndarray
+    p_value: np.ndarray
+    """Two-sided p-value of each studentized residual, before the correction."""
 
 
 def _trend_outlier_test(
@@ -914,6 +936,7 @@ def _trend_outlier_test(
     values: np.ndarray,
     log_transform: bool,
     min_relative_deviation: float = 0.05,
+    correction: Correction = "bonferroni",
 ) -> _TrendTest | None:
     """O(n) externally studentized OLS residuals, with a numerical uncertainty guard.
 
@@ -948,7 +971,7 @@ def _trend_outlier_test(
         )
         if np.any(material & distinguishable):
             return None
-        return _TrendTest(fitted, deviation, zeros, np.ones(len(values)))
+        return _TrendTest(fitted, deviation, zeros, np.ones(len(values)), np.ones(len(values)))
     leverage = x.dtype.type(1) / len(values) + x * x / sxx
     remaining = 1 - leverage
     if np.any(remaining <= 0):
@@ -958,14 +981,12 @@ def _trend_outlier_test(
         studentized = np.asarray(
             residual / np.sqrt(deleted_sse / (len(values) - 3) * remaining), dtype=float
         )
-    from scipy.stats import t as student_t
-
-    adjusted_p = np.minimum(
-        1.0, 2 * student_t.sf(np.abs(studentized), len(values) - 3) * len(values)
-    )
-    if np.isnan(studentized).any() or np.isnan(adjusted_p).any():
+    # Two-sided Student t p-values (n - 3 degrees of freedom), corrected over the
+    # series' residuals: Bonferroni by default, as in the outlier test of Weisberg.
+    p_value = np.asarray(t_p_value(studentized, len(values) - 3), dtype=float)
+    if np.isnan(studentized).any() or np.isnan(p_value).any():
         return None
-    return _TrendTest(fitted, deviation, studentized, adjusted_p)
+    return _TrendTest(fitted, deviation, studentized, adjust(p_value, correction), p_value)
 
 
 def _relative_deviation(original: Any, fitted: Any) -> np.ndarray:
@@ -983,7 +1004,8 @@ def _constant_trend(values: np.ndarray) -> _TrendTest | None:
     if not bool((values == values[0]).all()):
         return None
     zeros = np.zeros(len(values))
-    return _TrendTest(values.astype(float), zeros, zeros, np.ones(len(values)))
+    ones = np.ones(len(values))
+    return _TrendTest(values.astype(float), zeros, zeros, ones, ones)
 
 
 def _extended_trend_core(

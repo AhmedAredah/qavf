@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import polars as pl
 
+from qavf.inference.independent import ks_asymptotic_p_value, ks_two_sample
 from qavf.statistics.ordered import power_of_two, quantiles, scaled
 from qavf.stats import checked_float_series
 
@@ -91,12 +92,14 @@ class Distribution:
 
         return math.fsum(terms()), count, policy
 
-    def ks(self, stack: Any) -> tuple[float, float, str]:
+    def ks(self, stack: Any = None) -> tuple[float, float, str]:
         """Match the documented SciPy auto policy with an exact streamed EDF.
 
-        Small samples use public ks_2samp unchanged. For larger samples its
-        two-sided asymptotic probability is computed from complete cumulative
-        counts. Neither large observation arrays nor a concatenated EDF exist.
+        Small samples use the shared two-sample KS test (SciPy's ``ks_2samp``
+        unchanged). For larger samples its two-sided asymptotic probability is
+        computed from complete cumulative counts. Neither large observation
+        arrays nor a concatenated EDF exist. ``stack`` is accepted for callers
+        that pass ``scipy.stats``; SciPy is loaded by :mod:`qavf.inference`.
         """
         if max(self.sizes) <= 10_000:
             arrays = [np.empty(size, dtype=np.float64) for size in self.sizes]
@@ -105,17 +108,19 @@ class Distribution:
                 for side, count in enumerate((ref, cur)):
                     arrays[side][offsets[side] : offsets[side] + count] = value
                     offsets[side] += count
-            result = stack.ks_2samp(*arrays, method="auto")
-            return float(result.statistic), float(result.pvalue), "scipy_auto_bounded_sample"
+            result = ks_two_sample(*arrays)
+            if not result.assessed:
+                raise ValueError(result.reason)
+            assert result.statistic is not None and result.p_value is not None
+            return result.statistic, result.p_value, "scipy_auto_bounded_sample"
         ref_total = cur_total = 0
         statistic = 0.0
         for _, ref, cur in self.rows():
             ref_total += ref
             cur_total += cur
             statistic = max(statistic, abs(ref_total / self.sizes[0] - cur_total / self.sizes[1]))
-        m, n = sorted(map(float, self.sizes), reverse=True)
-        probability = float(stack.kstwo.sf(statistic, np.round(m * n / (m + n))))
-        return statistic, min(1.0, max(0.0, probability)), "scipy_auto_asymptotic_complete_edf"
+        probability = ks_asymptotic_p_value(statistic, (self.sizes[0], self.sizes[1]))
+        return statistic, probability, "scipy_auto_asymptotic_complete_edf"
 
 
 @contextmanager

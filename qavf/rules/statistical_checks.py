@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import polars as pl
@@ -12,6 +13,9 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
+from qavf.inference._support import scipy_stats
+from qavf.inference.multiple import adjust
+from qavf.inference.results import Correction
 from qavf.rules._contracts import isolate_contract
 from qavf.rules.helpers import (
     MetricSpec,
@@ -261,6 +265,20 @@ class DriftParams(RuleParams):
     """Parameters for :class:`DistributionDriftRule`."""
 
     comparisons: tuple[DriftComparison, ...] = ()
+    correction: Correction = "bonferroni"
+    """Multiple-testing correction across the KS comparisons (``holm``, ``bh``,
+    ``by``, ``none``); a comparison drifts when its adjusted p-value is below its
+    ``alpha``."""
+
+
+@dataclass(slots=True)
+class _PendingKS:
+    """A KS comparison measured, awaiting the family's correction."""
+
+    comparison: DriftComparison
+    statistic: float
+    p_value: float
+    metrics: dict[str, Any]
 
 
 class DistributionDriftRule(Rule):
@@ -294,6 +312,8 @@ class DistributionDriftRule(Rule):
         comparisons = self.params.comparisons
         tests = max(sum(c.method == "ks" for c in comparisons), 1)
         findings: list[Finding] = []
+        measured: dict[int, _PendingKS] = {}
+        """KS comparisons awaiting the correction, by their place in ``findings``."""
         from qavf.rules._statistics_plan import drift_comparisons
 
         admitted = drift_comparisons(ctx, comparisons, findings)
@@ -322,8 +342,36 @@ class DistributionDriftRule(Rule):
                                 datasets=(comparison.dataset, comparison.reference),
                             )
                         )
-                    findings.append(finding)
+                    if isinstance(finding, _PendingKS):
+                        measured[len(findings)] = finding
+                        findings.append(Finding.skip(comparison.label()))  # replaced below
+                    else:
+                        findings.append(finding)
+        # Untested KS comparisons count as p = 1: Bonferroni divides by every one.
+        pending = [measured[i].p_value for i in measured]
+        adjusted = adjust(pending, self.params.correction, family_size=tests)
+        for i, q in zip(measured, adjusted, strict=True):
+            findings[i] = self._ks_finding(measured[i], float(q), tests)
         return findings or [Finding.skip("No drift comparisons are configured.")]
+
+    def _ks_finding(self, measured: _PendingKS, adjusted: float, tests: int) -> Finding:
+        """Judge one KS comparison once the family is corrected."""
+        c, correction = measured.comparison, self.params.correction
+        metrics = dict(measured.metrics)
+        statistic, probability = measured.statistic, measured.p_value
+        if correction == "bonferroni":
+            alpha = c.alpha / tests
+            metrics |= {"alpha_bonferroni": alpha}
+            significant = probability < alpha
+            detail = f"KS statistic {statistic:.3f}, p = {probability:.2g} < {alpha:.2g}"
+        else:
+            significant = adjusted < c.alpha
+            detail = (
+                f"KS statistic {statistic:.3f}, adjusted p = {adjusted:.2g} < {c.alpha:.2g} "
+                f"({correction})"
+            )
+        metrics |= {"adjusted_p": adjusted, "correction": correction, "effect": statistic}
+        return self._judged(c, metrics, significant and statistic >= c.min_effect, detail)
 
     def _compare(
         self,
@@ -331,7 +379,7 @@ class DistributionDriftRule(Rule):
         c: DriftComparison,
         tests: int,
         observations: Mapping[str, Observation | ObservationView],
-    ) -> Finding:
+    ) -> Finding | _PendingKS:
         from qavf.rules._distribution import observed_distribution
 
         label = c.label()
@@ -354,23 +402,19 @@ class DistributionDriftRule(Rule):
                             "use method: psi.",
                             check=label,
                         )
-                    stack = _scipy_stats()
-                    if stack is None:
+                    if scipy_stats() is None:
                         return Finding.unassessed(
                             f"Not assessed: {label}: the KS test needs the stats extra "
                             "(pip install 'qavf[stats]').",
                             check=label,
                         )
-                    statistic, probability, policy = distribution.ks(stack)
-                    alpha = c.alpha / tests
+                    statistic, probability, policy = distribution.ks()
                     metrics |= {
                         "ks_statistic": statistic,
                         "p_value": probability,
-                        "alpha_bonferroni": alpha,
                         "ks_policy": policy,
                     }
-                    drifted = probability < alpha and statistic >= c.min_effect
-                    detail = f"KS statistic {statistic:.3f}, p = {probability:.2g} < {alpha:.2g}"
+                    return _PendingKS(c, statistic, probability, metrics)
                 else:
                     psi, bins, policy = distribution.psi(c.bins)
                     metrics |= {"psi": round(psi, 6), "bins": bins, "bin_policy": policy}
@@ -382,6 +426,11 @@ class DistributionDriftRule(Rule):
                 check=label,
                 datasets=(c.dataset, c.reference),
             )
+        return self._judged(c, metrics, drifted, detail)
+
+    @staticmethod
+    def _judged(c: DriftComparison, metrics: dict[str, Any], drifted: bool, detail: str) -> Finding:
+        label = c.label()
         if not drifted:
             return Finding.ok(
                 f"{label}: distribution stable.",
@@ -401,11 +450,3 @@ class DistributionDriftRule(Rule):
             metrics=metrics,
             datasets=(c.dataset, c.reference),
         )
-
-
-def _scipy_stats() -> Any:
-    try:
-        from scipy import stats
-    except ImportError:
-        return None
-    return stats
