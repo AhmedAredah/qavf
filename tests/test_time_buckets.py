@@ -402,3 +402,36 @@ def test_summing_hourly_buckets_then_rebucketing_equals_bucketing_directly(rows,
             day = instant.astimezone(chicago).date()
             totals[day] = totals.get(day, 0) + v
         assert dict(one_step.iter_rows()) == totals
+
+
+@settings(max_examples=60, deadline=None)
+@given(
+    st.lists(st.integers(-20_000, 40_000), min_size=1, max_size=40),
+    st.integers(-3, 3),
+    st.integers(-14, 14),
+    st.integers(-40, 40),
+    st.booleans(),
+)
+def test_shifting_back_and_forth_is_the_identity_for_aligned_rows(
+    days, years, months, extra, weekly
+):
+    """Every row a shift does not refuse comes back exactly; refused rows are flagged."""
+    months = 0 if weekly else months
+    extra = extra if years or months or extra else 1
+    offset = CalendarOffset(years=years, months=months, days=extra, same_weekday=weekly)
+    frame = pl.DataFrame({"d": [date(1970, 1, 1) + timedelta(days=d) for d in days]})
+    forward, refused = shifted_time("d", pl.Date, offset, 1, None)
+    moved = frame.with_columns(forward.alias("m"), refused.alias("r"))
+    back, refused_back = shifted_time("m", pl.Date, offset, -1, None)
+    out = moved.with_columns(back.alias("b"), refused_back.alias("rb")).filter(~pl.col("r"))
+    assert out["b"].to_list() == out["d"].to_list()
+    assert not out["rb"].any()
+    # Refused rows are exactly those Python's calendar cannot move (31 April, 29 February).
+    for value, flagged in moved.select("d", "r").iter_rows():
+        total = value.month - 1 + (0 if weekly else months + 12 * years)
+        try:
+            date(value.year + total // 12, total % 12 + 1, value.day)
+            clamps = False
+        except ValueError:
+            clamps = True
+        assert flagged == clamps

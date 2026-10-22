@@ -103,6 +103,7 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
                 plan = normalized_plan(ctx, datasets[side], observation.scan(), declared_only=True)
                 aligned[side] = align(plan, steps, context)
                 units[side], nullable[side] = context.units, context.nullable
+                outcome["alignment"].extend(context.notes)
             sides: dict[Side, Observation] = {
                 side: stack.enter_context(observed[datasets[side]].derived(_fixed(aligned[side])))
                 for side in SIDES

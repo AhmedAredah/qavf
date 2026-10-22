@@ -24,10 +24,14 @@ class CalendarOffset(RuleParams):
     """How far one dataset's time is ahead of the other's (``{years: 1}``)."""
 
     years: int = 0
+    """Calendar years on the local wall clock (29 February has no counterpart)."""
     months: int = 0
+    """Calendar months (a 31st without a counterpart is reported, never clamped)."""
     weeks: int = 0
     days: int = 0
+    """Calendar days: the same local time of day, across DST changes."""
     hours: int = 0
+    """Elapsed hours of physical time (so are minutes and seconds)."""
     minutes: int = 0
     seconds: int = 0
     same_weekday: bool = False
@@ -62,17 +66,22 @@ class CalendarOffset(RuleParams):
         return " ".join(parts) + (" (same weekday)" if self.same_weekday else "")
 
 
-def _calendar(value: pl.Expr, months: int, days: int) -> tuple[pl.Expr, pl.Expr]:
+def _calendar(value: pl.Expr, months: int, days: int, sign: int) -> tuple[pl.Expr, pl.Expr]:
     """Shift a Date or naive Datetime; also the rows whose month shift is not invertible.
 
-    Month arithmetic clamps to the month's last day (29 February a year later is
-    28 February), which would merge two days: such rows have no shifted value.
+    Forward shifts add months, then days; backward shifts undo them in reverse
+    order, so a backward shift is the exact inverse of the forward one. Month
+    arithmetic clamps to the month's last day (29 February a year later is 28
+    February), which would merge two days: such rows have no shifted value.
     """
     shifted, clamped = value, pl.lit(False)
+    if days and sign < 0:
+        shifted = shifted + pl.duration(days=days)
     if months:
-        shifted = value.dt.offset_by(f"{months}mo")
-        clamped = (shifted.dt.offset_by(f"{-months}mo") != value).fill_null(False)
-    if days:
+        before = shifted
+        shifted = before.dt.offset_by(f"{months}mo")
+        clamped = (shifted.dt.offset_by(f"{-months}mo") != before).fill_null(False)
+    if days and sign > 0:
         shifted = shifted + pl.duration(days=days)
     return pl.when(~clamped).then(shifted), clamped
 
@@ -80,46 +89,54 @@ def _calendar(value: pl.Expr, months: int, days: int) -> tuple[pl.Expr, pl.Expr]
 def shifted_time(
     column: str, dtype: pl.DataType, offset: CalendarOffset, sign: int, zone: str | None
 ) -> tuple[pl.Expr, pl.Expr]:
-    """``column`` moved by ``sign`` times ``offset``, and the rows that cannot move exactly.
+    """``column`` moved by ``sign`` (+1 or -1) times ``offset``, and the rows that cannot
+    move exactly.
 
     Dates take calendar offsets only. Naive datetimes without ``zone`` shift as
     naive values. Datetimes in a zone (aware, or naive wall-clock times with
     ``zone``) shift their local wall clock and are localized again, keeping a
-    fall-back row's occurrence; the elapsed part then moves the instant. The
-    result has the column's own dtype.
+    fall-back row's occurrence. Moving forward applies the calendar part, then the
+    elapsed part; moving back undoes them in reverse order, so the two are exact
+    inverses. The result has the column's own dtype.
 
     Raises:
         ValueError: for a column type that has no calendar.
     """
     months, days = sign * offset.calendar_months, sign * offset.calendar_days
-    elapsed = offset.elapsed * sign
+    elapsed = pl.duration(microseconds=sign * offset.elapsed // timedelta(microseconds=1))
     value = pl.col(column)
     if dtype == pl.Date:
-        if elapsed:
-            raise ValueError(f"time column {column!r} holds dates; it cannot shift by {elapsed}")
-        return _calendar(value, months, days)
+        if offset.elapsed:
+            raise ValueError(
+                f"time column {column!r} holds dates; it cannot shift by {offset.elapsed}"
+            )
+        return _calendar(value, months, days, sign)
     if not isinstance(dtype, pl.Datetime):
         raise ValueError(f"time column {column!r} must be a Date or a Datetime, found {dtype}")
     aware = dtype.time_zone is not None
     zone = zone if zone is not None else dtype.time_zone
     if zone is None:
-        shifted, clamped = _calendar(value, months, days)
-        return shifted + pl.duration(microseconds=elapsed // timedelta(microseconds=1)), clamped
-    local = wall_clock(value, dtype, zone)
+        start = value + elapsed if sign < 0 else value
+        shifted, clamped = _calendar(start, months, days, sign)
+        return (shifted + elapsed if sign > 0 else shifted), clamped
     instant = zoned(value, aware, zone, ambiguous="null", non_existent="null")
     unaligned = value.is_not_null() & instant.is_null()
+    if sign < 0:
+        instant = instant + elapsed
     if months or days:
+        local = wall_clock(instant, pl.Datetime("us", zone), zone)
         earliest = zoned(local, False, zone, ambiguous="earliest", non_existent="null")
         latest = zoned(local, False, zone, ambiguous="latest", non_existent="null")
         second = (earliest != latest) & (instant == latest)
-        moved, clamped = _calendar(local, months, days)
+        moved, clamped = _calendar(local, months, days, sign)
         first_after = zoned(moved, False, zone, ambiguous="earliest", non_existent="null")
         second_after = zoned(moved, False, zone, ambiguous="latest", non_existent="null")
         collapsed = second & (first_after == second_after)
         instant = pl.when(second).then(second_after).otherwise(first_after)
         unaligned = unaligned | clamped | collapsed.fill_null(False)
         unaligned = unaligned | (value.is_not_null() & instant.is_null())
-    instant = instant + pl.duration(microseconds=elapsed // timedelta(microseconds=1))
+    if sign > 0:
+        instant = instant + elapsed
     result = (
         instant.dt.convert_time_zone(dtype.time_zone or zone)
         if aware

@@ -24,15 +24,16 @@ from __future__ import annotations
 from abc import abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import polars as pl
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from qavf.compare.registry import Component, ComponentRegistry
 from qavf.compare.spec import CastSpec, ComparisonSpec, Recode, Side, UnitConversion
 from qavf.engine.registry import RuleParams
 from qavf.regression._plan import mapped_schema
+from qavf.temporal import CalendarOffset, TimeBucketing, shifted_time
 from qavf.typed_values import checked_cast, exact_scale, logical_type
 
 
@@ -52,9 +53,16 @@ class AlignmentContext:
     """Declared column units under current names; steps keep it up to date."""
     nullable: dict[str, bool] = field(default_factory=dict)
     """Declared ``nullable`` flags under current names."""
+    notes: list[str] = field(default_factory=list)
+    """What steps did to the data that the configuration alone does not say (rows a
+    step was asked to drop, ...); reported with the comparison's alignment."""
 
     def refuse(self, message: str) -> AlignmentError:
         return AlignmentError(f"{self.side} {self.dataset!r}: {message}")
+
+    def note(self, message: str) -> None:
+        """Record a data-dependent outcome of a step in the alignment record."""
+        self.notes.append(f"{self.side}: {message}")
 
     def require_none(self, plan: pl.LazyFrame, predicate: pl.Expr, message: str) -> None:
         """Refuse when any row matches ``predicate``; ``message`` takes the count."""
@@ -295,6 +303,74 @@ class FilterStep(AlignmentStep):
             if condition is not None:
                 plan = plan.filter(pl.sql_expr(condition))
         return plan
+
+
+class ShiftTimeParams(RuleParams):
+    column: str
+    """Time column (a Date or Datetime) to shift."""
+    offset: CalendarOffset
+    """How far the candidate is ahead of the baseline, e.g. ``{years: 1}`` to compare
+    2025 with 2024, ``{weeks: 1}``, or ``{years: 1, same_weekday: true}`` (364 days)."""
+    side: Side = "candidate"
+    """The side whose time moves: the candidate back by ``offset``, or the baseline
+    forward by it."""
+    time_zone: str | None = None
+    """Zone whose wall clock calendar offsets follow (naive times are local there);
+    aware columns default to their own zone."""
+    unaligned: Literal["error", "drop"] = "error"
+    """Rows without an exact counterpart (29 February a year earlier, a local time a
+    DST change skips or repeats): refuse the alignment, or drop them (counted in the
+    alignment record)."""
+
+    @field_validator("time_zone")
+    @classmethod
+    def _zone(cls, value: str | None) -> str | None:
+        return TimeBucketing(time_zone=value).time_zone
+
+
+@register_alignment_step
+class ShiftTimeStep(AlignmentStep):
+    """Move one side's time column by a calendar offset (year over year, week over week)."""
+
+    name: ClassVar[str] = "shift_time"
+    description: ClassVar[str] = (
+        "Calendar alignment: the candidate's time minus an offset (or the baseline's plus "
+        "it), so V2 in 2025 is compared with V1 in 2024; exact or refused row by row."
+    )
+    Params: ClassVar[type[RuleParams]] = ShiftTimeParams
+    params: ShiftTimeParams
+
+    def apply(self, plan: pl.LazyFrame, context: AlignmentContext) -> pl.LazyFrame:
+        params = self.params
+        if context.side != params.side:
+            return plan
+        _require_columns(plan, [params.column], context)
+        dtype = plan.collect_schema()[params.column]
+        sign = -1 if params.side == "candidate" else 1
+        try:
+            value, unaligned = shifted_time(
+                params.column, dtype, params.offset, sign, params.time_zone
+            )
+        except ValueError as exc:
+            raise context.refuse(str(exc)) from None
+        direction = "earlier" if sign < 0 else "later"
+        if params.unaligned == "error":
+            context.require_none(
+                plan,
+                unaligned,
+                f"{{count}} value(s) of {params.column!r} have no exact counterpart "
+                f"{params.offset.describe()} {direction} (29 February, or a local time a DST "
+                "change skips or repeats); set unaligned: drop to leave them out",
+            )
+        else:
+            dropped = context.count(plan.filter(unaligned))
+            if dropped:
+                context.note(
+                    f"shift_time dropped {dropped:,} row(s) of {params.column!r} without an "
+                    f"exact counterpart {params.offset.describe()} {direction}"
+                )
+            plan = plan.filter(~unaligned)
+        return plan.with_columns(value.alias(params.column))
 
 
 def build_pipeline(spec: ComparisonSpec) -> list[AlignmentStep]:
