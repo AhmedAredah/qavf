@@ -422,6 +422,12 @@ class ContributionLevel(ComparisonLevel):
             f"mix {float(decomposed.mix):+.6g}, rate {float(decomposed.rate):+.6g}, "
             f"interaction {float(decomposed.interaction):+.6g}"
         )
+        # A passing material change passed because it was not significant: say so.
+        passed = (
+            f"{rate.label} changed materially but not significantly"
+            if material
+            else f"{rate.label} did not change materially"
+        )
         check = family_check(
             f"rate: {rate.label}",
             plan,
@@ -429,8 +435,7 @@ class ContributionLevel(ComparisonLevel):
             [member],
             [record],
             limit,
-            f"{rate.label} did not change materially ({float(before):.6g} to "
-            f"{float(after):.6g}; {split}{how}).",
+            f"{passed} ({float(before):.6g} to {float(after):.6g}; {split}{how}).",
             f"{rate.label} changed from {float(before):.6g} to {float(after):.6g} ({split}{how})",
             "rate",
         )
