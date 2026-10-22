@@ -377,6 +377,35 @@ def test_shape_lag_on_hourly_buckets_catches_a_one_hour_shift():
     assert record["lag"] == 1 and record["correlation"] == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize("anchor", [datetime(2026, 11, 1, 4), datetime(2026, 3, 8, 5)])
+def test_shape_lag_and_peak_count_physical_hours_across_dst(anchor):
+    """Through a 25- or 23-hour day, a one-hour shift is lag 1 and the peak moves one
+    bucket: sequence positions count physical buckets, not wall-clock slots."""
+    start = anchor.replace(tzinfo=UTC) - timedelta(hours=12)
+    hours = [start + timedelta(hours=h) for h in range(36)]
+    load = [float((h * 7) % 13) for h in range(36)]
+    load[18] = 50.0  # the peak, near the change
+    v1 = pl.DataFrame({"t": hours, "x": load}).with_columns(
+        pl.col("t").dt.convert_time_zone("America/New_York")
+    )
+    v2 = v1.with_columns(pl.col("t") + timedelta(hours=1))
+    level = {
+        "level": "series_shape",
+        "time_column": "t",
+        "bucket": "hour",
+        "measure": "sum(x)",
+        "trend": None,
+        "level_shift": None,
+        "correlation": None,
+    }
+    result = compare_datasets(v1, v2, levels=[level])
+    [lag] = _check(result, "series_shape", "lag").affected_records
+    assert lag["lag"] == 1 and lag["correlation"] == pytest.approx(1.0)
+    [peak] = _check(result, "series_shape", "peak").affected_records
+    assert peak["shift"] == 1
+    assert peak["candidate_peak"].timestamp() - peak["baseline_peak"].timestamp() == 3600
+
+
 # --------------------------------------------------- results and CMP-001
 def test_results_round_trip_through_json_with_their_types():
     start = datetime(2026, 11, 1, 4, tzinfo=UTC)

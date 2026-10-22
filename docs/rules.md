@@ -681,7 +681,7 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket of the exact bucket sequence when bucketed); seasons use the local calendar slot. |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
 
@@ -727,7 +727,7 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket of the exact bucket sequence when bucketed); seasons use the local calendar slot. |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
 
@@ -774,7 +774,7 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket of the exact bucket sequence when bucketed); seasons use the local calendar slot. |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
 
@@ -821,7 +821,7 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket of the exact bucket sequence when bucketed); seasons use the local calendar slot. |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
 
@@ -868,7 +868,7 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket of the exact bucket sequence when bucketed); seasons use the local calendar slot. |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
 
@@ -912,7 +912,7 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket of the exact bucket sequence when bucketed); seasons use the local calendar slot. |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
 
@@ -939,7 +939,7 @@ Each value is compared with the values of the same season (month, quarter, weekd
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `series` | `tuple[SeriesSpec, ...]` | `[]` | Series to examine; the rule skips until at least one is configured. |
-| `season_length` | `int` | `12` | Periods per cycle: 12 for monthly data indexed 1..12 or as a running month number, 4 for quarters, 7 for days of the week. The season of a period is ``period mod season_length`` (the bucket ordinal for a bucketed series, so monthly buckets with 12 give calendar months). |
+| `season_length` | `int` | `12` | Periods per cycle: 12 for monthly data indexed 1..12 or as a running month number, 4 for quarters, 7 for days of the week. The season of a period is ``period mod season_length``; for a bucketed series the period is its local calendar position, so monthly buckets with 12 give calendar months and hourly buckets with 24 the local hour, unchanged by DST. |
 | `threshold` | `float` | `3.5` | Modified z-score (median/MAD) above which a value is anomalous for its season. |
 | `min_cycles` | `int` | `4` | Fewest values of a season (one per cycle) needed to judge it. |
 | `min_relative_deviation` | `float` | `0.1` | Also require this relative difference from the season median. |
@@ -959,7 +959,7 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket of the exact bucket sequence when bucketed); seasons use the local calendar slot. |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
 
@@ -1006,7 +1006,7 @@ A series: ``value`` combined (``aggregate``, a sum by default) per
 | `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
 | `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
 | `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
-| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket when bucketed). |
+| `time_column` | `str` | `year` | Numeric time column (e.g. a year), or a Date, Datetime or text column with ``bucket``. Rates of change are per unit of it (per bucket of the exact bucket sequence when bucketed); seasons use the local calendar slot. |
 | `expected_trend` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `max_change_rate` | `float \| None` | `None` | Per-series override of the step-change threshold. |
 

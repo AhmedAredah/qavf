@@ -216,3 +216,74 @@ def test_unplaceable_times_exclude_their_group_with_evidence():
 def test_unusable_time_columns_are_not_assessed(frame, series, message):
     [result] = _run("TMP-001", frame, series)
     assert result.status is Status.ERROR and message in result.message
+
+
+# ------------------------------------------- seasons across DST changes
+CHICAGO = ZoneInfo("America/Chicago")
+HOURLY = {"bucket": "hour", "time_zone": "America/Chicago"}
+
+
+def _local_hours(start: datetime, days: int, anomaly: datetime | None = None):
+    """Hourly instants whose value is their Chicago local hour (the oracle), with an
+    optional planted anomaly at one local wall-clock time."""
+    first = start.replace(tzinfo=CHICAGO).astimezone(UTC)
+    instants = [first + timedelta(hours=h) for h in range(24 * days)]
+    values = []
+    for instant in instants:
+        local = instant.astimezone(CHICAGO)
+        planted = anomaly is not None and local.replace(tzinfo=None) == anomaly
+        values.append(float(local.hour) * (5 if planted else 1))
+    frame = pl.DataFrame({"t": instants, "v": values})
+    return frame.with_columns(pl.col("t").dt.convert_time_zone("America/Chicago"))
+
+
+def _slots_hold_their_own_hour(frame: pl.DataFrame) -> None:
+    """Every calendar slot (position mod 24) holds only its own local hour's values."""
+    from qavf.temporal import Bucket, TimeBucketing, bucket_labels, calendar_position
+
+    bucket = Bucket(unit="hour")
+    label, dtype = bucket_labels("t", frame.schema["t"], TimeBucketing(bucket=bucket))
+    slots = frame.select((calendar_position(label, dtype, bucket) % 24).alias("slot"))
+    hours = [t.astimezone(CHICAGO).hour for t in frame["t"].dt.convert_time_zone("UTC")]
+    assert slots["slot"].to_list() == hours
+
+
+@pytest.mark.parametrize(
+    ("start", "anomaly"),
+    [
+        (datetime(2024, 10, 20), datetime(2024, 11, 5, 14)),  # after the fall-back
+        (datetime(2024, 2, 25), datetime(2024, 3, 15, 14)),  # after the spring-forward
+    ],
+)
+def test_a_seasonal_anomaly_stays_in_its_local_hour_slot_across_dst(start, anomaly):
+    frame = _local_hours(start, 30, anomaly)
+    _slots_hold_their_own_hour(frame)
+    main = _main(_run("TMP-007", frame, HOURLY, season_length=24))
+    assert main.status is Status.FAIL
+    [record] = main.affected_records
+    assert record["season"] == 14 and record["season_median"] == 14.0
+    assert record["period"].astimezone(CHICAGO).replace(tzinfo=None) == anomaly
+    assert record["value"] == 70.0
+
+
+def test_a_daily_cycle_across_both_dst_changes_is_not_flagged():
+    frame = _local_hours(datetime(2024, 2, 20), 280)  # through March and November
+    _slots_hold_their_own_hour(frame)
+    main = _main(_run("TMP-007", frame, HOURLY, season_length=24))
+    assert main.status is Status.PASS
+    # The 25-hour day keeps both 01:00 hours (two observations of slot 1), and the
+    # 23-hour day has no 02:00: each slot's values number the days it occurred on.
+    assert main.total_records == frame.height
+
+
+def test_rates_are_per_bucket_of_elapsed_sequence_across_dst():
+    """10 % growth per physical hour, through both changes: every step is exactly one
+    bucket, so the 25-hour and 23-hour days add no spurious or doubled rates."""
+    for start in (datetime(2024, 3, 9, 20), datetime(2024, 11, 2, 20)):
+        first = start.replace(tzinfo=CHICAGO).astimezone(UTC)
+        instants = [first + timedelta(hours=h) for h in range(12)]
+        frame = pl.DataFrame({"t": instants, "v": [1.1**h for h in range(12)]})
+        passing = _main(_run("TMP-001", frame, HOURLY, max_change_rate=0.1001))
+        assert passing.status is Status.PASS and passing.total_records == 11
+        failing = _main(_run("TMP-001", frame, HOURLY, max_change_rate=0.0999))
+        assert failing.affected_count == 11

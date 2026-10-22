@@ -11,8 +11,9 @@ from qavf.temporal.buckets import (
     TimeBucketing,
     bucket_grid,
     bucket_labels,
-    bucket_ordinal,
     bucket_scalar,
+    calendar_position,
+    sequence_positions,
 )
 from qavf.temporal.shift import CalendarOffset, shifted_time
 
@@ -22,7 +23,8 @@ __all__ = [
     "TimeBucketing",
     "bucket_grid",
     "bucket_labels",
-    "bucket_ordinal",
     "bucket_scalar",
+    "calendar_position",
+    "sequence_positions",
     "shifted_time",
 ]

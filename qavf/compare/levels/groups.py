@@ -131,9 +131,7 @@ class _LevelTolerance(Protocol):
     def atol(self) -> float | None: ...
 
 
-def materiality(
-    spec: ComparisonSpec, level: _LevelTolerance, measure: MeasureSpec
-) -> Materiality:
+def materiality(spec: ComparisonSpec, level: _LevelTolerance, measure: MeasureSpec) -> Materiality:
     """The measure's tolerance: its own, the column's, the level's, then the comparison's."""
     if measure.exact:
         return Materiality(0.0, 0.0)
@@ -372,7 +370,6 @@ class GroupsLevel(ComparisonLevel):
             measures=comparisons,
             rank=rank,
         )
-
 
     @staticmethod
     def _rank(

@@ -166,6 +166,28 @@ exclude such rows with `where` if that is intended. A calendar bucket of a numer
 column, an hourly bucket of dates, or sides whose labels differ in type are not
 assessed either.
 
+**Two positions.** Each bucket has two exact integer positions, which differ only
+for sub-day buckets across a DST change:
+
+- the *sequence* position counts buckets of the exact grid: consecutive buckets are
+  one apart, both fall-back hours count and the skipped spring hour does not. It
+  measures spacing in time;
+- the *calendar* position is the local wall-clock slot: an hourly bucket's position
+  mod 24 is its local hour, the two fall-back hours are two observations of slot 1
+  (never merged into one bucket) and slot 2 is absent on the spring-forward day. It
+  is the position for cycles and seasons.
+
+| Consumer | Uses |
+|---|---|
+| TMP-001 rate of change, TMP-002 and TMP-003 trends | sequence (rate per bucket of elapsed sequence) |
+| TMP-007 season (`position mod season_length`) | calendar (hourly with 24: the local hour) |
+| TMP-004 missing periods, `temporal` gaps | the exact bucket grid (`bucket_grid`) |
+| TMP-005, TMP-006, TMP-008 | bucket order only |
+| `temporal` per-bucket measures | bucket labels (no position) |
+| `series_shape` correlation, trend, lag, peak shift, level shift | sequence, counted from the same first bucket on both sides |
+| `series_shape` profile | calendar slot of the `profile` |
+| `shift_time` | the time values themselves (calendar offsets on the local wall clock) |
+
 ### `temporal`
 
 Both sides are bucketed and reduced per `group_by` and bucket with the

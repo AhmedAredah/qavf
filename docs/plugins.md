@@ -231,8 +231,11 @@ Contracts:
   `one_sided_check` and `compare_measure` (`qavf.compare.levels.groups`) reduce,
   align and judge any keys, and `bucketed_sides(inputs, params)`
   (`qavf.compare.levels.temporal`) adds time-bucket labels to both sides. The
-  bucketing itself (`bucket_labels`, `bucket_ordinal`, `bucket_grid`, calendar
-  offsets) is `qavf.temporal`, shared with the TMP series rules.
+  bucketing itself (`bucket_labels`, `bucket_grid`, calendar offsets) is
+  `qavf.temporal`, shared with the TMP series rules. Pick the position you mean:
+  `sequence_positions` for spacing in time (rates, slopes, lags) and
+  `calendar_position` for cycles and seasons; they differ for sub-day buckets
+  across DST changes ([two positions](comparison.md#buckets)).
 
 A custom measure and a custom level:
 

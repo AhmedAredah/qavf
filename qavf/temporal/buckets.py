@@ -26,6 +26,17 @@ cases are reported as unplaceable rows (null labels), never guessed.
 Numeric time columns (a year, a period number) pass through unchanged when no
 bucket is set. Labels are exact (dates, integer-tick instants, small integers
 or season names): never float time.
+
+A label has two integer positions, which differ only for sub-day buckets
+across DST changes; each consumer must pick the one it means:
+
+* :func:`sequence_positions`: spacing in time. Consecutive buckets of the exact
+  grid are one apart (both fall-back hours count, the skipped hour does not).
+  For rates, slopes, lags and peak shifts.
+* :func:`calendar_position`: the wall-clock slot. An hourly bucket's position
+  mod 24 is its local hour; both fall-back hours share a slot (two
+  observations, never merged into one bucket) and the skipped hour has none.
+  For seasons, profiles and anything taken modulo a cycle.
 """
 
 from __future__ import annotations
@@ -342,7 +353,7 @@ def _occurrences(start: pl.Expr, zone: str) -> tuple[pl.Expr, pl.Expr, pl.Expr]:
     before = start - pl.duration(days=1)
     previous = before.dt.replace_time_zone(zone, ambiguous="earliest", non_existent="null")
     gap = (start - (before - utc_wall_clock(previous))).dt.replace_time_zone("UTC")
-    return earliest, latest, gap.dt.convert_time_zone(zone)
+    return earliest, latest, pl.when(earliest.is_null()).then(gap.dt.convert_time_zone(zone))
 
 
 def _start_instant(start: pl.Expr, offset: pl.Expr, zone: str) -> pl.Expr:
@@ -414,13 +425,19 @@ def unplaced(column: str, label: pl.Expr) -> pl.Expr:
 
 
 # ----------------------------------------------------------------- ordinals
-def bucket_ordinal(label: pl.Expr, dtype: pl.DataType, bucket: Bucket | None) -> pl.Expr:
-    """Exact integer position of a label: consecutive buckets differ by one.
+def calendar_position(label: pl.Expr, dtype: pl.DataType, bucket: Bucket | None) -> pl.Expr:
+    """Exact wall-clock position of a label: the slot it occupies on the local calendar.
 
-    Calendar buckets count from the epoch (sub-day buckets count elapsed bucket
-    widths, so the DST hour is not skipped or doubled); cyclic profiles count
+    This is the position for anything cyclic or seasonal (``position mod n``,
+    profiles): calendar buckets count from the epoch on the *local* clock, so an
+    hourly bucket's position mod 24 is its local hour. The two physical hours of a
+    DST fall-back share one position (two observations of the same slot, still two
+    buckets), and the hour a spring-forward skips has none. Cyclic profiles count
     from the start of the cycle (``week_start`` for weekdays). Without a bucket,
     integer periods are their own position and dates count days.
+
+    For spacing in time (rates, slopes, lags) use :func:`sequence_positions`,
+    which differs from this only for sub-day buckets across DST changes.
 
     Raises:
         ValueError: for labels without an exact position (float or instant periods).
@@ -439,7 +456,8 @@ def bucket_ordinal(label: pl.Expr, dtype: pl.DataType, bucket: Bucket | None) ->
         first = 0 if bucket.unit == "hour_of_day" else 1
         return label.cast(pl.Int64) - first
     if bucket.subday:
-        return label.dt.epoch("us") // bucket.width_us
+        local = wall_clock(label, dtype, None)
+        return local.dt.epoch("us") // bucket.width_us
     days = label.cast(pl.Int32).cast(pl.Int64)
     if bucket.unit == "day":
         return days // bucket.every
@@ -517,17 +535,58 @@ def bucket_grid(
     if bucket is None:
         if not (dtype.is_integer() or dtype == pl.Date):
             raise ValueError(f"periods of type {dtype} have no exact grid; set a bucket")
-        positions = bounds.select(bucket_ordinal(pl.col(c), dtype, None) for c in bounds.columns)
+        positions = bounds.select(calendar_position(pl.col(c), dtype, None) for c in bounds.columns)
         low, high = positions.row(0)
         _bounded(high - low + 1, limit)
         grid = pl.int_range(low, high + 1, dtype=pl.Int64, eager=True)
         return grid.cast(pl.Int32).cast(pl.Date) if dtype == pl.Date else grid.cast(dtype)
-    positions = bounds.select(bucket_ordinal(pl.col(c), dtype, bucket) for c in bounds.columns)
+    positions = bounds.select(calendar_position(pl.col(c), dtype, bucket) for c in bounds.columns)
     low, high = positions.row(0)
     _bounded(high - low + 1, limit)
     return pl.select(
         _from_ordinal(pl.int_range(low, high + 1, dtype=pl.Int64), bucket).alias("label")
     )["label"]
+
+
+def sequence_positions(
+    labels: pl.Series,
+    bucket: Bucket | None,
+    *,
+    first: pl.Series | None = None,
+    last: pl.Series | None = None,
+    limit: int = 10_000_000,
+) -> pl.Series:
+    """Exact sequence position of each label: consecutive buckets differ by exactly one.
+
+    The position for spacing in time: rates per bucket, trend slopes, lags and
+    peak shifts. It counts buckets of the exact grid (:func:`bucket_grid`), so the
+    two hours of a DST fall-back are consecutive and the hour a spring-forward
+    skips is not counted, whatever the zone's offsets and the bucket width. Only
+    differences are meaningful: positions count from ``first`` (the earliest
+    label by default; pass the same ``first`` to compare series). Day and longer
+    buckets, cyclic profiles and unbucketed periods equal their
+    :func:`calendar_position`.
+
+    Raises:
+        ValueError: for labels without an exact position, or a grid beyond ``limit``.
+    """
+    frame = labels.alias("label").to_frame()
+    if bucket is None or not bucket.subday:
+        return frame.select(calendar_position(pl.col("label"), labels.dtype, bucket))["label"]
+    present = labels.drop_nulls().sort()
+    if present.is_empty():
+        return pl.Series("label", [None] * len(labels), dtype=pl.Int64)
+    start = present.head(1) if first is None else first
+    end = present.tail(1) if last is None else last
+    grid = bucket_grid(start, end, bucket, limit=limit).alias("label").to_frame()
+    indexed = grid.with_row_index("position").with_columns(pl.col("position").cast(pl.Int64))
+    row = "row"
+    positions = (
+        frame.with_row_index(row).join(indexed, on="label", how="left").sort(row)["position"]
+    )
+    if positions.null_count() != labels.null_count():
+        raise ValueError("a label lies outside the bucket grid of the series")
+    return positions
 
 
 def _bounded(size: int, limit: int) -> None:

@@ -21,8 +21,9 @@ from qavf.temporal import (
     TimeBucketing,
     bucket_grid,
     bucket_labels,
-    bucket_ordinal,
     bucket_scalar,
+    calendar_position,
+    sequence_positions,
     shifted_time,
 )
 
@@ -183,7 +184,7 @@ def test_day_of_week_order_follows_the_week_start():
     bucket = Bucket(unit="day_of_week", week_start="sunday")
     frame = pl.DataFrame({"d": days})
     label, dtype = bucket_labels("d", pl.Date, TimeBucketing(bucket=bucket))
-    positions = frame.select(bucket_ordinal(label, dtype, bucket))["d"].to_list()
+    positions = frame.select(calendar_position(label, dtype, bucket))["d"].to_list()
     assert positions == list(range(7))
     grid = bucket_grid(pl.Series([1]), pl.Series([1]), bucket, limit=10)
     assert grid.to_list() == [7, 1, 2, 3, 4, 5, 6]
@@ -222,13 +223,49 @@ def test_fall_back_hours_stay_distinct_and_days_have_25_or_23_hours():
     }
 
 
-def test_sub_day_ordinals_count_elapsed_buckets_across_dst():
-    hourly = [FALL - timedelta(hours=3) + timedelta(hours=h) for h in range(30)]
-    frame = pl.DataFrame({"t": ny(hourly)})
-    bucket = Bucket(unit="hour")
+def _hour_labels(instants, unit="hour", zone="America/New_York"):
+    frame = pl.DataFrame({"t": pl.Series(instants).dt.convert_time_zone(zone)})
+    bucket = Bucket.model_validate(unit)
     label, dtype = bucket_labels("t", frame.schema["t"], TimeBucketing(bucket=bucket))
-    positions = frame.select(bucket_ordinal(label, dtype, bucket))["t"].to_list()
-    assert positions == list(range(positions[0], positions[0] + 30))
+    return frame.select(label)["t"], dtype, bucket
+
+
+@pytest.mark.parametrize("anchor", [FALL, SPRING])
+def test_sequence_and_calendar_positions_across_dst(anchor):
+    """Sequence: consecutive buckets one apart. Calendar: the local hour's slot."""
+    hourly = [anchor - timedelta(hours=3) + timedelta(hours=h, minutes=10) for h in range(30)]
+    labels, dtype, bucket = _hour_labels(hourly)
+    sequence = sequence_positions(labels, bucket).to_list()
+    assert sequence == list(range(30))
+    slots = labels.to_frame().select(calendar_position(pl.col("t"), dtype, bucket))["t"]
+    # Oracle: Python's local hour of each instant.
+    assert (slots % 24).to_list() == [t.astimezone(NY).hour for t in hourly]
+
+
+def test_fall_back_hours_share_a_calendar_slot_and_the_skipped_hour_has_none():
+    fall = [FALL + timedelta(hours=h) for h in range(25)]
+    labels, dtype, bucket = _hour_labels(fall)
+    slots = labels.to_frame().select(calendar_position(pl.col("t"), dtype, bucket) % 24)["t"]
+    assert sorted(slots.to_list()) == sorted([*range(24), 1])  # 01:00 twice, kept apart
+    assert labels.n_unique() == 25
+    spring = [SPRING + timedelta(hours=h) for h in range(23)]
+    labels, dtype, bucket = _hour_labels(spring)
+    slots = labels.to_frame().select(calendar_position(pl.col("t"), dtype, bucket) % 24)["t"]
+    assert sorted(slots.to_list()) == [h for h in range(24) if h != 2]
+
+
+@pytest.mark.parametrize("anchor", [datetime(2026, 3, 8, 4), datetime(2026, 11, 1, 3)])
+def test_sequence_positions_have_no_gaps_in_half_hour_offset_zones(anchor):
+    """Newfoundland (UTC-3:30, DST -2:30) with 2-hour buckets: the bucket containing the
+    change is 1 or 3 hours long, yet the next bucket is the next position."""
+    instants = [anchor.replace(tzinfo=UTC) + timedelta(minutes=30 * k) for k in range(40)]
+    labels, _, bucket = _hour_labels(instants, "2 hours", "America/St_Johns")
+    distinct = labels.unique(maintain_order=True)
+    positions = sequence_positions(distinct, bucket).to_list()
+    assert positions == list(range(len(distinct)))
+    # Oracle: every label is a 2-hour local wall-clock start (or the end of the gap).
+    local = [t.astimezone(ZoneInfo("America/St_Johns")) for t in distinct.to_list()]
+    assert all(t.minute == 0 and (t.hour % 2 == 0 or t.hour == 3) for t in local)
 
 
 def test_naive_times_are_wall_clock_in_the_configured_zone():

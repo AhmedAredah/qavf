@@ -59,7 +59,13 @@ from qavf.statistics.series import (
     pearson,
     spearman,
 )
-from qavf.temporal.buckets import Bucket, TimeBucketing, bucket_labels, bucket_ordinal
+from qavf.temporal.buckets import (
+    Bucket,
+    TimeBucketing,
+    bucket_labels,
+    calendar_position,
+    sequence_positions,
+)
 
 
 class CorrelationCheck(RuleParams):
@@ -243,20 +249,30 @@ class SeriesShapeLevel(ComparisonLevel):
         taken = [*aligned.frames["baseline"].columns]
         position = fresh_internal("position", taken)
         profile = fresh_internal("profile", [*taken, position]) if params.profile else None
-        expressions = [bucket_ordinal(pl.col(sides.column), sides.dtype, params.bucket)]
-        if params.profile is not None and profile is not None:
-            axis = TimeBucketing(bucket=params.profile.profile, time_zone=params.time_zone)
-            label, dtype = bucket_labels(sides.column, sides.dtype, axis)
-            expressions.append(bucket_ordinal(label, dtype, params.profile.profile))
-        names = [position, *([profile] if profile else [])]
-        series = {
-            side: _series(
-                aligned.frames[side].with_columns(
-                    e.alias(n) for e, n in zip(expressions, names, strict=True)
-                ),
-                group_by,
-                (sides.column, value, position, profile),
+        # Series are keyed by sequence position (one apart per bucket, across DST
+        # changes), counted from the same first bucket on both sides; a cyclic
+        # profile slot is a calendar position (a fall-back hour is its local hour).
+        labels = pl.concat([aligned.frames[side][sides.column] for side in SIDES])
+        span = labels.drop_nulls().sort()
+        frames = {}
+        for side in SIDES:
+            frame = aligned.frames[side]
+            sequence = sequence_positions(
+                frame[sides.column],
+                params.bucket,
+                first=span.head(1),
+                last=span.tail(1),
+                limit=params.max_buckets,
             )
+            frame = frame.with_columns(sequence.alias(position))
+            if params.profile is not None and profile is not None:
+                axis = TimeBucketing(bucket=params.profile.profile, time_zone=params.time_zone)
+                label, dtype = bucket_labels(sides.column, sides.dtype, axis)
+                slot = calendar_position(label, dtype, params.profile.profile)
+                frame = frame.with_columns(slot.alias(profile))
+            frames[side] = frame
+        series = {
+            side: _series(frames[side], group_by, (sides.column, value, position, profile))
             for side in SIDES
         }
         period = params.bucket.cycle_length if params.bucket is not None else None
@@ -291,9 +307,9 @@ class SeriesShapeLevel(ComparisonLevel):
             group = dict(zip(group_by, key, strict=True))
             on = {side: key in present[side] for side in SIDES}
             if on["baseline"] != on["candidate"]:
-                side: Side = "baseline" if on["baseline"] else "candidate"
-                only[side] += 1
-                one_sided.append({**group, "series": f"only in {side}"})
+                lone: Side = "baseline" if on["baseline"] else "candidate"
+                only[lone] += 1
+                one_sided.append({**group, "series": f"only in {lone}"})
                 continue
             # A series whose measure has no value in some buckets (all inputs missing)
             # just has fewer buckets; with too few it is not assessed.

@@ -34,9 +34,12 @@ All notable changes to this project are documented here. The format follows
 - Bucket the TMP series rules: `bucket`, `time_zone` and `time_format` let TMP-001 to
   TMP-008 use Date, Datetime and text time columns; numeric time columns behave as
   before. TMP-004 expects every bucket of the calendar grid of a bucketed series.
-- Add `qavf.temporal` (time buckets, bucket grids and ordinals, calendar offsets as
-  native expressions) and `qavf.statistics.series` (exact least squares, Pearson and
-  Spearman correlation, cross-correlation lags and the level-shift screen).
+  Rates and trends use a bucket's exact sequence position and TMP-007 seasons its
+  local calendar slot, so hourly seasons stay on the local hour across DST changes.
+- Add `qavf.temporal` (time buckets, bucket grids, explicit sequence and calendar
+  positions and calendar offsets as native expressions) and `qavf.statistics.series`
+  (exact least squares, Pearson and Spearman correlation, cross-correlation lags and
+  the level-shift screen).
 - Comparison steps can record data-dependent outcomes with `AlignmentContext.note`.
 - Add general exact helpers: checked casts and exact scaling (`qavf.typed_values`),
   exact quantile interpolation (`qavf.statistics.ordered`), grouped exact means and

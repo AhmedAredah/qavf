@@ -4,10 +4,20 @@ Each rule works on *series*: a value column summed per time period within
 optional group columns, e.g. NOx by county. The period is a numeric column
 (such as a year) or, with ``bucket``, a calendar bucket of a Date, Datetime or
 text column (``day``, ``15 minutes``, ``month`` in ``time_zone``; see
-:mod:`qavf.temporal.buckets`). Bucketed periods are positioned by their exact
-bucket ordinal, so rates are per bucket and seasons are ordinals modulo the
-season length. No series are examined until they are configured, so these
-rules skip by default.
+:mod:`qavf.temporal.buckets`). Bucketed periods have two exact positions:
+
+* the **sequence** position, for spacing in time: TMP-001 rates (per bucket)
+  and the TMP-002/003 trends. Consecutive buckets are one apart, so a DST
+  fall-back hour is the bucket after the first 01:00 and nothing is skipped
+  or doubled;
+* the **calendar** position, for cycles: TMP-007 seasons are calendar
+  position mod ``season_length``, so with hourly buckets and 24 a season is
+  the local hour, before and after every DST change (both fall-back 01:00
+  hours are observations of season 1; the skipped spring hour has none).
+
+TMP-004 expects the exact calendar grid of buckets; TMP-005, 006 and 008 use
+only the order of the buckets. No series are examined until they are
+configured, so these rules skip by default.
 
 ``TMP-002`` and ``TMP-003`` need the ``stats`` extra (``pip install qavf[stats]``);
 without it they report SKIPPED with an explanation.
@@ -69,8 +79,9 @@ from qavf.temporal.buckets import (
     TimeBucketing,
     bucket_grid,
     bucket_labels,
-    bucket_ordinal,
     bucket_scalar,
+    calendar_position,
+    sequence_positions,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,7 +112,8 @@ class SeriesSpec(TimeBucketing, AggregatedMetric):
 
     time_column: str = "year"
     """Numeric time column (e.g. a year), or a Date, Datetime or text column with
-    ``bucket``. Rates of change are per unit of it (per bucket when bucketed)."""
+    ``bucket``. Rates of change are per unit of it (per bucket of the exact bucket
+    sequence when bucketed); seasons use the local calendar slot."""
     expected_trend: Literal["increasing", "decreasing"] | None = None
     """Direction the series should move in; used by the trend-direction rule."""
     max_change_rate: float | None = Field(default=None, gt=0)
@@ -389,12 +401,22 @@ def _bucketed_times(
     return remaining if remaining.count() else None
 
 
-def _position(spec: SeriesSpec, series: pl.DataFrame) -> pl.Expr:
-    """Numeric position of each period: the period itself, or its exact bucket ordinal."""
+def _sequence(spec: SeriesSpec, series: pl.DataFrame) -> pl.Series:
+    """Spacing of each period in time: the period itself, or its exact bucket sequence
+    position (consecutive buckets one apart, across DST changes too). For rates,
+    trends and anything measured over elapsed periods."""
+    if spec.bucket is None:
+        return series[spec.time_column]
+    return sequence_positions(series[spec.time_column], spec.bucket)
+
+
+def _calendar(spec: SeriesSpec, series: pl.DataFrame) -> pl.Expr:
+    """Calendar slot of each period: the period itself, or its wall-clock bucket position
+    (an hourly bucket's local hour mod 24). For seasons and other cycles."""
     time = pl.col(spec.time_column)
     if spec.bucket is None:
         return time
-    return bucket_ordinal(time, series.schema[spec.time_column], spec.bucket)
+    return calendar_position(time, series.schema[spec.time_column], spec.bucket)
 
 
 def _groups(
@@ -533,15 +555,15 @@ class StepChangeRule(_TemporalRule):
                     shifted = expression.shift(1)
                     return shifted.over(over) if over else shifted
 
-                # Bucketed periods are labels; rates use their exact bucket positions.
-                positions = (
-                    [
-                        _position(spec, series).alias(_name(spec, "position")),
-                        lagged(_position(spec, series)).alias(_name(spec, "previous_position")),
-                    ]
-                    if spec.bucket is not None
-                    else []
-                )
+                # Bucketed periods are labels; rates are per bucket of their exact
+                # sequence (a DST hour is one bucket after the previous one).
+                positions = []
+                if spec.bucket is not None:
+                    position = _name(spec, "position")
+                    series = series.with_columns(_sequence(spec, series).alias(position))
+                    positions.append(
+                        lagged(pl.col(position)).alias(_name(spec, "previous_position"))
+                    )
                 stepped = series.with_columns(
                     lagged(value).alias(_name(spec, "previous_value")),
                     lagged(time).alias(_name(spec, "previous_period")),
@@ -721,7 +743,7 @@ class TrendDirectionRule(_TemporalRule):
                             too_short += 1
                             continue
                         result = sps.kendalltau(
-                            frame.select(_position(spec, frame)).to_series().to_numpy(),
+                            _sequence(spec, frame).to_numpy(),
                             frame[_name(spec, "value")].to_numpy(),
                         )
                         examined += 1
@@ -811,7 +833,7 @@ class TrendOutlierRule(_TemporalRule):
                             too_short += 1
                             continue
                         try:
-                            positions = frame.select(_position(spec, frame)).to_series()
+                            positions = _sequence(spec, frame)
                             times = checked_float_series(positions).to_numpy()
                             values = checked_float_series(frame[_name(spec, "value")]).to_numpy()
                         except ValueError as exc:
@@ -1578,8 +1600,9 @@ class SeasonalParams(SeriesParams):
     season_length: int = Field(default=12, ge=2)
     """Periods per cycle: 12 for monthly data indexed 1..12 or as a running month
     number, 4 for quarters, 7 for days of the week. The season of a period is
-    ``period mod season_length`` (the bucket ordinal for a bucketed series, so
-    monthly buckets with 12 give calendar months)."""
+    ``period mod season_length``; for a bucketed series the period is its local
+    calendar position, so monthly buckets with 12 give calendar months and hourly
+    buckets with 24 the local hour, unchanged by DST."""
     threshold: float = Field(default=3.5, gt=0)
     """Modified z-score (median/MAD) above which a value is anomalous for its season."""
     min_cycles: int = Field(default=4, ge=3)
@@ -1620,7 +1643,7 @@ class SeasonalAnomalyRule(_TemporalRule):
                 used.append(spec)
                 season = fresh_internal("season", series.columns)
                 seasonal = series.with_columns(
-                    (_position(spec, series) % p.season_length).alias(season)
+                    (_calendar(spec, series) % p.season_length).alias(season)
                 )
                 for key, frame in _groups(seasonal, spec):
                     with isolate_contract(spec.label, (spec.dataset,), blocked, affected=[key]):
