@@ -24,3 +24,4 @@ release-evidence/
 
 # Local agent worktrees and tool state
 .claude/
+.playwright-mcp/

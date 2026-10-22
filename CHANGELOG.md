@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] - Unreleased
 
 - Add the `distribution` comparison level: per column and member (group, zone or
   time bucket), the population stability index over the baseline's quantile bins,
