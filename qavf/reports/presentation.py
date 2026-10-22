@@ -14,9 +14,15 @@ class HtmlLimits:
     max_cells: int = 10_000
     max_columns: int = 64
     max_output_bytes: int = 16_777_216
+    max_chart_points: int = 2_000
+    """Most marks (bars, cells, points, zones) one chart draws; a larger one is omitted."""
+    max_chart_bytes: int = 2_097_152
+    """Bytes all charts of one document may take; later charts are omitted beyond it."""
 
     def __post_init__(self) -> None:
-        for name in ("max_cells", "max_columns", "max_output_bytes"):
+        for name in (
+            "max_cells", "max_columns", "max_output_bytes", "max_chart_points", "max_chart_bytes",
+        ):  # fmt: skip
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"HtmlLimits.{name} must be a positive integer")

@@ -16,7 +16,7 @@ from markupsafe import Markup
 
 from qavf.audit_codec import iter_audit_json
 from qavf.engine.severity import Severity, Status
-from qavf.reports.charts import BarRow, Segment, horizontal_bars
+from qavf.reports.charts import BarRow, Segment, horizontal_bars, reset_ids
 from qavf.reports.models import (
     QAReport,
     Recommendation,
@@ -159,9 +159,49 @@ def _environment(limits: HtmlLimits) -> Environment:
     env.filters["cell"] = lambda value: bounded_cell(value, _format_value)
     env.filters["affected"] = _affected
     env.filters["duration"] = _duration
+    env.filters["number"] = _number
     env.globals["evidence_table"] = lambda records: evidence_table(records, limits)
     env.globals["audit_chunks"] = _audit_chunks
+    env.globals["shown_metrics"] = _shown_metrics
     return env
+
+
+def _number(value: Any) -> str:
+    """A p-value, effect or interval bound in a significance table."""
+    if value is None:
+        return "—"
+    if isinstance(value, float) and math.isfinite(value) and value and abs(value) < 1e-3:
+        return f"{value:.2e}"
+    return _format_value(value)
+
+
+def _shown_metrics(result: RuleResult) -> dict[str, Any]:
+    """A result's metrics without the typed comparison (shown in its own section)."""
+    from qavf.reports.comparison import COMPARISON_METRIC
+
+    return {k: v for k, v in result.metrics.items() if k != COMPARISON_METRIC}
+
+
+def iter_template(
+    name: str, context: dict[str, Any], limits: HtmlLimits, env: Environment | None = None
+) -> Iterator[bytes]:
+    """Render template ``name`` in bounded UTF-8 chunks within ``limits.max_output_bytes``.
+
+    Raises:
+        ResourceLimitError: once the page exceeds the output limit.
+    """
+    from qavf.engine.resources import ResourceLimitError
+
+    written = 0
+    for text in (env or _environment(limits)).get_template(name).generate(**context):
+        for start in range(0, len(text), 16_384):
+            chunk = text[start : start + 16_384].encode("utf-8")
+            written += len(chunk)
+            if written > limits.max_output_bytes:
+                raise ResourceLimitError(
+                    f"HTML report exceeds its {limits.max_output_bytes:,}-byte output limit"
+                )
+            yield chunk
 
 
 def _audit_chunks(value: Any) -> Iterator[str]:
@@ -226,24 +266,16 @@ def iter_html(
     limits: HtmlLimits | None = None,
 ) -> Iterator[bytes]:
     """Yield bounded HTML fragments; no evidence-table macro buffers the table."""
-    from qavf.engine.resources import ResourceLimitError
+    from qavf.reports.comparison import report_views
 
     limits = limits or HtmlLimits()
     env = _environment(limits)
     anchors = _anchors(report.results)
     env.filters["anchor"] = lambda result: anchors[id(result)]
-    written = 0
-    for text in env.get_template("report.html.j2").generate(
-        **_presentation(report, title, fail_on)
-    ):
-        for start in range(0, len(text), 16_384):
-            chunk = text[start : start + 16_384].encode("utf-8")
-            written += len(chunk)
-            if written > limits.max_output_bytes:
-                raise ResourceLimitError(
-                    f"HTML report exceeds its {limits.max_output_bytes:,}-byte output limit"
-                )
-            yield chunk
+    reset_ids()
+    context = _presentation(report, title, fail_on)
+    context["comparisons"] = report_views(report, limits)
+    yield from iter_template("report.html.j2", context, limits, env)
 
 
 def render_html(

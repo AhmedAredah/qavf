@@ -1,0 +1,96 @@
+{#- The dataset comparison section: a summary card and a drill-down per level. -#}
+{% macro verdict_chip(verdict) -%}
+  {%- set icons = {"passed": "✓", "failed": "✕", "not assessed": "!", "incomplete": "!"} -%}
+  <span class="chip"><span class="dot v-{{ verdict | replace(' ', '-') }}"></span>{{ icons.get(verdict, "–") }} {{ verdict }}</span>
+{%- endmacro %}
+
+{% macro check_detail(check) %}
+  <tr>
+    <td class="mono">{{ check.label }}</td>
+    <td>{{ verdict_chip(check.verdict) }}</td>
+    <td>{{ check.message }}{% if check.family %}<br><span class="muted">{{ check.family }}</span>{% endif %}</td>
+    <td class="num">{{ check.affected }}</td>
+  </tr>
+  {% if check.records or check.tests %}
+  <tr class="evidence"><td colspan="4">
+    <details>
+      <summary>Evidence and significance of {{ check.label }}{% if check.truncated %} (evidence bounded){% endif %}</summary>
+      {% if check.records %}{% with records = check.records %}{% include "records.html.j2" %}{% endwith %}{% endif %}
+      {% if check.tests %}
+      <div class="scroll"><table class="tests">
+        <thead><tr><th>Member</th><th>Test</th><th class="num">p</th><th class="num">Adjusted p</th><th>Effect</th><th class="num">Interval</th><th>Significant</th></tr></thead>
+        <tbody>
+        {% for test in check.tests %}
+          <tr>
+            <td>{{ test.label }}</td>
+            <td class="mono">{{ test.method }}</td>
+            <td class="num">{{ test.p_value | number }}</td>
+            <td class="num">{{ test.adjusted_p | number }}</td>
+            <td>{% if test.effect is not none %}{{ test.effect | number }} <span class="muted">{{ test.effect_name or "" }}</span>{% else %}{{ test.reason or "—" }}{% endif %}</td>
+            <td class="num">{% if test.ci_low is not none %}{{ test.ci_low | number }} to {{ test.ci_high | number }}{% else %}—{% endif %}</td>
+            <td>{{ {True: "yes", False: "no"}.get(test.significant, "—") }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      {% endif %}
+    </details>
+  </td></tr>
+  {% endif %}
+{% endmacro %}
+
+{% macro comparison_section(comparisons) %}
+<section class="comparisons" aria-label="Dataset comparisons">
+{% for view in comparisons %}
+  <article class="card comparison" id="{{ view.anchor }}">
+    <header>
+      {{ verdict_chip(view.verdict) }}
+      <h3>{{ view.name }}</h3>
+      <span class="sub"><span class="mono">{{ view.baseline }}</span> (baseline) vs <span class="mono">{{ view.candidate }}</span> (candidate) · {{ view.rows }}</span>
+    </header>
+    <p class="sub">{{ view.counts["passed"] }} check{{ "" if view.counts["passed"] == 1 else "s" }} passed, {{ view.counts["failed"] }} failed, {{ view.counts["not assessed"] }} not assessed.</p>
+    {% if view.error %}<p><strong>Not assessed:</strong> {{ view.error }}</p>{% endif %}
+    <div class="levels" role="list" aria-label="Verdict per level">
+    {% for level in view.levels %}
+      <div class="level-tile" role="listitem">
+        <div class="name"><a href="#{{ view.anchor }}-{{ loop.index }}">{{ level.name }}</a></div>
+        {{ verdict_chip(level.verdict) }}
+        <div class="muted">{{ level.counts["passed"] }} passed · {{ level.counts["failed"] }} failed · {{ level.counts["not assessed"] }} not assessed</div>
+      </div>
+    {% endfor %}
+    </div>
+    {% if view.alignment %}
+    <details><summary>Alignment ({{ view.alignment | length }} step{{ "" if view.alignment | length == 1 else "s" }} and notes)</summary>
+      <ol class="notes">{% for step in view.alignment %}<li>{{ step }}</li>{% endfor %}</ol>
+    </details>
+    {% endif %}
+    {% for note in view.notes %}<p class="note">{{ note }}</p>{% endfor %}
+    {% for level in view.levels %}
+    <details class="level-detail" id="{{ view.anchor }}-{{ loop.index }}" {{ "open" if level.verdict != "passed" else "" }}>
+      <summary>{{ level.name }} <span class="muted mono">{{ level.level }}</span> · {{ level.verdict }}</summary>
+      {% if level.facts %}<p class="sub">{{ level.facts | join(" · ") }}</p>{% endif %}
+      {% if level.charts %}
+      <div class="figure-grid">
+      {% for chart in level.charts %}
+        <figure class="card">
+          <figcaption><h3>{{ chart.title }}</h3></figcaption>
+          {% if chart.svg %}{{ chart.svg }}{% endif %}
+          {% if chart.note %}<p class="note">{{ chart.note }}</p>{% endif %}
+        </figure>
+      {% endfor %}
+      </div>
+      {% endif %}
+      <div class="scroll">
+        <table class="checks">
+          <thead><tr><th>Check</th><th>Verdict</th><th>Message</th><th class="num">Affected</th></tr></thead>
+          <tbody>
+          {% for check in level.checks %}{{ check_detail(check) }}{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+    {% endfor %}
+  </article>
+{% endfor %}
+</section>
+{% endmacro %}

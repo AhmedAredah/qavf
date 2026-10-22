@@ -20,7 +20,8 @@ pass for a check it could not assess.
   usable from pytest.
 - **Dataset comparison.** Compare two versions of a dataset whose columns, types,
   units or codes differ: structure, key coverage, record-level changes, grouped
-  measures and time series, a difference failing when it is both material (beyond a
+  measures and time series, distributions, relationships between columns and what
+  explains the total change, a difference failing when it is both material (beyond a
   tolerance) and statistically significant.
 - **Spatial data.** Coordinates inside a study area, points assigned to zone
   polygons or grid cells, per-zone comparisons with expected zones, rank and share
@@ -233,6 +234,16 @@ spots after a multiple-testing correction). The `locations` level reports keyed
 features that moved (haversine metres) or changed area or shape. See
 [spatial data](https://github.com/AhmedAredah/qavf/blob/main/docs/spatial.md).
 
+The `distribution` level compares each column's distribution per group, zone or time
+bucket (PSI, KS, Anderson-Darling, Wasserstein, Jensen-Shannon, quantile deltas, and
+categories that appeared or disappeared), `relationships` compares correlations, ratio
+invariants such as `fatal / crashes` and the agreement of matched records (Bland-Altman,
+concordance, error metrics, the candidate-on-baseline line), and `contribution` says
+which members explain the total change, with an exact mix-versus-rate decomposition.
+HTML reports show each comparison with a verdict per level, a drill-down with tests
+and charts; `result.write_html(path)` and `qavf compare-datasets` write the same report
+for one comparison.
+
 ## CLI
 
 | Command | Purpose |
@@ -243,6 +254,7 @@ features that moved (haversine metres) or changed area or shape. See
 | `qavf schema` | Write the configuration JSON Schema for editor support |
 | `qavf list-rules` | List discovered rules |
 | `qavf compare BASELINE CANDIDATE -k KEY` | Compare an output with a baseline (`--map OLD=NEW`) |
+| `qavf compare-datasets BASELINE CANDIDATE -c SPEC` | Compare two datasets at several levels; write `--html`/`--json` reports |
 | `qavf baseline SOURCE DEST -k KEY` | Accept an output as a baseline |
 | `qavf demo DIR` | Write a runnable demo project |
 

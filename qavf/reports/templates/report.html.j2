@@ -5,86 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} · {{ metadata.project }}</title>
 <style>
-  :root {
-    color-scheme: light;
-    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
-    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,.10);
-    --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b;
-    --series: #2a78d6; --neutral: #c3c2b7; --wash: rgba(11,11,11,.035);
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      color-scheme: dark;
-      --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
-      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,.10);
-      --series: #3987e5; --neutral: #52514e; --wash: rgba(255,255,255,.04);
-    }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--page); color: var(--ink);
-         font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  main { max-width: 1120px; margin: 0 auto; padding: 32px 16px 64px; }
-  h1 { font-size: 26px; line-height: 1.2; margin: 0 0 4px; }
-  h2 { font-size: 18px; margin: 40px 0 12px; }
-  h3 { font-size: 15px; margin: 0; }
-  p { margin: 0 0 8px; }
-  code, .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12.5px; }
-  .sub { color: var(--ink-2); }
-  .muted { color: var(--muted); }
-  .empty { color: var(--muted); margin: 8px 0; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
-
-  .verdict { display: flex; gap: 12px; align-items: center; margin: 20px 0;
-             border-left: 4px solid var(--good); }
-  .verdict.failed { border-left-color: var(--critical); }
-  .verdict.incomplete { border-left-color: var(--warning); }
-  .verdict .icon { font-size: 22px; line-height: 1; }
-  .verdict strong { font-size: 16px; }
-
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-  .tile .figure { font-size: 28px; font-weight: 650; line-height: 1.15; }
-  .tile .caption { color: var(--ink-2); font-size: 12.5px; }
-
-  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; margin-top: 12px; }
-  .chart { width: 100%; height: auto; display: block; margin-top: 8px; }
-  .chart .label { fill: var(--ink-2); font-size: 12px; }
-  .chart .value { fill: var(--ink); font-size: 12px; font-variant-numeric: tabular-nums; }
-  .chart .axis { stroke: var(--axis); stroke-width: 1; }
-  .chart .bar { stroke: var(--surface); stroke-width: 0; }
-  .s-pass, .dot.s-pass { fill: var(--good); background: var(--good); }
-  .s-fail, .sev-critical { fill: var(--critical); background: var(--critical); }
-  .s-error, .sev-error { fill: var(--serious); background: var(--serious); }
-  .s-skipped { fill: var(--neutral); background: var(--neutral); }
-  .sev-warning { fill: var(--warning); background: var(--warning); }
-  .sev-info, .time { fill: var(--series); background: var(--series); }
-  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 8px; font-size: 12px; color: var(--ink-2); }
-  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
-
-  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border-radius: 999px;
-          border: 1px solid var(--border); font-size: 12px; font-weight: 600; white-space: nowrap; }
-  .chip .dot { margin: 0; border-radius: 50%; }
-
-  .finding { margin-bottom: 12px; }
-  .finding header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
-  .finding .advice { background: var(--wash); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
-  .meta { display: flex; flex-wrap: wrap; gap: 4px 18px; color: var(--ink-2); font-size: 12.5px; margin: 6px 0; }
-  details { margin-top: 8px; }
-  summary { cursor: pointer; color: var(--ink-2); font-size: 13px; }
-
-  .scroll { overflow-x: auto; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
-  th { color: var(--ink-2); font-weight: 600; font-size: 12px; white-space: nowrap; }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-  tbody tr:hover { background: var(--wash); }
-
-  .filters { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-  .filters button { font: inherit; font-size: 12.5px; color: var(--ink); background: var(--surface);
-                    border: 1px solid var(--border); border-radius: 999px; padding: 3px 12px; cursor: pointer; }
-  .filters button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
-  ol.recs { margin: 0; padding-left: 20px; }
-  ol.recs li { margin-bottom: 10px; }
-  footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+{% include "_styles.css.j2" %}
 </style>
 </head>
 <body>
@@ -197,6 +118,12 @@
   <p class="empty">No rule failed.</p>
   {% endfor %}
 
+  {% if comparisons %}
+  {% from "comparison.html.j2" import comparison_section with context %}
+  <h2 id="comparisons">Dataset comparisons ({{ comparisons | length }})</h2>
+  {{ comparison_section(comparisons) }}
+  {% endif %}
+
   <h2>All results</h2>
   <div class="filters" role="group" aria-label="Filter results by status">
     <button type="button" data-filter="ALL" aria-pressed="true">All ({{ summary.total }})</button>
@@ -261,7 +188,7 @@
   </details>
   <details class="card"><summary>Metrics for all assessed checks</summary>
     {% for result in report.results %}{% if result.metrics %}
-      <h3 id="metrics-{{ result | anchor }}">{{ result.label }}</h3><pre>{% for chunk in audit_chunks(result.metrics) %}{{ chunk }}{% endfor %}</pre>
+      <h3 id="metrics-{{ result | anchor }}">{{ result.label }}</h3><pre>{% for chunk in audit_chunks(shown_metrics(result)) %}{{ chunk }}{% endfor %}</pre>
     {% endif %}{% endfor %}
   </details>
   <footer>

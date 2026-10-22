@@ -26,8 +26,37 @@ class ComparisonParams(RuleParams):
     """Pairs of configured datasets and how to compare them."""
 
 
-def comparison_findings(result: DatasetComparison, spec: ComparisonSpec) -> list[Finding]:
-    """One finding per check of every level, labelled ``comparison: level: check``."""
+def comparison_findings(
+    result: DatasetComparison, spec: ComparisonSpec, byte_limit: int | None = None
+) -> list[Finding]:
+    """One finding per check of every level, labelled ``comparison: level: check``.
+
+    With ``byte_limit`` (the run's per-result evidence bytes), the first finding also
+    keeps the typed comparison in ``metrics["comparison"]`` for the report's
+    comparison section, within what that result may hold (detail left out is
+    disclosed in its ``omitted``); a comparison that cannot fit is left out.
+    """
+    findings = _findings(result, spec)
+    if byte_limit is None or not findings:
+        return findings
+    from qavf.audit_codec import evidence_json_size
+    from qavf.reports.comparison import COMPARISON_METRIC
+
+    first = findings[0]
+    records = first.affected if isinstance(first.affected, list) else []
+    used = evidence_json_size(first.metrics) + (evidence_json_size(records) if records else 0)
+    allowance = byte_limit - used - 4_096
+    if allowance <= 0:
+        return findings
+    bounded = result.bounded(allowance)
+    payload = bounded.model_dump()
+    if evidence_json_size(payload) > allowance:
+        return findings
+    first.metrics[COMPARISON_METRIC] = payload
+    return findings
+
+
+def _findings(result: DatasetComparison, spec: ComparisonSpec) -> list[Finding]:
     severities = {config.label: config.severity for config in spec.selected_levels()}
     datasets = tuple(dict.fromkeys((spec.baseline, spec.candidate)))
     findings = []
@@ -76,7 +105,8 @@ class DatasetComparisonRule(Rule):
         "Each configured pair of datasets (for example two versions of an output) agrees "
         "after alignment (column mapping, lossless casts, unit conversion, recoding, "
         "derived columns, filters) at each configured level: structure, key coverage, "
-        "keyed records and grouped measures."
+        "keyed records, grouped measures, time, space, distributions, relationships and "
+        "contributions to the change."
     )
     category: ClassVar[str] = CATEGORY
     default_severity: ClassVar[Severity] = Severity.ERROR
@@ -122,5 +152,8 @@ class DatasetComparisonRule(Rule):
         findings: list[Finding] = []
         with entry_point_scope(self._installed_plugins):
             for spec in self.params.comparisons:
-                findings.extend(comparison_findings(compare_in_context(ctx, spec), spec))
+                found = comparison_findings(
+                    compare_in_context(ctx, spec), spec, ctx.evidence_bytes
+                )
+                findings.extend(found)
         return findings

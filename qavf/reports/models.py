@@ -431,6 +431,22 @@ class QAReport(SnapshotModel):
             for rule_id, result in advice.items()
         ]
 
+    def comparisons(self) -> list[Any]:
+        """The typed :class:`~qavf.compare.results.DatasetComparison` of each CMP-001
+        comparison the report kept (``metrics["comparison"]`` of its first result).
+
+        A comparison too large for the evidence limits keeps only its findings and is
+        not listed; one trimmed to fit lists what it left out in ``omitted``.
+        """
+        from qavf.compare.results import DatasetComparison
+        from qavf.reports.comparison import COMPARISON_METRIC
+
+        return [
+            DatasetComparison.model_validate(result.metrics[COMPARISON_METRIC])
+            for result in self.results
+            if result.rule_id == "CMP-001" and COMPARISON_METRIC in result.metrics
+        ]
+
     def results_for(self, rule_id: str) -> list[RuleResult]:
         """Every result (one per check) produced by ``rule_id``."""
         return [result for result in self.results if result.rule_id == rule_id]

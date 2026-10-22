@@ -1,7 +1,8 @@
 """Command-line interface.
 
-Exit codes: ``0`` success, ``1`` QA failed (or outputs differ from baseline),
-``2`` usage, configuration or resource-budget error.
+Exit codes: ``0`` success, ``1`` QA failed (or outputs differ from baseline, or a
+dataset comparison failed or was not fully assessed), ``2`` usage, configuration
+or resource-budget error.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import ValidationError
@@ -126,6 +128,21 @@ def _parser() -> argparse.ArgumentParser:
         default=[],
         metavar="OLD=NEW",
         help="a baseline column renamed in the candidate (repeatable); keys use NEW",
+    )
+
+    datasets = commands.add_parser(
+        "compare-datasets", help="compare two datasets at several levels and write reports"
+    )
+    datasets.add_argument("baseline", help="baseline data file (e.g. the previous version)")
+    datasets.add_argument("candidate", help="candidate data file compared with it")
+    datasets.add_argument(
+        "-c", "--config", type=Path, help="YAML or JSON comparison spec (keys, columns, levels)"
+    )
+    datasets.add_argument("--html", type=Path, help="HTML report path")
+    datasets.add_argument("--json", type=Path, help="JSON report path (the typed comparison)")
+    datasets.add_argument("--title", help="HTML page title")
+    datasets.add_argument(
+        "--no-plugins", action="store_true", help="do not load installed comparison plugins"
     )
 
     demo = commands.add_parser("demo", help="write a runnable demo project")
@@ -370,6 +387,51 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return EXIT_OK if result.equal else EXIT_QA_FAILED
 
 
+def _comparison_spec(path: Path | None) -> dict[str, Any]:
+    """The comparison options of a YAML or JSON spec file (empty without one)."""
+    if path is None:
+        return {}
+    text = path.read_text(encoding="utf-8")
+    loaded = json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{path} must hold a mapping of comparison options")
+    if clash := sorted({"baseline", "candidate"} & set(loaded)):
+        raise ValueError(
+            f"{path} sets {', '.join(clash)}; the datasets are the command's arguments"
+        )
+    return loaded
+
+
+def _cmd_compare_datasets(args: argparse.Namespace) -> int:
+    from qavf.compare.api import compare_datasets
+
+    options = _comparison_spec(args.config)
+    for argument in (args.baseline, args.candidate):
+        local = "://" not in argument and not any(c in argument for c in "*?[")
+        if local and not Path(argument).exists():
+            raise FileNotFoundError(f"no such data file: {argument}")
+    result = compare_datasets(
+        args.baseline, args.candidate, entry_points=not args.no_plugins, **options
+    )
+    written = []
+    if args.html:
+        written.append(result.write_html(args.html, args.title))
+    if args.json:
+        written.append(result.write_json(args.json))
+    print(result.summary())
+    for level in result.levels:
+        for check in level.checks:
+            if not check.passed:
+                state = "NOT ASSESSED" if not check.assessed else "FAILED"
+                print(f"  [{state}] {level.name}: {check.check}: {check.message}")
+    for path in written:
+        print(f"Report: {path}")
+    print(f"COMPARISON {result.verdict.upper()}")
+    return EXIT_OK if result.exit_code == 0 else EXIT_QA_FAILED
+
+
 def _cmd_baseline(args: argparse.Namespace) -> int:
     from qavf.regression.baselines import accept_baseline
 
@@ -419,6 +481,7 @@ _COMMANDS = {
     "profile": _cmd_profile,
     "list-rules": _cmd_list_rules,
     "compare": _cmd_compare,
+    "compare-datasets": _cmd_compare_datasets,
     "baseline": _cmd_baseline,
     "demo": _cmd_demo,
 }
