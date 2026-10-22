@@ -171,10 +171,31 @@ def test_a_planted_regional_change_is_detected_and_named_by_lisa(tmp_path):
 
 def test_uniform_noise_is_not_reported_as_a_spatial_change(tmp_path):
     result = _spatial(_points(5), _points(6), _layer(tmp_path))
-    for check in ("zones", "count", "expected", "rank", "shares", "moran", "lisa"):
+    for check in ("zones", "count", "expected", "shares", "moran", "lisa"):
         found = _check(result, "spatial", check)
         assert found.assessed and found.passed, (check, found.message)
     assert result.level("spatial").clusters == []
+    assert "rank" not in {check.check for check in result.level("spatial").checks}
+
+
+def test_rank_is_opt_in_so_reordered_noise_is_not_a_failure(tmp_path):
+    # Zones of near-equal size reorder under immaterial noise: ranking is meaningless.
+    rng = np.random.default_rng(3)
+
+    def even(seed_shift):
+        rows = []
+        for r in range(4):
+            for c in range(4):
+                n = 40 + int(rng.integers(-2, 3)) + seed_shift
+                rows += [{"lon": c + 0.5, "lat": r + 0.5}] * n
+        return pl.DataFrame(rows)
+
+    layer = _layer(tmp_path)
+    default = _spatial(even(0), even(0), layer, rtol=0.2)
+    assert "rank" not in {check.check for check in default.level("spatial").checks}
+    opted = _spatial(even(0), even(0), layer, rtol=0.2, rank={})
+    rank = _check(opted, "spatial", "rank")
+    assert rank.assessed and not rank.passed  # what a default-on check would have reported
 
 
 def test_zones_on_one_side_only_and_expected_zones_missing(tmp_path):

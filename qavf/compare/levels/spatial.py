@@ -205,8 +205,12 @@ class SpatialParams(InferenceParams):
     read (``diff``, ``rel_diff``, ``log_ratio``, ...)."""
     permutations: int = Field(default=DEFAULT_PERMUTATIONS, ge=19)
     """Permutations of the Moran and LISA tests."""
-    rank: RankCheck | None = Field(default_factory=RankCheck)
-    """Spearman correlation of the zones; ``null`` leaves the check out (so for each)."""
+    rank: RankCheck | None = None
+    """Spearman correlation of the zones, when their ordering matters (``rank: {}``).
+
+    Opt-in: where zones have similar values, immaterial noise reorders them, so a
+    rank check would fail although nothing material changed. Other checks are on
+    by default; ``null`` leaves one out."""
     shares: ShareCheck | None = Field(default_factory=ShareCheck)
     """Zones that gained or lost share of their side's total."""
     moran: MoranCheck | None = Field(default_factory=MoranCheck)

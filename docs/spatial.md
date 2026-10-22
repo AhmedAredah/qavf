@@ -196,7 +196,7 @@ they mean there.
 | `zones` | zones on one side only (`missing_zones: ignore` to accept) | |
 | one per measure | material changes per zone, the largest first | the measure's test per zone, corrected across zones |
 | `expected` | zones of the layer, or of the grid's `extent`, a side lacks (`allow_missing`; `expected: false` to skip) | |
-| `rank` | Spearman's correlation of the zones' values (`min_spearman`, 0.9) | Fisher z with the Fieller-Hartley-Pearson variance: below the minimum? |
+| `rank` (opt-in, `rank: {}`) | Spearman's correlation of the zones' values (`min_spearman`, 0.9), for when the ordering of zones matters (for example the top emitters); off by default because immaterial noise reorders zones of similar size | Fisher z with the Fieller-Hartley-Pearson variance: below the minimum? |
 | `shares` | zones whose share of their side's total changes beyond `max_change` (0.01), gained or lost | two-proportion per zone when the values are counts, corrected; otherwise by size |
 | `moran` | global Moran's I of the per-zone `difference` (`diff`, or any comparator): are the changes clustered? material from `min_i` (0.1) | permutation, one-sided |
 | `lisa` | each zone's local Moran's I of the differences: hot spots (a larger change among larger changes) and cold spots of **material** changes | conditional permutation per zone, corrected across zones |
@@ -204,7 +204,7 @@ they mean there.
 The zones come from the level's `layer` or `grid`, or from the `assign_zones` step that
 produced `zone_column`. The pattern checks read one measure (`pattern_measure`, the
 first by default) on the zones both sides have; set a check to `null` to leave it
-out. Under `decision: material` no test runs: `rank`, `shares` and `moran` are judged
+out (`rank` is off unless configured). Under `decision: material` no test runs: `rank`, `shares` and `moran` are judged
 by their thresholds and `lisa` (which is a test) is left out. Under `equivalence`,
 `moran` and `lisa` use `material_and_significant`: a cluster is a difference.
 `SpatialResult` reports the zone counts, `expected_zones`, `missing`, `spearman`,

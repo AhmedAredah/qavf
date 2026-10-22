@@ -275,7 +275,7 @@ Measures per zone, zones on one side or missing, rank, share and cluster changes
 | `pattern_measure` | `str \| None` | `None` | The measure label the pattern checks read; the first measure by default. |
 | `difference` | `str` | `diff` | Comparator turning a zone's two values into the difference ``moran`` and ``lisa`` read (``diff``, ``rel_diff``, ``log_ratio``, ...). |
 | `permutations` | `int` | `999` | Permutations of the Moran and LISA tests. |
-| `rank` | `RankCheck \| None` | `{'min_spearman': 0.9}` | Spearman correlation of the zones; ``null`` leaves the check out (so for each). |
+| `rank` | `RankCheck \| None` | `None` | Spearman correlation of the zones, when their ordering matters (``rank: {}``). Opt-in: where zones have similar values, immaterial noise reorders them, so a rank check would fail although nothing material changed. Other checks are on by default; ``null`` leaves one out. |
 | `shares` | `ShareCheck \| None` | `{'max_change': 0.01}` | Zones that gained or lost share of their side's total. |
 | `moran` | `MoranCheck \| None` | `{'min_i': 0.1}` | Global Moran's I of the per-zone differences. |
 | `lisa` | `LisaCheck \| None` | `{}` | Local Moran's I: the zones in significant clusters of material change. |
