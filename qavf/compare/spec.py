@@ -18,6 +18,9 @@ from pydantic import Field, field_validator, model_validator
 
 from qavf.engine.registry import RuleParams
 from qavf.engine.severity import Severity
+from qavf.inference.decision import DEFAULT_ALPHA, DEFAULT_POLICY
+from qavf.inference.resampling import DEFAULT_MAX_WORK, DEFAULT_SEED
+from qavf.inference.results import Correction, DecisionPolicy
 from qavf.rules.regression_checks import ColumnTolerance
 from qavf.settings import DType, NumericBound, _check_where
 
@@ -140,6 +143,52 @@ class StepConfig(_Configured):
         return self
 
 
+class TestConfig(_Configured):
+    """A significance test: ``welch_t``, ``{test: bootstrap, resamples: 999}`` or ``none``."""
+
+    __test__ = False  # not a pytest test class
+
+    test: str
+    """A registered test (``qavf.inference.TESTS``), or ``none``: no test applies."""
+    params: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def _selector(cls) -> str:
+        return "test"
+
+    @model_validator(mode="after")
+    def _known(self) -> TestConfig:
+        if self.test == "none":
+            if self.params:
+                raise ValueError("'test: none' takes no parameters")
+        else:
+            from qavf.inference.registry import TESTS
+
+            TESTS.create(self.test, self.params)
+        return self
+
+    def create(self) -> Any:
+        """The test component, or ``None`` for ``none``."""
+        if self.test == "none":
+            return None
+        from qavf.inference.registry import TESTS
+
+        return TESTS.create(self.test, self.params)
+
+
+class InferenceParams(RuleParams):
+    """A level's own significance settings; the comparison's when omitted."""
+
+    decision: DecisionPolicy | None = None
+    """``material_and_significant`` (default), ``material``, ``significant`` or
+    ``equivalence``."""
+    alpha: float | None = Field(default=None, gt=0, lt=1)
+    correction: Correction | None = None
+    """Multiple-testing correction across each check's family of tests."""
+    seed: int | None = Field(default=None, ge=0)
+    max_work: int | None = Field(default=None, ge=1)
+
+
 class LevelConfig(_Configured):
     """A comparison level: ``records`` or ``{level: groups, group_by: [...], ...}``."""
 
@@ -208,6 +257,22 @@ class ComparisonSpec(RuleParams):
     """Levels to compare; ``structure, coverage, records`` (``structure`` without keys)."""
     min_rows: int = Field(default=1, ge=0)
     """Fewest aligned rows on each side for the comparison to be assessed."""
+    decision: DecisionPolicy = DEFAULT_POLICY
+    """How materiality and significance combine: ``material_and_significant``
+    (fail only when a difference is material and significant), ``material``
+    (no tests; for a core install without the stats extra), ``significant`` or
+    ``equivalence`` (pass only when equivalence within the tolerance is shown)."""
+    alpha: float = Field(default=DEFAULT_ALPHA, gt=0, lt=1)
+    """Significance level, applied after the correction."""
+    correction: Correction = "bh"
+    """Multiple-testing correction across each check's family (groups, buckets,
+    series, columns): ``bh`` (Benjamini-Hochberg), ``by``, ``holm``,
+    ``bonferroni`` or ``none``."""
+    seed: int = Field(default=DEFAULT_SEED, ge=0)
+    """Seed of resampling tests; the same seed reproduces a comparison exactly."""
+    max_work: int = Field(default=DEFAULT_MAX_WORK, ge=1)
+    """Largest work (resamples x values, or values collected) of one test; a larger
+    test is not assessed rather than slow."""
 
     @field_validator("derive")
     @classmethod

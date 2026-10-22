@@ -105,7 +105,7 @@ def test_fall_back_hours_are_separate_buckets_and_the_day_has_25():
     )
     candidate = baseline.filter(pl.col("t").dt.convert_time_zone("UTC") != hours[2])  # 01:20 EST
     hourly = {"level": "temporal", "time_column": "t", "bucket": "hour", "measures": ["count"]}
-    daily = {**hourly, "name": "daily", "bucket": "day"}
+    daily = {**hourly, "name": "daily", "bucket": "day", "decision": "material"}  # one row's change
     result = compare_datasets(baseline, candidate, levels=[hourly, daily])
     [record] = _check(result, "temporal", "buckets").affected_records
     assert record["bucket"].timestamp() == datetime(2026, 11, 1, 6, tzinfo=UTC).timestamp()
@@ -479,6 +479,9 @@ def test_cmp001_runs_temporal_levels_from_configuration():
                                     "bucket": "day",
                                     "group_by": ["site"],
                                     "measure": "sum(x)",
+                                    # A doubled sawtooth: its slope change is material
+                                    # but not significant; this test pins thresholds.
+                                    "decision": "material",
                                 },
                             ],
                         }

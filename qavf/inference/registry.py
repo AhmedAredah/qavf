@@ -82,6 +82,8 @@ class InferenceTest(Component):
     needs: ClassVar[Needs] = "samples"
     supports_equivalence: ClassVar[bool] = False
     """Whether :meth:`equivalent` can show equivalence within a margin."""
+    uses_statistic: ClassVar[bool] = False
+    """Whether the test compares ``TestInput.statistic`` (resampling tests)."""
 
     @abstractmethod
     def run(self, data: TestInput) -> TestResult:

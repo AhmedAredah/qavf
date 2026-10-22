@@ -15,13 +15,25 @@ the buckets both sides have:
 
 Correlations, slopes and profiles are exact rationals until reported, and
 thresholds are decided exactly. A series too short to judge is not assessed,
-never passed. Each check's ``significance`` slot is left for inference.
+never passed.
+
+Unless the decision policy is ``material``, a threshold breach must also be
+significant, judged across the series of each check (one family per check):
+
+* ``correlation``: Fisher's z test that the Pearson correlation is below
+  ``min_pearson``, with Bartlett's effective sample size for autocorrelated
+  buckets (a low Spearman correlation alone, or one flat series, has no test
+  and is judged by its threshold);
+* ``trend``: the slope difference with a null-imposed circular block bootstrap
+  (or Newey-West HAC errors);
+* ``lag``: a block bootstrap of the correlation gain of the best lag over lag 0;
+* ``profile``, ``peak``, ``level shift``: no sound test; judged by threshold.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any, ClassVar, Literal
 
@@ -47,8 +59,11 @@ from qavf.compare.results import (
     ShapeAssessment,
     ShapeResult,
 )
-from qavf.compare.spec import Side
+from qavf.compare.significance import Inference, MeasureTest, Member, evidence_fields, judge
+from qavf.compare.spec import InferenceParams, Side
 from qavf.engine.registry import RuleParams
+from qavf.inference.results import Alternative, Significance, TestResult
+from qavf.inference.trend import correlation_test, lag_test, slope_difference
 from qavf.numeric import exact_rational, report_number
 from qavf.rules.helpers import BoundedEvidence, fresh_internal, plural
 from qavf.statistics.series import (
@@ -75,6 +90,9 @@ class CorrelationCheck(RuleParams):
     """Lowest Pearson correlation of the paired bucket values."""
     min_spearman: float | None = Field(default=0.9, ge=-1, le=1)
     """Lowest Spearman (rank) correlation."""
+    dependence: Literal["effective_n", "none"] = "effective_n"
+    """Sample size of the Fisher z test: Bartlett's effective size for autocorrelated
+    buckets, or the bucket count."""
 
 
 class TrendCheck(RuleParams):
@@ -83,6 +101,9 @@ class TrendCheck(RuleParams):
     rtol: float = Field(default=0.1, ge=0)
     """Relative tolerance of the least-squares slopes (change per bucket)."""
     atol: float = Field(default=0.0, ge=0)
+    dependence: Literal["block", "hac", "none"] = "block"
+    """Uncertainty of the slope difference: a null-imposed circular block bootstrap,
+    Newey-West HAC errors, or independent residuals."""
 
 
 class ProfileCheck(RuleParams):
@@ -132,7 +153,7 @@ class LevelShiftCheck(RuleParams):
     """Buckets between the two sides' shifts still counted as the same shift."""
 
 
-class ShapeParams(TimeAxisParams):
+class ShapeParams(TimeAxisParams, InferenceParams):
     """Parameters of the ``series_shape`` level."""
 
     measure: MeasureSpec = Field(default_factory=lambda: MeasureSpec(measure="count"))
@@ -210,20 +231,79 @@ def _value(correlation: Correlation | None) -> float | None:
     return None if correlation is None else correlation.value
 
 
+_TESTED = {"correlation": "fisher_z", "trend": "slope_difference", "lag": "lag"}
+"""The test of each shape check that has one."""
+
+
 @dataclass
 class _Check:
-    """One shape check's running tally over series."""
+    """One shape check's running tally over series.
+
+    Without inference a breach of the threshold is a difference. With it, each
+    series is a family member (``test`` runs it when the policy needs it) and
+    :meth:`decide` judges the family once every series is recorded.
+    """
 
     name: str
     evidence: BoundedEvidence
+    inference: Inference | None = None
     assessed: int = 0
     different: int = 0
+    not_assessed: int = 0
+    members: list[Member] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
+    series: list[int] = field(default_factory=list)
+    significance: Significance | None = None
+    results: list[TestResult | None] = field(default_factory=list)
 
-    def record(self, different: bool, record: dict[str, Any]) -> None:
-        self.assessed += 1
-        if different:
-            self.different += 1
-            self.evidence.append(record)
+    def record(
+        self,
+        different: bool,
+        record: dict[str, Any],
+        series: int = -1,
+        test: Callable[[], TestResult] | None = None,
+    ) -> None:
+        """A series' threshold judgement; ``test`` (``None``: no sound test) runs lazily."""
+        if self.inference is None:
+            self.assessed += 1
+            if different:
+                self.different += 1
+                self.evidence.append(record)
+            return
+        self.members.append(Member(different, None, applicable=test is not None, run=test))
+        self.records.append(record)
+        self.series.append(series)
+
+    def decide(self, limit: int) -> None:
+        """Test, correct and decide the family of recorded series."""
+        if self.inference is None:
+            return
+        method = _TESTED.get(self.name, "none")
+        plan = MeasureTest(method, None)
+        if method == "none":
+            plan = MeasureTest(method, None, False, f"no sound test for {self.name}")
+        labelled = [
+            Member(m.material, _label(r), m.data, m.problem, m.applicable, m.run)
+            for m, r in zip(self.members, self.records, strict=True)
+        ]
+        judgement = judge(plan, self.inference, labelled, limit)
+        self.results = judgement.results
+        self.significance = judgement.significance
+        for position, decision in enumerate(judgement.decisions):
+            if not decision.assessed:
+                self.not_assessed += 1
+                continue
+            self.assessed += 1
+            if decision.failed:
+                self.different += 1
+                record = self.records[position]
+                result = judgement.results[position]
+                self.evidence.append({**record, **evidence_fields(result, decision)})
+
+
+def _label(record: dict[str, Any]) -> str | None:
+    keys = [key for key in record if not isinstance(record[key], dict | list)][:3]
+    return ", ".join(f"{key}={record[key]}" for key in keys) or None
 
 
 @register_level
@@ -242,6 +322,8 @@ class SeriesShapeLevel(ComparisonLevel):
     def evaluate(self, inputs: LevelInputs, name: str) -> ShapeResult:
         params: ShapeParams = self.params  # type: ignore[assignment]
         group_by = list(params.group_by)
+        inference = Inference.of(inputs.spec, params)
+        tests = inference if inference.tests else None
         sides = bucketed_sides(inputs, params)
         keys = [*group_by, sides.column]
         aligned = reduce_groups(inputs, keys, (params.measure,), sides.relations)
@@ -288,7 +370,7 @@ class SeriesShapeLevel(ComparisonLevel):
             for side in SIDES
         }
         checks = {
-            check: _Check(check, inputs.evidence())
+            check: _Check(check, inputs.evidence(), tests)
             for check, enabled in (
                 ("correlation", params.correlation),
                 ("trend", params.trend),
@@ -320,9 +402,19 @@ class SeriesShapeLevel(ComparisonLevel):
                 too_short += 1
                 short.append({**group, "common_buckets": len(common)})
                 continue
-            shape = self._shape(params, group, b, c, common, period, checks)
-            if len(shapes) < inputs.ctx.evidence_limit:
+            kept = len(shapes) if len(shapes) < inputs.ctx.evidence_limit else -1
+            shape = self._shape(
+                params, group, b, c, common, period, checks, tests, compared - 1, kept
+            )
+            if kept >= 0:
                 shapes.append(shape)
+        for check in checks.values():
+            check.decide(inputs.ctx.evidence_limit)
+            for index, test in zip(check.series, check.results, strict=True):
+                if index >= 0 and test is not None:
+                    tagged = test.model_copy(update={"label": check.name})
+                    found = [*shapes[index].significance, tagged]
+                    shapes[index] = shapes[index].model_copy(update={"significance": found})
         results: list[CheckResult] = [
             graded(
                 "series",
@@ -352,23 +444,40 @@ class SeriesShapeLevel(ComparisonLevel):
                 )
             )
         for check in checks.values():
-            if not check.assessed:
+            if not check.assessed and not check.not_assessed:
                 results.append(
                     not_assessed(check.name, f"no series has {params.needed} buckets on both sides")
                 )
                 continue
-            results.append(
-                graded(
+            if check.not_assessed and not check.different:
+                reason = next(
+                    (r.reason for r in check.results if r is not None and not r.assessed), ""
+                )
+                outcome = CheckResult(
+                    check=check.name,
+                    passed=False,
+                    assessed=False,
+                    message=f"Not assessed: {check.name}: {plural(check.not_assessed, 'series')} "
+                    f"need a {_TESTED.get(check.name)} test that could not run ({reason}).",
+                    affected_count=check.not_assessed,
+                    total=check.assessed + check.not_assessed,
+                    unit="series",
+                )
+            else:
+                how = "" if tests is None else f" ({tests.describe()})"
+                outcome = graded(
                     check.name,
                     check.different,
-                    f"{check.name.capitalize()} agrees in {plural(check.assessed, 'series')}.",
+                    f"{check.name.capitalize()} agrees in {plural(check.assessed, 'series')}{how}.",
                     f"{check.name.capitalize()} differs in {plural(check.different, 'series')} "
-                    f"of {check.assessed:,}.",
+                    f"of {check.assessed:,}{how}"
+                    + (f"; {check.not_assessed:,} not assessed" if check.not_assessed else "")
+                    + ".",
                     evidence=check.evidence,
                     total=check.assessed,
                     unit="series",
                 )
-            )
+            results.append(outcome.model_copy(update={"significance": check.significance}))
         return ShapeResult(
             level=self.name,
             name=name,
@@ -382,7 +491,12 @@ class SeriesShapeLevel(ComparisonLevel):
             only_in_candidate=only["candidate"],
             too_short=too_short,
             assessments=[
-                ShapeAssessment(check=c.name, assessed=c.assessed, different=c.different)
+                ShapeAssessment(
+                    check=c.name,
+                    assessed=c.assessed,
+                    different=c.different,
+                    significance=c.significance,
+                )
                 for c in checks.values()
             ],
             series=shapes,
@@ -397,11 +511,26 @@ class SeriesShapeLevel(ComparisonLevel):
         common: list[int],
         period: int | None,
         checks: dict[str, _Check],
+        inference: Inference | None = None,
+        ordinal: int = 0,
+        position: int = -1,
     ) -> SeriesShape:
-        """Every enabled shape metric of one series, tallied into ``checks``."""
+        """Every enabled shape metric of one series, tallied into ``checks``.
+
+        With ``inference`` each check that has a test records it, to run when the
+        family is decided; ``ordinal`` (the series' place) offsets the seed and
+        ``position`` is the series' place in the reported metrics (-1: not kept).
+        """
         xb = [b[p].value for p in common]
         xc = [c[p].value for p in common]
         flat = (_constant(xb), _constant(xc))
+        seed = 0 if inference is None else inference.seed + ordinal
+        work = 0 if inference is None else inference.max_work
+        floats = (
+            np.array([float(v) for v in xb]),
+            np.array([float(v) for v in xc]),
+            np.array(common, dtype=float),
+        )
         shape: dict[str, Any] = {"group": group, "buckets": len(common)}
         if (correlation := params.correlation) is not None:
             r = pearson(xb, xc) if not any(flat) else None
@@ -416,7 +545,26 @@ class SeriesShapeLevel(ComparisonLevel):
             )
             found = {"pearson": _value(r), "spearman": _value(rho)}
             shape |= found
-            checks["correlation"].record(low, {**group, **found, "buckets": len(common)})
+            limit = correlation.min_pearson
+            pearson_low = r is not None and limit is not None and not r.at_least(limit)
+            # Fisher's z tests the Pearson correlation against its minimum; a flat
+            # series, or a low Spearman correlation alone, is judged by its threshold.
+            testable = (
+                not any(flat) and limit is not None and -1 < limit < 1 and (pearson_low or not low)
+            )
+            test = None
+            if testable and inference is not None:
+                assert limit is not None
+                side: Alternative = "greater" if inference.decision == "equivalence" else "less"
+                dependence = correlation.dependence
+
+                def test() -> TestResult:
+                    return correlation_test(
+                        floats[0], floats[1], rho=limit, alternative=side, dependence=dependence
+                    )
+
+            record = {**group, **found, "buckets": len(common)}
+            checks["correlation"].record(low, record, position, test)
         if (trend := params.trend) is not None:
             positions = [Fraction(p) for p in common]
             before, after = (normal_equations(positions, values).slope for values in (xb, xc))
@@ -426,12 +574,20 @@ class SeriesShapeLevel(ComparisonLevel):
             found["slope_candidate"] = report_number(after)
             shape |= found
             change = report_number(after - before)
-            checks["trend"].record(changed, {**group, **found, "change": change})
+
+            def slopes() -> TestResult:
+                assert trend is not None
+                return slope_difference(
+                    floats[2], floats[0], floats[1], dependence=trend.dependence,
+                    seed=seed, max_work=work,
+                )  # fmt: skip
+
+            checks["trend"].record(changed, {**group, **found, "change": change}, position, slopes)
         if (profile := params.profile) is not None:
             distance = _profile_distance(b, c, common)
             shape["profile_distance"] = float(distance)
             different = distance > Fraction(str(profile.max_distance))
-            checks["profile"].record(different, {**group, "distance": float(distance)})
+            checks["profile"].record(different, {**group, "distance": float(distance)}, position)
         if (peak := params.peak) is not None:
             top_b = max(common, key=lambda p: (b[p].value, -p))
             top_c = max(common, key=lambda p: (c[p].value, -p))
@@ -446,7 +602,9 @@ class SeriesShapeLevel(ComparisonLevel):
                 "baseline_value": report_number(b[top_b].value),
                 "candidate_value": report_number(c[top_c].value),
             }
-            checks["peak"].record(abs(shift) > peak.max_shift or higher, {**group, **found})
+            checks["peak"].record(
+                abs(shift) > peak.max_shift or higher, {**group, **found}, position
+            )
         if (lag := params.lag) is not None:
             values_b = {p: point.value for p, point in b.items()}
             values_c = {p: point.value for p, point in c.items()}
@@ -459,7 +617,21 @@ class SeriesShapeLevel(ComparisonLevel):
                 "correlation_at_lag_0": _value(None if best is None else best.at_zero),
             }
             shape |= {"lag": found["lag"], "lag_correlation": found["correlation"]}
-            checks["lag"].record(not agrees, {**group, **found})
+            gain = None
+            if best is not None and best.lag != 0:
+                shift = best.lag
+                pairs = (
+                    {p: float(v) for p, v in values_b.items()},
+                    {p: float(v) for p, v in values_c.items()},
+                )
+
+                def gain() -> TestResult:
+                    return lag_test(
+                        pairs[0], pairs[1], shift, period=period, seed=seed, max_work=work,
+                        minimum=params.min_buckets,
+                    )  # fmt: skip
+
+            checks["lag"].record(not agrees, {**group, **found}, position, gain)
         if (screen := params.level_shift) is not None:
             # TMP-008's screen in binary64 (values rounded once), on the common buckets.
             at: list[int | None] = []
@@ -478,7 +650,7 @@ class SeriesShapeLevel(ComparisonLevel):
             }
             shape["level_shifts"] = labels
             found = {"baseline_shift": labels["baseline"], "candidate_shift": labels["candidate"]}
-            checks["level shift"].record(differs, {**group, **found})
+            checks["level shift"].record(differs, {**group, **found}, position)
         return SeriesShape(**shape)
 
 

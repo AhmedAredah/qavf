@@ -7,6 +7,12 @@ means the exact sorted-batch reducer, quantiles exact order statistics. Exact
 non-integer results are canonical rational strings (``"7/2"``), which
 comparators read without rounding. Only ``std`` is computed in binary64.
 
+Each measure also names its default significance test (``test``) and what a
+test may read from it: the sample statistic a resampling test compares
+(``statistic``), whether its values are event counts (``counts``), and the
+successes and trials of a share (``proportions``). A measure without a sound
+test (``min``, ``max``, ``distinct_count``) is judged by materiality alone.
+
 Writing a measure::
 
     @register_measure
@@ -63,6 +69,13 @@ class Measure(Component):
     requires_column: ClassVar[bool] = True
     numeric: ClassVar[bool] = True
     """Whether the column must be numeric."""
+    test: ClassVar[str | None] = None
+    """Default significance test (``None``: no sound test, judged by materiality)."""
+    statistic: ClassVar[str | None] = None
+    """What a resampling test compares: ``mean``, ``median``, ``sum``, ``std`` or
+    ``quantile`` of the group's values (``None``: no sample statistic)."""
+    counts: ClassVar[bool] = False
+    """Whether the measure's values are event counts (for the Poisson test)."""
 
     @abstractmethod
     def compute(self, data: MeasureInput) -> pl.DataFrame:
@@ -71,6 +84,22 @@ class Measure(Component):
     def columns(self, column: str | None) -> tuple[str, ...]:
         """Columns read, for availability checks (the weight of a weighted mean, ...)."""
         return (column,) if column is not None else ()
+
+    def default_test(self, dtype: pl.DataType | None) -> str | None:
+        """The test used unless the measure configures ``test`` (``dtype``: the column's)."""
+        return self.test
+
+    def probability(self) -> float | None:
+        """The quantile probability of a ``quantile`` statistic."""
+        return None
+
+    def proportions(self, data: MeasureInput) -> tuple[pl.Expr, pl.Expr | None] | None:
+        """Successes and trials per group for a two-proportion test, as reductions.
+
+        ``None`` trials mean the side's total of successes (a share of the side);
+        ``None`` altogether: the measure is not a proportion.
+        """
+        return None
 
     def check(self, data: MeasureInput) -> None:
         """Refuse a column the measure cannot reduce (not assessed, never a pass)."""
@@ -122,6 +151,8 @@ class Count(Measure):
     name: ClassVar[str] = "count"
     requires_column: ClassVar[bool] = False
     numeric: ClassVar[bool] = False
+    test: ClassVar[str | None] = "poisson"
+    counts: ClassVar[bool] = True
 
     def compute(self, data: MeasureInput) -> pl.DataFrame:
         value = pl.len() if data.column is None else _usable(data).count()
@@ -134,12 +165,20 @@ class NullCount(Measure):
 
     name: ClassVar[str] = "null_count"
     numeric: ClassVar[bool] = False
+    test: ClassVar[str | None] = "two_proportion"
+    counts: ClassVar[bool] = True
 
-    def compute(self, data: MeasureInput) -> pl.DataFrame:
+    def _missing(self, data: MeasureInput) -> pl.Expr:
         assert data.column is not None
         empty = pl.DataFrame(schema=data.relation.schema)
-        missing = missing_expr(empty, data.column).sum().cast(pl.UInt64)
-        return grouped_reduce(data.relation, data.keys, {data.alias: missing})
+        return missing_expr(empty, data.column).sum().cast(pl.UInt64)
+
+    def compute(self, data: MeasureInput) -> pl.DataFrame:
+        return grouped_reduce(data.relation, data.keys, {data.alias: self._missing(data)})
+
+    def proportions(self, data: MeasureInput) -> tuple[pl.Expr, pl.Expr | None]:
+        """Missing values out of the group's rows."""
+        return self._missing(data), pl.len().cast(pl.UInt64)
 
 
 @register_measure
@@ -181,6 +220,12 @@ class Sum(Measure):
     """Exact sum of non-missing values; a group with none has no sum."""
 
     name: ClassVar[str] = "sum"
+    statistic: ClassVar[str | None] = "sum"
+    counts: ClassVar[bool] = True
+
+    def default_test(self, dtype: pl.DataType | None) -> str | None:
+        """Poisson for integer columns (sums of counts), a bootstrap of the sum otherwise."""
+        return "poisson" if dtype is not None and dtype.is_integer() else "bootstrap"
 
     def compute(self, data: MeasureInput) -> pl.DataFrame:
         return _sum(data)
@@ -191,6 +236,8 @@ class Mean(Measure):
     """Exact mean of non-missing values."""
 
     name: ClassVar[str] = "mean"
+    test: ClassVar[str | None] = "welch_t"
+    statistic: ClassVar[str | None] = "mean"
 
     def compute(self, data: MeasureInput) -> pl.DataFrame:
         assert data.column is not None
@@ -202,6 +249,8 @@ class Median(Measure):
     """Exact median (linear interpolation between the middle values)."""
 
     name: ClassVar[str] = "median"
+    test: ClassVar[str | None] = "mann_whitney"
+    statistic: ClassVar[str | None] = "median"
 
     def compute(self, data: MeasureInput) -> pl.DataFrame:
         assert data.column is not None
@@ -219,6 +268,11 @@ class Quantile(Measure):
 
     name: ClassVar[str] = "quantile"
     Params: ClassVar[type[RuleParams]] = QuantileParams
+    test: ClassVar[str | None] = "bootstrap"
+    statistic: ClassVar[str | None] = "quantile"
+
+    def probability(self) -> float:
+        return float(self.params.p)  # type: ignore[attr-defined]
 
     def compute(self, data: MeasureInput) -> pl.DataFrame:
         assert data.column is not None
@@ -231,6 +285,8 @@ class StandardDeviation(Measure):
     """Sample standard deviation (binary64, as computed by the backend)."""
 
     name: ClassVar[str] = "std"
+    test: ClassVar[str | None] = "brown_forsythe"
+    statistic: ClassVar[str | None] = "std"
 
     def compute(self, data: MeasureInput) -> pl.DataFrame:
         value = _usable(data).cast(pl.Float64).std()
@@ -275,6 +331,13 @@ class Share(Measure):
 
     name: ClassVar[str] = "share"
     requires_column: ClassVar[bool] = False
+    test: ClassVar[str | None] = "two_proportion"
+
+    def proportions(self, data: MeasureInput) -> tuple[pl.Expr, pl.Expr | None]:
+        """The group's rows (or integer sum of ``column``) out of the side's total."""
+        if data.column is None:
+            return pl.len().cast(pl.UInt64), None
+        return _usable(data).sum(), None
 
     def compute(self, data: MeasureInput) -> pl.DataFrame:
         parts = Count().compute(data) if data.column is None else _sum(data)

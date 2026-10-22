@@ -256,7 +256,8 @@ def test_evidence_is_bounded_and_deterministic_while_counts_stay_complete():
 
 # ------------------------------------------------------------------ groups
 def _groups(baseline, candidate, **level):
-    levels = [{"level": "groups", **level}]
+    # These tests pin materiality semantics; significance is tested in test_compare_significance.
+    levels = [{"level": "groups", "decision": "material", **level}]
     return compare_datasets(baseline, candidate, levels=levels)
 
 

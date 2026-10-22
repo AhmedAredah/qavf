@@ -5,8 +5,9 @@ rational strings all convert without rounding), so ``diff`` of two large
 integers is exact. Comparators return a rational or a float, or ``None`` when
 the difference is undefined (a ratio to zero). Whether a change matters is a
 separate judgement, :class:`Materiality`, made with the package's exact
-tolerance arithmetic. Statistical significance is a later, separate judgement;
-results carry a typed slot for it.
+tolerance arithmetic. Statistical significance is a separate judgement
+(:mod:`qavf.compare.significance`), combined with materiality by the
+comparison's decision policy.
 
 Writing a comparator::
 
@@ -146,3 +147,12 @@ class Materiality:
             nan = [isinstance(v, float) and math.isnan(v) for v in (baseline, candidate)]
             return not all(nan) and bool(baseline != candidate)
         return not numeric_close(b, c, self.rtol, self.atol)
+
+    def margin(self, baseline: Any, candidate: Any) -> float | None:
+        """The largest immaterial change at these values, ``max(atol, rtol * max(|b|, |c|))``:
+        the equivalence margin. ``None`` unless both values are numbers."""
+        b, c = exact_rational(baseline), exact_rational(candidate)
+        if b is None or c is None:
+            return None
+        scale = Fraction(self.rtol) * max(abs(b), abs(c))
+        return float(max(Fraction(self.atol), scale))

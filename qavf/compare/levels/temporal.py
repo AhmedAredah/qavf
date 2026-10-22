@@ -5,8 +5,11 @@ Both aligned sides get a bucket label column from the shared bucketing module
 profiles), computed natively. The ``groups`` machinery then reduces each side
 per ``group_by`` and bucket and compares the measures bucket by bucket, so
 measures, comparators and materiality mean exactly what they mean for groups.
-Rows whose time is missing or cannot be placed (unparseable, an ambiguous or
-skipped local time) make the level not assessed rather than being dropped.
+Significance does too: each bucket's change is tested from both sides' values
+in that bucket, and the buckets of a measure form one family for the
+correction. Rows whose time is missing or cannot be placed (unparseable, an
+ambiguous or skipped local time) make the level not assessed rather than being
+dropped.
 
 Calendar alignment (this year against last year) is the ``shift_time``
 alignment step, so it applies before any level, keyed records included.
@@ -33,11 +36,13 @@ from qavf.compare.levels.groups import (
     MeasureSpec,
     compare_measure,
     materiality,
+    measure_tests,
     one_sided_check,
     reduce_groups,
 )
 from qavf.compare.results import CheckResult, LevelResult, TemporalResult
-from qavf.compare.spec import Side
+from qavf.compare.significance import Inference
+from qavf.compare.spec import InferenceParams, Side
 from qavf.engine.registry import RuleParams
 from qavf.rules._grouped import ProjectedRelation
 from qavf.rules.helpers import fresh_internal, plural
@@ -129,7 +134,7 @@ def bucketed_sides(inputs: LevelInputs, params: TimeAxisParams) -> BucketedSides
     return BucketedSides(relations, column, labels["baseline"], raw)
 
 
-class TemporalParams(TimeAxisParams):
+class TemporalParams(TimeAxisParams, InferenceParams):
     """Parameters of the ``temporal`` level."""
 
     measures: tuple[MeasureSpec, ...] = Field(
@@ -176,13 +181,18 @@ class TemporalLevel(ComparisonLevel):
         params: TemporalParams = self.params  # type: ignore[assignment]
         sides = bucketed_sides(inputs, params)
         keys = [*params.group_by, sides.column]
-        aligned = reduce_groups(inputs, keys, params.measures, sides.relations)
+        inference = Inference.of(inputs.spec, params)
+        plans = measure_tests(inputs, params.measures, sides.relations["baseline"], inference)
+        extras = [plan.extras if plan is not None else {} for plan in plans]
+        aligned = reduce_groups(inputs, keys, params.measures, sides.relations, extras)
         allowed = params.missing_buckets == "ignore"
         checks = [one_sided_check(inputs, aligned, "buckets", "bucket", allowed)]
         comparisons = []
         for index, (spec, _) in enumerate(aligned.measures):
             judged = materiality(inputs.spec, params, spec)
-            comparison, check = compare_measure(inputs, aligned, index, judged, "bucket")
+            comparison, check = compare_measure(
+                inputs, aligned, index, judged, "bucket", plans[index], inference
+            )
             comparisons.append(comparison)
             checks.append(check)
         window: dict[str, Any] = {}

@@ -6,18 +6,42 @@ arithmetic and per-column counts as REG-001. Additional descriptions (null/NaN
 transitions, difference magnitudes, categorical transitions and the largest
 changes) are native reductions over the matched pairs; only bounded results
 reach Python.
+
+Value changes are facts: every value beyond tolerance is counted, whatever the
+decision policy. Unless the policy is ``material``, a ``shift`` check also asks
+whether each numeric column moved systematically: a paired test (``test``,
+``paired_t`` by default) of ``candidate - baseline`` over the matched rows, per
+column and optionally per ``shift_by`` group, with the mean difference judged
+for materiality by the column's tolerance and the family of columns (and
+groups) corrected together.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, ClassVar
 
+import numpy as np
 import polars as pl
-from pydantic import Field
+from pydantic import Field, model_validator
 
+from qavf.compare.comparators import Materiality
 from qavf.compare.levels import ComparisonLevel, LevelInputs, graded, register_level
-from qavf.compare.results import ColumnChanges, LevelResult, RecordsResult, Transition
+from qavf.compare.results import CheckResult, ColumnChanges, LevelResult, RecordsResult, Transition
+from qavf.compare.significance import (
+    Inference,
+    Judgement,
+    MeasureTest,
+    Member,
+    evidence_fields,
+    float_values,
+    judge,
+    summary_metrics,
+)
+from qavf.compare.spec import InferenceParams, TestConfig
 from qavf.engine.registry import RuleParams
+from qavf.inference.registry import TestInput
+from qavf.inference.results import Significance
 from qavf.keys import key_casts
 from qavf.regression._indexed import ProjectedInput, compare_indexed, supported
 from qavf.regression._numeric import _difference_size, _settled, numbers_close
@@ -25,11 +49,11 @@ from qavf.regression._plan import ComparisonPlan, comparison_plan
 from qavf.regression._schema import _nested
 from qavf.regression.compare_outputs import _compare_projected
 from qavf.regression.models import ComparisonResult, SchemaPolicy
-from qavf.rules.helpers import fresh_internal, plural
+from qavf.rules.helpers import LargestEvidence, fresh_internal, plural
 from qavf.typed_values import encode_temporal
 
 
-class RecordsParams(RuleParams):
+class RecordsParams(InferenceParams):
     """Parameters of the ``records`` level."""
 
     allow_added: bool = False
@@ -46,6 +70,19 @@ class RecordsParams(RuleParams):
     categorical: tuple[str, ...] | None = None
     """Columns whose value transitions are counted; text, categorical and boolean
     columns when omitted."""
+    test: TestConfig = Field(default_factory=lambda: TestConfig(test="paired_t"))
+    """Paired test of each numeric column's shift (``paired_t``, ``wilcoxon``,
+    ``sign``, ``paired_permutation``, ``paired_bootstrap``)."""
+    shift_by: tuple[str, ...] = ()
+    """Also test the shift within groups of these key or compared columns
+    (candidate values)."""
+
+    @model_validator(mode="after")
+    def _paired(self) -> RecordsParams:
+        test = self.test.create()
+        if test is not None and test.needs != "paired":
+            raise ValueError(f"the records level needs a paired test, not {test.name!r}")
+        return self
 
 
 def _categorical(dtype: pl.DataType) -> bool:
@@ -253,6 +290,194 @@ def _describe(
     return stats, changes
 
 
+@dataclass(frozen=True)
+class _Shift:
+    check: CheckResult
+    family: Significance
+    columns: dict[str, Significance]
+    shifted: list[str]
+
+
+def _shift(
+    inputs: LevelInputs, plan: ComparisonPlan, params: RecordsParams, inference: Inference
+) -> _Shift | None:
+    """Paired tests of each numeric column's shift over matched rows (per ``shift_by``)."""
+    left, right = plan.baseline_schema, plan.candidate_schema
+    numeric = [
+        c
+        for c in plan.values
+        if left[c].is_numeric() and right[c].is_numeric() and c not in params.shift_by
+    ]
+    if not numeric:
+        return None
+    test = params.test.create()
+    tested = MeasureTest("none", None, False, "the level declares no test (test: none)")
+    if test is not None:
+        tested = MeasureTest(test.name, test, statistic="mean")
+    groups = list(params.shift_by)
+    if unknown := sorted(set(groups) - set(plan.keys) - set(plan.values)):
+        raise ValueError(f"shift_by names column(s) not compared: {', '.join(unknown)}")
+    matched = _Matched(inputs, plan, [*numeric, *(g for g in groups if g not in plan.keys)])
+    rows = int(inputs.collect(matched.plan.select(pl.len())).item())
+    members: list[Member] = []
+    described: list[dict[str, Any]] = []
+    for column in numeric:
+        b, c = matched.pair(column)
+        finite = _finite(b, c, left[column], right[column])
+        keys = [pl.col(g) if g in plan.keys else matched.pair(g)[1] for g in groups]
+        names = [fresh_internal(f"group_{i}", matched.names[column]) for i in range(len(groups))]
+        rtol, atol = plan.tolerance(column)
+        judged = Materiality(rtol, atol)
+        for group, pairs, means, problem in _paired_values(
+            inputs, matched.plan.filter(finite), keys, names, groups, (b, c), rows, inference
+        ):
+            usable = means[0] is not None and means[1] is not None
+            material = usable and judged.material(*means)
+            margin = judged.margin(*means) if usable else None
+            data = None
+            if pairs is not None:
+                data = TestInput(
+                    baseline=pairs[0],
+                    candidate=pairs[1],
+                    seed=inference.seed + len(members),
+                    max_work=inference.max_work,
+                    margin=None if margin is None else (-margin, margin),
+                )
+            label = ", ".join([column, *(f"{k}={v}" for k, v in group.items())])
+            members.append(Member(bool(material), label, data, problem))
+            count = len(pairs[0]) if pairs is not None else None
+            described.append(
+                {"column": column, **group, "pairs": count,
+                 "baseline_mean": means[0], "candidate_mean": means[1]}
+            )  # fmt: skip
+    judgement = judge(tested, inference, members, inputs.ctx.evidence_limit)
+    return _shift_check(inputs, numeric, tested, inference, judgement, described)
+
+
+type _Paired = tuple[
+    dict[str, Any], tuple[np.ndarray, np.ndarray] | None, tuple[Any, Any], str | None
+]
+"""A group, its matched values (``None``: not collected), their means and any problem."""
+
+
+def _paired_values(
+    inputs: LevelInputs,
+    plan: pl.LazyFrame,
+    keys: list[pl.Expr],
+    names: list[str],
+    groups: list[str],
+    pair: tuple[pl.Expr, pl.Expr],
+    rows: int,
+    inference: Inference,
+) -> list[_Paired]:
+    """Per group: the matched values (when within ``max_work``), their means and any problem.
+
+    Beyond the budget only the means are reduced natively, so materiality is still
+    judged and a material shift is not assessed rather than untested.
+    """
+    b, c = pair
+    grouping = [k.alias(n) for k, n in zip(keys, names, strict=True)]
+    if rows * 2 > inference.max_work:
+        means = [b.cast(pl.Float64).mean().alias("b"), c.cast(pl.Float64).mean().alias("c")]
+        reduced = plan.with_columns(grouping).group_by(names) if names else None
+        frame = inputs.collect(
+            reduced.agg(means).sort(names, nulls_last=True)
+            if reduced is not None
+            else plan.select(means)
+        )
+        problem = f"{rows:,} matched rows exceed max_work {inference.max_work:,}"
+        return [
+            (dict(zip(groups, row[: len(names)], strict=True)), None, row[len(names) :], problem)
+            for row in frame.iter_rows()
+        ]
+    frame = inputs.collect(plan.select(*grouping, b.alias("b"), c.alias("c")))
+    parts = (
+        frame.sort(names, nulls_last=True).partition_by(names, maintain_order=True, as_dict=True)
+        if names
+        else {(): frame}
+    )
+    found: list[_Paired] = []
+    for key, part in parts.items():
+        group = dict(zip(groups, key, strict=True))
+        try:
+            values = float_values(part["b"]), float_values(part["c"])
+        except ValueError as exc:
+            found.append((group, None, (None, None), str(exc)))
+            continue
+        average = [float(v.mean()) if len(v) else None for v in values]
+        found.append((group, values, (average[0], average[1]), None))
+    return found
+
+
+def _shift_check(
+    inputs: LevelInputs,
+    numeric: list[str],
+    tested: MeasureTest,
+    inference: Inference,
+    judgement: Judgement,
+    described: list[dict[str, Any]],
+) -> _Shift:
+    failed, unassessed = judgement.failed, judgement.unassessed
+    leaders = LargestEvidence(inputs.ctx.evidence_limit)
+    for position in failed or unassessed:
+        record = dict(described[position])
+        b, c = record["baseline_mean"], record["candidate_mean"]
+        record |= evidence_fields(judgement.results[position], judgement.decisions[position])
+        magnitude = abs(c - b) if b is not None and c is not None else 0.0
+        leaders.add(magnitude, position, record)
+    evidence = inputs.evidence()
+    evidence.extend(leaders.records)
+    evidence.count = len(failed or unassessed)
+    family = judgement.significance
+    columns: dict[str, Significance] = {}
+    for column in numeric:
+        mine = [i for i, record in enumerate(described) if record["column"] == column]
+        tests = [judgement.results[i] for i in mine]
+        kept = [result for result in tests if result is not None]
+        columns[column] = family.model_copy(
+            update={
+                "significant": sum(bool(result.significant) for result in kept),
+                "failed": sum(judgement.decisions[i].failed for i in mine),
+                "not_assessed": sum(not judgement.decisions[i].assessed for i in mine),
+                "tests": kept[: inputs.ctx.evidence_limit],
+            }
+        )
+    shifted = sorted({described[i]["column"] for i in failed}, key=numeric.index)
+    members = len(described)
+    metrics = summary_metrics(family)
+    unit = "columns" if members == len(numeric) else "column groups"
+    if failed or not unassessed:
+        how = f"{tested.name}; {inference.describe()}"
+        check = graded(
+            "shift",
+            len(failed),
+            f"No column shifts systematically ({plural(members, unit[:-1])}; {how}).",
+            f"{plural(len(shifted), 'column')} shift systematically: {', '.join(shifted)} ({how})."
+            + (f" {len(unassessed):,} not assessed." if unassessed else ""),
+            evidence=evidence,
+            total=members,
+            unit=unit,
+            metrics=metrics,
+        )
+    else:
+        reason = judgement.decisions[unassessed[0]].reason
+        check = CheckResult(
+            check="shift",
+            passed=False,
+            assessed=False,
+            message=f"Not assessed: shift: {plural(len(unassessed), unit[:-1])} need a "
+            f"{tested.name} test that could not run ({reason}).",
+            affected_count=len(unassessed),
+            total=members,
+            unit=unit,
+            affected_records=evidence.records,
+            truncated=evidence.truncated,
+            metrics=metrics,
+        )
+    check = check.model_copy(update={"significance": family})
+    return _Shift(check, family, columns, shifted)
+
+
 @register_level
 class RecordsLevel(ComparisonLevel):
     """Rows added, removed, changed and unchanged, with per-column change detail."""
@@ -353,10 +578,20 @@ class RecordsLevel(ComparisonLevel):
                 },
             ),
         ]
+        inference = Inference.of(spec, params)
+        shift = _shift(inputs, plan, params, inference) if inference.tests else None
+        if shift is not None:
+            checks.append(shift.check)
+            columns = [
+                column.model_copy(update={"significance": shift.columns.get(column.column)})
+                for column in columns
+            ]
         return RecordsResult(
             level=self.name,
             name=name,
             checks=checks,
+            significance=None if shift is None else shift.family,
+            shifted=[] if shift is None else shift.shifted,
             keys=list(plan.keys),
             matched=matched,
             rows_added=result.rows_added,

@@ -5,6 +5,10 @@ finding. Evidence is bounded by the run's record and byte limits while counts
 stay complete. Values of arbitrary type (keys, categories) live in
 ``affected_records``/``metrics`` or in fields with audit encoding, so a result
 survives JSON transport from an isolated worker with its types intact.
+
+``significance`` slots hold the statistical judgement of a family of tests
+(:class:`~qavf.inference.results.Significance`); they are empty under the
+``material`` decision policy, which runs no test.
 """
 
 from __future__ import annotations
@@ -14,17 +18,8 @@ from typing import Any, ClassVar
 
 from pydantic import Field, SerializeAsAny, ValidationInfo, field_serializer, field_validator
 
+from qavf.inference.results import Significance, TestResult
 from qavf.reports.models import SnapshotModel, encode_non_finite
-
-
-class Significance(SnapshotModel):
-    """Slot for a statistical-significance judgement (not computed in this release)."""
-
-    method: str
-    statistic: float | None = None
-    p_value: float | None = None
-    alpha: float | None = None
-    significant: bool | None = None
 
 
 class CheckResult(SnapshotModel):
@@ -46,6 +41,8 @@ class CheckResult(SnapshotModel):
     truncated: bool = False
     """Whether counted problems were left out of ``affected_records``."""
     metrics: dict[str, Any] = Field(default_factory=dict)
+    significance: Significance | None = None
+    """The family of tests this check's decision used, when it used any."""
 
 
 class LevelResult(SnapshotModel):
@@ -171,6 +168,8 @@ class ColumnChanges(SnapshotModel):
     """Most frequent ``baseline -> candidate`` changes of a categorical column."""
     distinct_transitions: int | None = None
     """All distinct changes of a categorical column, including those not listed."""
+    significance: Significance | None = None
+    """Paired tests of the column's shift (per ``shift_by`` group), when run."""
 
     @field_serializer("max_abs_diff", "max_rel_diff", when_used="json")
     def _encode(self, value: Any) -> Any:
@@ -188,6 +187,8 @@ class RecordsResult(LevelResult):
     columns: list[ColumnChanges] = Field(default_factory=list)
     execution: str | None = None
     """How the keyed comparison ran (see :class:`qavf.regression.ComparisonResult`)."""
+    shifted: list[str] = Field(default_factory=list)
+    """Columns whose systematic shift fails the decision policy."""
 
 
 # ------------------------------------------------------------------- groups
@@ -259,7 +260,7 @@ class TemporalResult(LevelResult, _Audited):
     gaps: dict[str, int] = Field(default_factory=dict)
     """Expected (group, bucket) keys missing on each side."""
     measures: list[MeasureComparison] = Field(default_factory=list)
-    """Per measure; its ``significance`` slot is for per-bucket tests."""
+    """Per measure; its ``significance`` holds the per-bucket tests."""
 
 
 # ------------------------------------------------------------------ shapes
@@ -296,7 +297,8 @@ class SeriesShape(_Audited):
     lag_correlation: float | None = None
     level_shifts: dict[str, Any] = Field(default_factory=dict)
     """First bucket after each side's level shift (``None``: no shift)."""
-    significance: Significance | None = None
+    significance: list[TestResult] = Field(default_factory=list)
+    """This series' tests (correlation, trend, lag), each labelled with its check."""
 
 
 class ShapeResult(LevelResult):

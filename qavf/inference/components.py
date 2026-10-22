@@ -137,6 +137,7 @@ class Permutation(InferenceTest):
 
     name: ClassVar[str] = "permutation"
     Params: ClassVar[type[RuleParams]] = ResamplingParams
+    uses_statistic: ClassVar[bool] = True
 
     def run(self, data: TestInput) -> TestResult:
         if (missing := _samples(self, data)) is not None:
@@ -158,6 +159,7 @@ class Bootstrap(InferenceTest):
 
     name: ClassVar[str] = "bootstrap"
     Params: ClassVar[type[RuleParams]] = BootstrapParams
+    uses_statistic: ClassVar[bool] = True
     supports_equivalence: ClassVar[bool] = True
 
     def run(self, data: TestInput) -> TestResult:

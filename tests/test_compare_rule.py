@@ -42,6 +42,7 @@ def _config(**comparison):
         "columns": {"aadt_k": "aadt"},
         "units": {"aadt": {"factor": 1000}},
         "recode": {"fc": {"values": {"1": "interstate", "2": "arterial", "3": "local"}}},
+        "decision": "material",  # the rule's plumbing, not significance (four sites)
         "levels": [
             "structure",
             "coverage",
