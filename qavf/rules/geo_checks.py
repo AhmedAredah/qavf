@@ -1,13 +1,15 @@
 """Coordinate QA: latitude/longitude values that can be real places.
 
 The "spatial" rules elsewhere compare entities; this checks point coordinates
-themselves. Full geometry, CRS and topology validation needs a geometry engine
-(e.g. DuckDB's ``spatial`` extension) and belongs in a domain plugin.
+themselves: present, finite, in range, not (0, 0), inside a bounding box and,
+with ``within``, inside the polygons of a zone layer or study area. ``within``
+uses the shared point-in-polygon path (:func:`qavf.spatial.assign.assign`) and
+needs DuckDB's spatial extension; without it that check alone is not assessed.
 """
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import polars as pl
 from pydantic import Field, model_validator
@@ -18,11 +20,16 @@ from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
 from qavf.redaction import exception_details
 from qavf.rules._coordinate_sql import PROBLEMS, coordinate_problem_sql
+from qavf.rules._execution import normalized_plan
 from qavf.rules._predicates import row_tests
 from qavf.rules._row_summary import row_aliases, summarize_rows
 from qavf.rules.helpers import fresh_internal, missing_expr, outcome, plural, present, usable
 from qavf.settings import NumericBound, QAVFSettings
 from qavf.sources.sql import quote_identifier
+from qavf.spatial.assign import AssignmentPolicy, assign
+from qavf.spatial.crs import DEFAULT_CRS
+from qavf.spatial.extension import spatial_connection
+from qavf.spatial.layers import ZoneLayer, load_zones
 
 CATEGORY = "spatial"
 
@@ -55,6 +62,12 @@ class PointSet(RuleParams):
     """Rows without coordinates are allowed (by default they are violations)."""
     null_island: bool = True
     """Flag (0, 0), the usual sign of a missing value written as zero."""
+    within: ZoneLayer | None = None
+    """Points must fall inside these polygons (a zone layer or study area, in EPSG:4326
+    or transformed from its ``crs``); valid points outside are violations of a separate
+    ``within`` check. Needs DuckDB's spatial extension."""
+    boundary: Literal["intersects", "contains"] = "intersects"
+    """Whether a point on the boundary of ``within`` is inside (``intersects``)."""
 
     def label(self) -> str:
         return self.name or f"{self.dataset}({self.latitude}, {self.longitude})"
@@ -73,7 +86,8 @@ class CoordinateRule(Rule):
     name: ClassVar[str] = "Coordinate validity"
     description: ClassVar[str] = (
         "Latitudes lie in [-90, 90] and longitudes in [-180, 180], coordinates are present "
-        "and finite, not (0, 0), and inside the configured bounding box."
+        "and finite, not (0, 0), inside the configured bounding box and, with 'within', inside "
+        "the polygons of a zone layer or study area."
     )
     category: ClassVar[str] = CATEGORY
     default_severity: ClassVar[Severity] = Severity.ERROR
@@ -85,29 +99,85 @@ class CoordinateRule(Rule):
     Params: ClassVar[type[RuleParams]] = CoordinateParams
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements:
-        return DataRequirements(frozenset(point.dataset for point in self.params.points))
+        layers = (point.within.datasets() for point in self.params.points if point.within)
+        return DataRequirements(
+            frozenset(point.dataset for point in self.params.points).union(*layers)
+        )
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         failures: list[Finding] = []
         passed: list[str] = []
         for points in self.params.points:
-            try:
-                finding = self._check(ctx, points)
-            except Exception as exc:
-                finding = Finding.unassessed(
-                    f"Not assessed: {points.label()}: {exception_details(exc)}.",
-                    check=points.label(),
-                    datasets=(points.dataset,),
-                )
-            if finding is None:
-                passed.append(points.label())
-            else:
-                failures.append(finding)
+            checks = [(points.label(), self._check)]
+            if points.within is not None:
+                checks.append((f"{points.label()} within {points.within.label()}", self._within))
+            for label, check in checks:
+                try:
+                    finding = check(ctx, points)
+                except Exception as exc:
+                    finding = Finding.unassessed(
+                        f"Not assessed: {label}: {exception_details(exc)}.",
+                        check=label,
+                        datasets=(points.dataset,),
+                    )
+                if finding is None:
+                    passed.append(label)
+                else:
+                    failures.append(finding)
+        noun = "check" if any(p.within for p in self.params.points) else "point set"
         return outcome(
             failures,
             passed,
-            f"{plural(len(passed), 'point set')} valid.",
+            f"{plural(len(passed), noun)} valid.",
             "No coordinate columns are configured.",
+        )
+
+    def _within(self, ctx: DataContext, points: PointSet) -> Finding | None:
+        """Valid points outside the ``within`` polygons (one native point-in-polygon pass)."""
+        assert points.within is not None
+        label = f"{points.label()} within {points.within.label()}"
+        columns = (points.latitude, points.longitude)
+        if reason := usable(ctx, points.dataset, columns):
+            return Finding.unassessed(
+                f"Not assessed: {label}: {reason}.", check=label, datasets=(points.dataset,)
+            )
+        with ctx.observe(points.dataset, list(dict.fromkeys(columns))) as observation:
+            plan = normalized_plan(ctx, points.dataset, observation.scan())
+            lat, lon = (pl.col(c).cast(pl.Float64) for c in columns)
+            # Missing, non-finite and out-of-range coordinates are the coordinate check's.
+            valid = lat.is_finite() & lon.is_finite() & lat.is_between(-90, 90)
+            plan = plan.filter((valid & lon.is_between(-180, 180)).fill_null(False))
+            zone = fresh_internal("zone", columns)
+            policy = AssignmentPolicy(predicate=points.boundary, overlap="first")
+            with spatial_connection(ctx) as con:
+                layer = load_zones(con, ctx, points.within)
+                assigned = assign(
+                    plan,
+                    con,
+                    layer,
+                    policy,
+                    column=zone,
+                    crs=DEFAULT_CRS,
+                    collect=observation.collect,
+                    x=points.longitude,
+                    y=points.latitude,
+                )
+            if not assigned.unassigned:
+                return None
+            outside = assigned.plan.filter(pl.col(zone).is_null()).drop(zone)
+            sample = observation.collect(
+                outside.sort(list(dict.fromkeys(columns))).head(ctx.evidence_limit)
+            )
+        return Finding.fail(
+            f"{label}: {plural(assigned.unassigned, 'row')} of {assigned.rows:,} with valid "
+            f"coordinates lie outside the zones.",
+            check=label,
+            affected=sample,
+            affected_count=assigned.unassigned,
+            total_records=assigned.rows,
+            unit="rows",
+            metrics={"notes": list(layer.notes)} if layer.notes else {},
+            datasets=(points.dataset, *points.within.datasets()),
         )
 
     def _check(self, ctx: DataContext, points: PointSet) -> Finding | None:

@@ -41,6 +41,7 @@ from qavf.rules.helpers import (
     usable,
 )
 from qavf.settings import QAVFSettings
+from qavf.spatial.layers import ZoneLayer
 from qavf.stats import (
     DEFAULT_THRESHOLDS,
     OutlierMethod,
@@ -836,13 +837,28 @@ class CoverageParams(RuleParams):
     ``reference_dataset`` if set, otherwise the union across datasets."""
     reference_dataset: str | None = None
     """Authoritative entity list (e.g. a site inventory), read from its entity column."""
+    zone_layer: ZoneLayer | None = None
+    """Expected entities are the ids of this zone layer (``{dataset: zones, id: taz}`` or
+    ``{path: zones.geojson, id: taz}``); only ``ST_Read`` files need DuckDB's spatial
+    extension."""
     datasets: tuple[str, ...] | None = None
     require_time_column: bool = False
     """With ``time_column``: a checked dataset without it is not assessed, instead of
     being checked for entities only (so losing the column cannot weaken the check)."""
     unexpected_entities: bool = False
-    """Also report entities that are not expected (with ``expected_entities`` or
-    ``reference_dataset``): coverage then means the same set, not only a superset."""
+    """Also report entities that are not expected (with ``expected_entities``,
+    ``reference_dataset`` or ``zone_layer``): coverage then means the same set, not
+    only a superset."""
+
+    @model_validator(mode="after")
+    def _one_expectation(self) -> CoverageParams:
+        others = self.expected_entities is not None or self.reference_dataset is not None
+        if self.zone_layer is not None and others:
+            raise ValueError(
+                "'zone_layer' gives the expected entities; it cannot be combined with "
+                "'expected_entities' or 'reference_dataset'"
+            )
+        return self
 
 
 class CoverageRule(Rule):
@@ -866,11 +882,13 @@ class CoverageRule(Rule):
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements | None:
         if self.params.datasets is None:
             return None  # Auto-discovery includes caller-supplied frames.
+        layer = self.params.zone_layer
         return DataRequirements(
             frozenset(
                 (
                     *self.params.datasets,
                     *([self.params.reference_dataset] if self.params.reference_dataset else []),
+                    *(layer.datasets() if layer is not None else ()),
                 )
             )
         )

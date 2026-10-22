@@ -15,6 +15,7 @@ from qavf.rules._domains import align_domains, count, count_sample, union_domain
 from qavf.rules._execution import normalized_plan
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import fresh_internal, plural, usable
+from qavf.spatial.layers import zone_ids
 
 if TYPE_CHECKING:
     from qavf.rules.spatial_checks import CoverageParams
@@ -49,6 +50,8 @@ def evaluate_coverage(ctx: DataContext, params: CoverageParams) -> list[Finding]
             unavailable(name, exc)
     if params.reference_dataset is not None:
         targets.pop(params.reference_dataset, None)
+    if params.zone_layer is not None and params.zone_layer.dataset is not None:
+        targets.pop(params.zone_layer.dataset, None)
     if not targets:
         return blocked or [Finding.unassessed("Not assessed: no target datasets remain.")]
 
@@ -101,6 +104,9 @@ def evaluate_coverage(ctx: DataContext, params: CoverageParams) -> list[Finding]
         try:
             if params.expected_entities is not None:
                 expected = explicit(params.expected_entities, "entities", column)
+            elif params.zone_layer is not None:
+                ids = zone_ids(ctx, params.zone_layer).alias(column)
+                expected = ids.to_frame().lazy()
             elif params.reference_dataset is not None:
                 if params.reference_dataset not in plans:
                     raise ValueError("reference dataset is unavailable")
@@ -130,7 +136,9 @@ def evaluate_coverage(ctx: DataContext, params: CoverageParams) -> list[Finding]
         records: list[dict[str, Any]] = []
         failures = checks = 0
         strict = params.unexpected_entities and (
-            params.expected_entities is not None or params.reference_dataset is not None
+            params.expected_entities is not None
+            or params.reference_dataset is not None
+            or params.zone_layer is not None
         )
         for name, timed in targets.items():
             try:

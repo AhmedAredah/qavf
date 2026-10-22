@@ -454,7 +454,7 @@ A tolerance for one column of a baseline comparison.
 
 **Coordinate validity** · default severity `ERROR`
 
-Latitudes lie in [-90, 90] and longitudes in [-180, 180], coordinates are present and finite, not (0, 0), and inside the configured bounding box.
+Latitudes lie in [-90, 90] and longitudes in [-180, 180], coordinates are present and finite, not (0, 0), inside the configured bounding box and, with 'within', inside the polygons of a zone layer or study area.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -473,6 +473,8 @@ Latitude/longitude columns of a dataset (WGS 84 degrees).
 | `bbox` | `BoundingBox \| None` | `None` | Points outside this box are violations (e.g. the study area). |
 | `allow_missing` | `bool` | `False` | Rows without coordinates are allowed (by default they are violations). |
 | `null_island` | `bool` | `True` | Flag (0, 0), the usual sign of a missing value written as zero. |
+| `within` | `ZoneLayer \| None` | `None` | Points must fall inside these polygons (a zone layer or study area, in EPSG:4326 or transformed from its ``crs``); valid points outside are violations of a separate ``within`` check. Needs DuckDB's spatial extension. |
+| `boundary` | `Literal['intersects', 'contains']` | `intersects` | Whether a point on the boundary of ``within`` is inside (``intersects``). |
 
 #### `BoundingBox`
 
@@ -484,6 +486,20 @@ The area all points must fall in (inclusive), in degrees.
 | `max_lat` | `int \| Decimal \| float` | **required** |  |
 | `min_lon` | `int \| Decimal \| float` | **required** |  |
 | `max_lon` | `int \| Decimal \| float` | **required** |  |
+
+#### `ZoneLayer`
+
+Zone polygons: ``{dataset: name}`` or ``{path: file}``, with an ``id`` column.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dataset` | `str \| None` | `None` | A configured dataset holding the zones (an id and a WKB or WKT geometry column). |
+| `path` | `str \| None` | `None` | A local GeoParquet, GeoJSON, shapefile or other ``ST_Read`` file (relative to the configuration). |
+| `id` | `str` | `zone` | Zone id column. |
+| `geometry` | `str \| None` | `None` | Geometry column: ``geometry`` for datasets and GeoParquet, ``geom`` for ``ST_Read``. |
+| `crs` | `str` | `EPSG:4326` | CRS of the polygons; a file declaring another one is refused. |
+| `layer` | `str \| None` | `None` | Layer of a multi-layer file (``ST_Read``'s ``layer``). |
+| `repair` | `bool` | `False` | Replace invalid geometries with ``ST_MakeValid`` (recorded) instead of refusing them. |
 
 *When it fails:* Out-of-range latitudes usually mean latitude and longitude were swapped, or a projected coordinate (metres) was stored as degrees; (0, 0) is almost always a missing location written as zero.
 
@@ -588,9 +604,24 @@ Each dataset with the entity column contains every expected entity, in every per
 | `expected_periods` | `tuple[Any, ...] \| None` | `None` | Periods every time-indexed dataset must cover; the union of periods found across the checked datasets when omitted. |
 | `expected_entities` | `tuple[Any, ...] \| None` | `None` | Entities every dataset must cover. When omitted: the entities of ``reference_dataset`` if set, otherwise the union across datasets. |
 | `reference_dataset` | `str \| None` | `None` | Authoritative entity list (e.g. a site inventory), read from its entity column. |
+| `zone_layer` | `ZoneLayer \| None` | `None` | Expected entities are the ids of this zone layer (``{dataset: zones, id: taz}`` or ``{path: zones.geojson, id: taz}``); only ``ST_Read`` files need DuckDB's spatial extension. |
 | `datasets` | `tuple[str, ...] \| None` | `None` |  |
 | `require_time_column` | `bool` | `False` | With ``time_column``: a checked dataset without it is not assessed, instead of being checked for entities only (so losing the column cannot weaken the check). |
-| `unexpected_entities` | `bool` | `False` | Also report entities that are not expected (with ``expected_entities`` or ``reference_dataset``): coverage then means the same set, not only a superset. |
+| `unexpected_entities` | `bool` | `False` | Also report entities that are not expected (with ``expected_entities``, ``reference_dataset`` or ``zone_layer``): coverage then means the same set, not only a superset. |
+
+#### `ZoneLayer`
+
+Zone polygons: ``{dataset: name}`` or ``{path: file}``, with an ``id`` column.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `dataset` | `str \| None` | `None` | A configured dataset holding the zones (an id and a WKB or WKT geometry column). |
+| `path` | `str \| None` | `None` | A local GeoParquet, GeoJSON, shapefile or other ``ST_Read`` file (relative to the configuration). |
+| `id` | `str` | `zone` | Zone id column. |
+| `geometry` | `str \| None` | `None` | Geometry column: ``geometry`` for datasets and GeoParquet, ``geom`` for ``ST_Read``. |
+| `crs` | `str` | `EPSG:4326` | CRS of the polygons; a file declaring another one is refused. |
+| `layer` | `str \| None` | `None` | Layer of a multi-layer file (``ST_Read``'s ``layer``). |
+| `repair` | `bool` | `False` | Replace invalid geometries with ``ST_MakeValid`` (recorded) instead of refusing them. |
 
 *When it fails:* An entity missing from one dataset but present in others is dropped by joins and understates totals. Add its rows, or list 'expected_entities' explicitly if the study area is narrower than the data.
 
