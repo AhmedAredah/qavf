@@ -28,6 +28,8 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - run: uv sync --all-extras --locked
+      # Spatial tests need DuckDB's spatial extension; install it (and the others) once.
+      - run: uv run --no-sync python scripts/verify_release.py extensions
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync mypy qavf scripts
       - run: uv run --no-sync python scripts/generate_docs.py --check

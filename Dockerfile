@@ -16,8 +16,9 @@ RUN set -eu; \
     rm -rf /tmp/dist
 
 USER qavf
-# Pre-install the DuckDB extensions QAVF sources use, so runs need no network access.
-RUN python -c "import duckdb; c = duckdb.connect(); [c.execute(f'INSTALL {name}') for name in ('httpfs', 'aws', 'azure', 'excel', 'postgres', 'mysql', 'sqlite')]"
+# Pre-install the DuckDB extensions QAVF sources and spatial checks use, so runs need no
+# network access (spatial: zone layers, point-in-polygon, CRS transforms).
+RUN python -c "import duckdb; c = duckdb.connect(); [c.execute(f'INSTALL {name}') for name in ('httpfs', 'aws', 'azure', 'excel', 'postgres', 'mysql', 'sqlite', 'spatial')]"
 
 WORKDIR /work
 ENTRYPOINT ["qavf"]

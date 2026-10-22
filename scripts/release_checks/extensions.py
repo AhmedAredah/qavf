@@ -42,7 +42,7 @@ def bootstrap_httpfs(connection: Any) -> None:
 def install_extensions(live: bool = False) -> None:
     import duckdb
 
-    names = ("excel", "sqlite") + (("postgres", "httpfs", "azure") if live else ())
+    names = ("excel", "sqlite", "spatial") + (("postgres", "httpfs", "azure") if live else ())
     with duckdb.connect() as connection:
         for name in names:
             canonical = {"sqlite": "sqlite_scanner", "postgres": "postgres_scanner"}.get(name, name)
