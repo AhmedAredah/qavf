@@ -21,7 +21,7 @@ from qavf.engine.registry import RuleRegistry
 from qavf.sources.base import SourceRegistry
 
 if TYPE_CHECKING:
-    from qavf.compare.registry import ComponentRegistry
+    from qavf.plugins.registry import ComponentRegistry
 
 
 def _type_name(annotation: Any) -> str:

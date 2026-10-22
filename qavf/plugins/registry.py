@@ -1,13 +1,13 @@
 """Named components and their discovery from code and entry points.
 
-Comparison components (``qavf.compare``) each live in one
-:class:`ComponentRegistry`. Built-ins
+Comparison components (``qavf.compare``) and statistical tests
+(``qavf.inference``) each live in one :class:`ComponentRegistry`. Built-ins
 register with the same public decorator plugins use; installed distributions
 add components through the registry's entry-point group. Discovery follows rule
 and source discovery: duplicate entry-point names are rejected before loading,
 a failing plugin is recorded (never silently dropped) and leaves no partial
 registration, and ``plugins.required`` can insist on a component
-(``compare.levels:name``).
+(``compare.levels:name``, ``inference.tests:name``).
 
 Lookups never import installed plugin code. Entry points load only through
 :func:`entry_point_scope` (driven by ``plugins.entry_points``, or the
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _INSTALLED: ContextVar[bool] = ContextVar("qavf_component_entry_points", default=False)
 
-FAMILIES = ("qavf.compare.registry",)
+FAMILIES = ("qavf.compare.registry", "qavf.inference.registry")
 """Modules whose ``registries()`` provide the built-in component registries."""
 
 

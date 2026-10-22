@@ -3,8 +3,8 @@
 Alignment steps, measures, comparators and levels each live in one
 :class:`ComponentRegistry` reading a ``qavf.compare.*`` entry-point group. The
 registry, its discovery transactions and the ``plugins.entry_points`` scope are
-the shared machinery of :mod:`qavf.plugins.registry`, which other component
-families use as well; this module keeps the comparison names.
+the shared machinery of :mod:`qavf.plugins.registry`, which statistical tests
+(:mod:`qavf.inference`) use as well; this module keeps the comparison names.
 """
 
 from __future__ import annotations
