@@ -19,11 +19,12 @@ pass for a check it could not assess.
 - **Regression testing.** Keyed, tolerance-aware comparison against accepted baselines,
   usable from pytest.
 - **Dataset comparison.** Compare two versions of a dataset whose columns, types,
-  units or codes differ: structure, key coverage, record-level changes and grouped
-  measures, each judged against a tolerance.
+  units or codes differ: structure, key coverage, record-level changes, grouped
+  measures and time series, a difference failing when it is both material (beyond a
+  tolerance) and statistically significant.
 - **Reports and CI gates.** HTML and JSON reports, deterministic evidence and exit codes.
-- **Extensible.** Rules, sources and comparison levels, measures and comparators are
-  plain classes discovered from packages, files or entry points.
+- **Extensible.** Rules, sources, comparison levels, measures, comparators and
+  statistical tests are plain classes discovered from packages, files or entry points.
 
 ## Install
 
@@ -213,9 +214,10 @@ print(result.summary())
 
 Each level reports graded checks with exact counts and bounded evidence: columns
 added or removed (with suggested renames), keys on one side only, changed values per
-column with their largest differences, and material changes of grouped measures. A
-lossy cast or a missing mapped column makes the comparison not assessed, never a
-pass. In a configuration, `CMP-001` compares configured datasets. See
+column with their largest differences, and changes of grouped measures that are
+material and statistically significant (with p-values, effects and intervals; the
+`stats` extra, or `decision="material"` for tolerances alone). A lossy cast or a
+missing mapped column makes the comparison not assessed, never a pass. In a configuration, `CMP-001` compares configured datasets. See
 [dataset comparison](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison.md).
 
 ## CLI
