@@ -211,7 +211,9 @@ Contracts:
 - **Steps** transform one side's lazy relation (`sides` limits which) and refuse with
   `context.refuse(...)`/`AlignmentError` (or `context.require_none(plan, predicate,
   message)` for a data proof). A refusal makes the comparison not assessed; never
-  coerce silently.
+  coerce silently. A step that changes the data in a way the configuration alone does
+  not say (rows it was asked to drop) records it with `context.note(message)`; notes
+  follow the step descriptions in `DatasetComparison.alignment`.
 - **Measures** reduce `data.relation` (a scoped relation over the aligned side) per
   `data.keys` group without collecting rows: use `grouped_reduce`, `grouped_aggregate`,
   `grouped_mean`, `grouped_quantile` (`qavf.rules._grouped`) or `exact_grouped`.
@@ -224,6 +226,13 @@ Contracts:
   subclass set as `Result`, which is also used to read the result back from JSON)
   with graded `CheckResult`s. Raise for anything that cannot be assessed. Override
   `configuration_errors(spec)` for problems visible in the configuration alone.
+  A level that compares keyed reductions builds on the built-in ones instead of
+  reducing again: `reduce_groups(inputs, keys, measures, relations)`,
+  `one_sided_check` and `compare_measure` (`qavf.compare.levels.groups`) reduce,
+  align and judge any keys, and `bucketed_sides(inputs, params)`
+  (`qavf.compare.levels.temporal`) adds time-bucket labels to both sides. The
+  bucketing itself (`bucket_labels`, `bucket_ordinal`, `bucket_grid`, calendar
+  offsets) is `qavf.temporal`, shared with the TMP series rules.
 
 A custom measure and a custom level:
 

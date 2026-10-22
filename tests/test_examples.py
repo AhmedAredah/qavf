@@ -63,13 +63,14 @@ def test_full_example_runs_clean(tmp_path) -> None:
     report = _run(config, frames)
     _assert_clean(report)
     # The configured temporal, spatial and statistical checks were all assessed.
-    for rule_id in ("TMP-001", "SPA-001", "SPA-003", "STA-001"):
+    for rule_id in ("TMP-001", "TMP-004", "SPA-001", "SPA-003", "STA-001"):
         assert report.get(rule_id).status is Status.PASS, rule_id
     assert report.get("TMP-001").total_records == len(STATIONS) * 9
+    assert report.get("TMP-004").total_records == len(STATIONS)  # bucketed datetimes
     # The example comparison ran every configured level and every check passed.
     compared = [r for r in report.results if r.rule_id == "CMP-001"]
     assert {r.check.split(": ")[1] for r in compared} == {
-        "structure", "coverage", "records", "groups"
+        "structure", "coverage", "records", "groups", "temporal", "series_shape"
     }
     assert all(r.status is Status.PASS for r in compared)
 

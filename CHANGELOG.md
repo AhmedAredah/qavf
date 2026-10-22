@@ -21,6 +21,23 @@ All notable changes to this project are documented here. The format follows
   `compare_outputs` and `assert_outputs_match`, `rename` for REG-001 baselines and
   `qavf compare --map OLD=NEW`. Comparison results count changed values per column
   (`column_changes`).
+- Compare datasets over time: the `temporal` level compares measures per calendar
+  bucket (second to year, with multiples such as `15 minutes`) or cyclic profile
+  (hour of day to season) within groups, with one-sided buckets and expected-grid
+  gaps; the `series_shape` level compares each group's series by correlation
+  (Pearson and Spearman), trend slope, cyclic profile, peak timing and size,
+  cross-correlation lag and level shifts; the `shift_time` alignment step compares a
+  version at a shifted time (year over year, same weekday, or a lag). Buckets follow
+  the local calendar of a time zone, so DST days have 23 or 25 hours and the two
+  fall-back hours stay apart; rows that cannot be placed and series too short to
+  judge are not assessed.
+- Bucket the TMP series rules: `bucket`, `time_zone` and `time_format` let TMP-001 to
+  TMP-008 use Date, Datetime and text time columns; numeric time columns behave as
+  before. TMP-004 expects every bucket of the calendar grid of a bucketed series.
+- Add `qavf.temporal` (time buckets, bucket grids and ordinals, calendar offsets as
+  native expressions) and `qavf.statistics.series` (exact least squares, Pearson and
+  Spearman correlation, cross-correlation lags and the level-shift screen).
+- Comparison steps can record data-dependent outcomes with `AlignmentContext.note`.
 - Add general exact helpers: checked casts and exact scaling (`qavf.typed_values`),
   exact quantile interpolation (`qavf.statistics.ordered`), grouped exact means and
   quantiles, and byte-bounded evidence collection.

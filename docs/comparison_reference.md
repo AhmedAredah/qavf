@@ -68,6 +68,112 @@ Rows added, removed, changed and unchanged, with per-column change detail.
 | `max_transitions` | `int` | `20` | Most frequent value transitions kept per categorical column. |
 | `categorical` | `tuple[str, ...] \| None` | `None` | Columns whose value transitions are counted; text, categorical and boolean columns when omitted. |
 
+### `series_shape`
+
+Correlation, trend, profile, peak, lag and level-shift differences per series.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `time_column` | `str` | **required** | Date, Datetime, text (with ``time_format``) or numeric period column. |
+| `group_by` | `tuple[str, ...]` | `[]` | One series per combination of these columns. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `max_buckets` | `int` | `1000000` | Largest expected bucket grid; a longer one is not assessed. |
+| `measure` | `MeasureSpec` | `{'measure': 'count', 'column': None, 'name': None, 'comparators': ['diff', 'rel_diff'], 'rtol': None, 'atol': None, 'exact': False, 'params': {}}` | The series value per bucket (``sum(x)``, ``mean(x)``, ...; rows by default). |
+| `min_buckets` | `int` | `4` | Fewest buckets both sides must have for a series to be assessed. |
+| `missing_series` | `Literal['fail', 'ignore']` | `fail` | A series (group) on one side only: a difference or left out. |
+| `correlation` | `CorrelationCheck \| None` | `{'min_pearson': 0.9, 'min_spearman': 0.9}` | Pearson and Spearman correlation; ``null`` leaves the check out (so for each). |
+| `trend` | `TrendCheck \| None` | `{'rtol': 0.1, 'atol': 0.0}` | Least-squares slope per bucket on each side. |
+| `profile` | `ProfileCheck \| None` | `None` | Cyclic profile of the buckets (off unless configured). |
+| `peak` | `PeakCheck \| None` | `{'max_shift': 0, 'rtol': 0.1, 'atol': 0.0}` | Peak timing and magnitude. |
+| `lag` | `LagCheck \| None` | `{'max_lag': 3, 'allowed': 0}` | Best cross-correlation lag. |
+| `level_shift` | `LevelShiftCheck \| None` | `{'min_segment': 4, 'threshold': 5.0, 'min_relative_shift': 0.2, 'max_offset': 0}` | Level shifts present in only one version. |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
+
+#### `MeasureSpec`
+
+A measure and how its change is judged: ``sum(x)``-style or a mapping.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `measure` | `str` | **required** |  |
+| `column` | `str \| None` | `None` |  |
+| `name` | `str \| None` | `None` | Label in reports; ``measure(column)`` when omitted. |
+| `comparators` | `tuple[str, ...]` | `('diff', 'rel_diff')` |  |
+| `rtol` | `float \| None` | `None` | Relative tolerance; the column's, then the level's, then the comparison's. |
+| `atol` | `float \| None` | `None` |  |
+| `exact` | `bool` | `False` |  |
+| `params` | `dict[str, Any]` | `{}` |  |
+
+#### `CorrelationCheck`
+
+Both correlations must reach their minimum (``null`` skips one).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `min_pearson` | `float \| None` | `0.9` | Lowest Pearson correlation of the paired bucket values. |
+| `min_spearman` | `float \| None` | `0.9` | Lowest Spearman (rank) correlation. |
+
+#### `TrendCheck`
+
+The slopes differ materially beyond ``max(atol, rtol * max(\|b\|, \|c\|))``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `rtol` | `float` | `0.1` | Relative tolerance of the least-squares slopes (change per bucket). |
+| `atol` | `float` | `0.0` |  |
+
+#### `ProfileCheck`
+
+Cyclic profiles (mean per position, normalized) may differ by ``max_distance``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `profile` | `Bucket` | **required** | A cyclic profile of the buckets: ``hour_of_day``, ``day_of_week``, ``month_of_year``... |
+| `max_distance` | `float` | `0.05` | Largest half-sum of absolute share differences (0: identical, 1: disjoint). |
+
+#### `PeakCheck`
+
+The peaks fall within ``max_shift`` buckets and agree in magnitude.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_shift` | `int` | `0` | Buckets the candidate's peak may move (around the cycle for profiles). |
+| `rtol` | `float` | `0.1` | Relative tolerance of the peak values. |
+| `atol` | `float` | `0.0` |  |
+
+#### `LagCheck`
+
+The best-correlated lag within ``max_lag`` buckets is at most ``allowed``.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `max_lag` | `int` | `3` | Lags searched in each direction (cross-correlation of the two series). |
+| `allowed` | `int` | `0` | Largest acceptable best lag. |
+
+#### `LevelShiftCheck`
+
+Level shifts (TMP-008's screen) appear on both sides, at most ``max_offset`` apart.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `min_segment` | `int` | `4` | Fewest buckets on each side of a candidate shift. |
+| `threshold` | `float` | `5.0` | Gap in medians, in pooled robust spreads, that makes a shift. |
+| `min_relative_shift` | `float` | `0.2` | Also require the medians to differ by this fraction of the earlier one. |
+| `max_offset` | `int` | `0` | Buckets between the two sides' shifts still counted as the same shift. |
+
 ### `structure`
 
 Columns added/removed, types, units, nullability, rows and key uniqueness.
@@ -92,6 +198,54 @@ A tolerance for one column of a baseline comparison.
 | `rtol` | `float \| None` | `None` | Relative tolerance; the baseline's (or rule's) when omitted. |
 | `atol` | `float \| None` | `None` | Absolute tolerance; the baseline's (or rule's) when omitted. |
 | `exact` | `bool` | `False` | Compare exactly (no tolerance), e.g. for identifiers or categorical codes. |
+
+### `temporal`
+
+Measures per time bucket compared, with one-sided buckets and grid gaps.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `time_column` | `str` | **required** | Date, Datetime, text (with ``time_format``) or numeric period column. |
+| `group_by` | `tuple[str, ...]` | `[]` | One series per combination of these columns. |
+| `bucket` | `Bucket \| None` | `None` | Calendar bucket or cyclic profile of a Date/Datetime time column (``day``, ``15 minutes``, ``month``, ``hour_of_day``, ...). Without it, time values are used as they are (a numeric period such as a year). |
+| `time_zone` | `str \| None` | `None` | IANA zone of the local calendar: naive times are wall-clock times there, aware times are converted to it. Aware columns default to their own zone. |
+| `time_format` | `str \| None` | `None` | ``strftime`` format for parsing a text time column (unparseable values are reported, never dropped). |
+| `max_buckets` | `int` | `1000000` | Largest expected bucket grid; a longer one is not assessed. |
+| `measures` | `tuple[MeasureSpec, ...]` | `(MeasureSpec(measure='count', column=None, name=None, comparators=('diff', 'rel_diff'), rtol=None, atol=None, exact=False, params={}),)` | Measures compared per bucket (``count``, ``sum(x)``, ``mean(x)``, ...). |
+| `missing_buckets` | `Literal['fail', 'ignore']` | `fail` | A (group, bucket) present on one side only: a difference or left out. |
+| `gaps` | `bool` | `True` | Report buckets of the expected calendar grid that a side lacks. |
+| `allow_gaps` | `bool` | `False` | Report gaps without failing. |
+| `start` | `int \| Decimal \| float \| datetime \| date \| None` | `None` | First bucket searched for gaps (a date or time; the sides' common span by default). |
+| `end` | `int \| Decimal \| float \| datetime \| date \| None` | `None` |  |
+| `rtol` | `float \| None` | `None` | Default relative tolerance of this level; the comparison's when omitted. |
+| `atol` | `float \| None` | `None` |  |
+
+#### `Bucket`
+
+A calendar bucket (``day``, ``15 minutes``, ``6h``) or a cyclic profile (``season``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `unit` | `Literal['second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'hour_of_day', 'day_of_week', 'day_of_year', 'month_of_year', 'quarter_of_year', 'season']` | **required** | ``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``, ``year``, or a profile: ``hour_of_day``, ``day_of_week``, ``day_of_year``, ``month_of_year``, ``quarter_of_year``, ``season``. |
+| `every` | `int` | `1` | Multiple of a calendar unit (``{unit: minute, every: 15}``). |
+| `week_start` | `Literal['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']` | `monday` | First day of a ``week`` bucket, and of the ``day_of_week`` order. |
+| `hemisphere` | `Literal['north', 'south']` | `north` | Names of the meteorological seasons (December-February is winter in the north). |
+| `seasons` | `dict[str, tuple[int, ...]] \| None` | `None` | Custom seasons, ``name: [months]`` in cycle order, covering each month once. |
+
+#### `MeasureSpec`
+
+A measure and how its change is judged: ``sum(x)``-style or a mapping.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `measure` | `str` | **required** |  |
+| `column` | `str \| None` | `None` |  |
+| `name` | `str \| None` | `None` | Label in reports; ``measure(column)`` when omitted. |
+| `comparators` | `tuple[str, ...]` | `('diff', 'rel_diff')` |  |
+| `rtol` | `float \| None` | `None` | Relative tolerance; the column's, then the level's, then the comparison's. |
+| `atol` | `float \| None` | `None` |  |
+| `exact` | `bool` | `False` |  |
+| `params` | `dict[str, Any]` | `{}` |  |
 
 ## Measures
 
@@ -278,6 +432,33 @@ Replace categorical values, e.g. codes renamed between versions.
 | `values` | `dict[str, Any] \| list[tuple[Any, Any]]` | **required** | ``old: new`` (mapping keys are text; they are converted to the column type) or a list of ``[old, new]`` pairs for typed old values. |
 | `side` | `Literal['baseline', 'candidate', 'both']` | `baseline` |  |
 | `unmapped` | `Literal['keep', 'null', 'error']` | `keep` | Values without a mapping: kept (when losslessly representable), made null, or reported (the comparison is then not assessed). |
+
+### `shift_time`
+
+Move one side's time column by a calendar offset (year over year, week over week).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `column` | `str` | **required** | Time column (a Date or Datetime) to shift. |
+| `offset` | `CalendarOffset` | **required** | How far the candidate is ahead of the baseline, e.g. ``{years: 1}`` to compare 2025 with 2024, ``{weeks: 1}``, or ``{years: 1, same_weekday: true}`` (364 days). |
+| `side` | `Literal['baseline', 'candidate']` | `candidate` | The side whose time moves: the candidate back by ``offset``, or the baseline forward by it. |
+| `time_zone` | `str \| None` | `None` | Zone whose wall clock calendar offsets follow (naive times are local there); aware columns default to their own zone. |
+| `unaligned` | `Literal['error', 'drop']` | `error` | Rows without an exact counterpart (29 February a year earlier, a local time a DST change skips or repeats): refuse the alignment, or drop them (counted in the alignment record). |
+
+#### `CalendarOffset`
+
+How far one dataset's time is ahead of the other's (``{years: 1}``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `years` | `int` | `0` | Calendar years on the local wall clock (29 February has no counterpart). |
+| `months` | `int` | `0` | Calendar months (a 31st without a counterpart is reported, never clamped). |
+| `weeks` | `int` | `0` |  |
+| `days` | `int` | `0` | Calendar days: the same local time of day, across DST changes. |
+| `hours` | `int` | `0` | Elapsed hours of physical time (so are minutes and seconds). |
+| `minutes` | `int` | `0` |  |
+| `seconds` | `int` | `0` |  |
+| `same_weekday` | `bool` | `False` | Count each year as 52 weeks (364 days), keeping the weekday. |
 
 ### `units`
 

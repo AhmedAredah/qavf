@@ -149,6 +149,14 @@ rules:
            aggregate: mean}           # sum (default) | mean | count | min | max | first | last
                                       # (order_by) | weighted_mean (weight) | none
 
+  TMP-004:                            # every station has every calendar day
+    params:
+      series:
+        - {dataset: readings, value: value, group_by: [station], time_column: timestamp,
+           bucket: day,               # a Date/Datetime/text column needs a bucket: second ...
+           time_zone: UTC,            # year (with multiples: 15 minutes), or a cyclic profile
+           aggregate: count}          # hour_of_day ... season; naive times are local here
+
   SPA-001:
     params:
       method: modified_zscore         # zscore | modified_zscore | iqr
@@ -193,6 +201,7 @@ rules:
           ignore_columns: [day_number]  # only in the baseline
           # cast: {code: str}  recode: {fc: {values: {"1": interstate}}}
           # derive: {total: "a + b"}  baseline_where / candidate_where / where: SQL
+          # steps: [{step: shift_time, column: day, offset: {years: 1}}]  # year over year
           rtol: 1.0e-9                  # default tolerance; per column: tolerances
           levels:
             - structure                 # columns, types, units, nullability, rows, keys
@@ -203,6 +212,17 @@ rules:
               group_by: [station_id]
               measures: [count, sum(value_milli), {measure: quantile, column: value_milli, p: 0.9}]
               rank: {measure: sum(value_milli), top_k: 3}
+            - level: temporal           # measures per calendar bucket; gaps in the grid
+              time_column: day
+              bucket: week              # day | 15 minutes | month | hour_of_day | season ...
+              group_by: [station_id]
+              measures: [sum(value_milli)]
+            - level: series_shape       # correlation, trend, peak, lag, level shifts
+              time_column: day
+              bucket: day
+              group_by: [station_id]
+              measure: mean(value_milli)
+              lag: {max_lag: 2}         # profile: {profile: day_of_week} compares cycles
 
 # ---------------------------------------------------------------------------
 engine:
