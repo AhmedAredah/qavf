@@ -38,19 +38,17 @@ runtime dependency to the QAVF wheel. The production API remains unchanged.
 | Linux / Python 3.12 / core dependencies only | Installed wheel capability checks, normal and optimized Python |
 | Linux / Python 3.12 / live integration dependencies | Required HTTP, PostgreSQL and S3-compatible service tests |
 
-The included [CI workflow](../.github/workflows/ci.yml) runs on pushes, pull
-requests and manual dispatch. Every matrix member runs `verify_platform.py`:
-full source and isolated installed-wheel suites in normal and optimized Python,
-with distribution validation and signed extension preparation. Linux 3.12 also
-captures branch/subprocess coverage and checks lint, types, generated docs and
-a separately installed core-only wheel. Matrix jobs do not fail fast; completed
-evidence and distributions are uploaded even after failure. The workflow has
-read-only repository permissions and does not publish packages.
+The routine [CI workflow](../.github/workflows/ci.yml) runs on pushes to `main`,
+pull requests and manual dispatch, skipping documentation-only changes. It checks
+lint, types and generated docs and runs the source suite on Linux 3.12, plus the
+platform-specific tests on Windows and macOS. It has read-only repository
+permissions and does not publish packages.
 
-The workflow has not been executed on GitHub Actions as part of this local
-review. Actual Windows and macOS runs remain required. Dependency floors and
-live integrations use the separate procedures below. A green routine CI run
-does not replace the complete aggregate gate.
+The [release workflow](../.github/workflows/verify.yml) runs the complete matrix
+above on each `v*` tag, including dependency floors, the core-only wheel and live
+integrations, and publishes only when the aggregate gate passes. A green routine
+CI run does not replace the complete aggregate gate. Each host can also run its
+full share locally with `scripts/verify_platform.py` (see below).
 
 Each record identifies the source digest, lockfile digest, Git revision (when
 available), CI run/attempt, dependency versions, OS, Python version, optimization
