@@ -18,13 +18,21 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
+from heapq import nsmallest
 from typing import Any, ClassVar, Literal, Protocol
 
 import polars as pl
 from pydantic import Field, model_validator
 
 from qavf.compare.comparators import COMPARATORS, ComparatorContext, Materiality
-from qavf.compare.levels import SIDES, ComparisonLevel, LevelInputs, graded, register_level
+from qavf.compare.levels import (
+    SIDES,
+    ComparisonLevel,
+    LevelInputs,
+    graded,
+    not_assessed,
+    register_level,
+)
 from qavf.compare.measures import MEASURES, Measure, MeasureInput
 from qavf.compare.results import (
     CheckResult,
@@ -49,10 +57,12 @@ from qavf.compare.significance import (
 from qavf.compare.significance import label as member_label
 from qavf.compare.spec import ComparisonSpec, InferenceParams, Side, TestConfig, _Configured
 from qavf.engine.registry import RuleParams
+from qavf.key_codec import canonical_key
 from qavf.keys import align_keys
 from qavf.numeric import exact_rational, report_number
 from qavf.rules._grouped import ProjectedRelation, grouped_reduce
 from qavf.rules.helpers import BoundedEvidence, LargestEvidence, fresh_internal, plural
+from qavf.typed_values import encode_temporal, has_temporal
 
 
 class MeasureSpec(_Configured):
@@ -158,6 +168,15 @@ class _LevelTolerance(Protocol):
     def atol(self) -> float | None: ...
 
 
+def measure_columns(specs: Sequence[MeasureSpec]) -> set[str]:
+    """Declared source dependencies of built-in or custom grouped measures."""
+    return {
+        column
+        for spec in specs
+        for column in MEASURES.create(spec.measure, spec.params).columns(spec.column)
+    }
+
+
 def materiality(spec: ComparisonSpec, level: _LevelTolerance, measure: MeasureSpec) -> Materiality:
     """The measure's tolerance: its own, the column's, the level's, then the comparison's."""
     if measure.exact:
@@ -173,9 +192,46 @@ def materiality(spec: ComparisonSpec, level: _LevelTolerance, measure: MeasureSp
     )
 
 
+def precise_frame(frame: pl.DataFrame, columns: Sequence[str] | None = None) -> pl.DataFrame:
+    """Protect sub-microsecond identities while preserving ordinary Python dates.
+
+    Python's temporal scalars cannot carry nanoseconds. Encode those logical
+    types consistently, including zero ticks, so labels remain identical across
+    subsets and batches. Other ordinary temporal values keep their public types.
+    """
+    selected = [
+        name
+        for name, dtype in frame.schema.items()
+        if (columns is None or name in columns)
+        and (
+            (isinstance(dtype, pl.Datetime | pl.Duration) and dtype.time_unit == "ns")
+            or dtype == pl.Time
+            or (isinstance(dtype, pl.List | pl.Array | pl.Struct) and has_temporal(dtype))
+        )
+    ]
+    return encode_temporal(frame, selected) if selected else frame
+
+
 def _rows(frame: pl.DataFrame, columns: list[str]) -> Iterator[tuple[Any, ...]]:
     for batch in frame.select(columns).iter_slices(16_384):
-        yield from batch.iter_rows()
+        yield from precise_frame(batch).iter_rows()
+
+
+def group_partitions(
+    frame: pl.DataFrame, keys: list[str]
+) -> Iterator[tuple[tuple[Any, ...], pl.DataFrame]]:
+    """Keep native groups distinct before converting their labels to Python.
+
+    ``partition_by(as_dict=True)`` converts temporal keys to Python datetimes,
+    which can merge different nanoseconds. A list of native partitions avoids
+    that conversion; only the bounded key row is encoded for reporting.
+    """
+    if not keys:
+        yield (), frame
+        return
+    for part in frame.partition_by(keys, maintain_order=True):
+        key = precise_frame(part.select(keys).head(1)).row(0)
+        yield key, part
 
 
 @dataclass(frozen=True)
@@ -238,21 +294,23 @@ def reduce_groups(
         needed = [*keys, *(c for spec, m in measures for c in m.columns(spec.column))]
         if absent := sorted({c for c in needed if c not in relation.schema}):
             raise ValueError(f"{side} lacks column(s) {', '.join(absent)}")
-        frame = grouped_reduce(relation, keys, {presence: pl.len().cast(pl.UInt64)})
+        reductions = {presence: pl.len().cast(pl.UInt64)}
+        separate: list[tuple[Measure, MeasureInput]] = []
         for (spec, measure), alias in zip(measures, aliases, strict=True):
             data = MeasureInput(relation, tuple(keys), spec.column, alias, side)
             measure.check(data)
-            values = measure.compute(data).select([*keys, alias])
-            frame = (
-                frame.join(values, on=keys, how="left", nulls_equal=True)
-                if keys
-                else pl.concat([frame, values], how="horizontal")
-            )
+            expression = measure.reduction(data)
+            if expression is None:
+                separate.append((measure, data))
+            else:
+                reductions[alias] = expression
         for extra, named in zip(extras or (), roles, strict=True):
-            if not named:
-                continue
-            reductions = {named[role]: build(relation, bool(keys)) for role, build in extra.items()}
-            values = grouped_reduce(relation, keys, reductions)
+            reductions.update(
+                {named[role]: build(relation, bool(keys)) for role, build in extra.items()}
+            )
+        frame = grouped_reduce(relation, keys, reductions)
+        for measure, data in separate:
+            values = measure.compute(data).select([*keys, data.alias])
             frame = (
                 frame.join(values, on=keys, how="left", nulls_equal=True)
                 if keys
@@ -342,7 +400,7 @@ def one_sided_check(
     evidence = inputs.evidence()
     only_b, only_c = aligned.only_baseline, aligned.only_candidate
     for label, frame in (("only in baseline", only_b), ("only in candidate", only_c)):
-        for record in frame.select(aligned.keys).iter_rows(named=True):
+        for record in precise_frame(frame.select(aligned.keys)).iter_rows(named=True):
             evidence.append({**record, check: label})
     return graded(
         check,
@@ -398,6 +456,8 @@ def compare_measure(
     noun: str = "group",
     plan: MeasureTest | None = None,
     inference: Inference | None = None,
+    *,
+    include_missing: bool = False,
 ) -> tuple[MeasureComparison, CheckResult]:
     """Compare measure ``index`` key by key: comparators, materiality, largest changes.
 
@@ -409,6 +469,16 @@ def compare_measure(
     alias = aligned.aliases[index]
     left, right = aligned.columns["baseline"][alias], aligned.columns["candidate"][alias]
     both, keys = aligned.both, aligned.keys
+    if include_missing:
+        # Additive contributions cover the union: absence means zero, while an
+        # undefined aggregate on a present side remains undefined.
+        both = aligned.joined.with_columns(
+            pl.when(pl.col(aligned.columns[side][aligned.presence]).is_null())
+            .then(pl.lit(0).cast(aligned.joined.schema[column]))
+            .otherwise(pl.col(column))
+            .alias(column)
+            for side, column in zip(SIDES, (left, right), strict=True)
+        )
     comparators = [(name, COMPARATORS.create(name)) for name in spec.comparators]
     context = ComparatorContext()
     if "share_change" in spec.comparators:
@@ -429,9 +499,49 @@ def compare_measure(
     material = 0
     members: list[Member] = []
     changes: list[tuple[list[Any], Any, Any]] = []
+    unmeasured = inputs.evidence()
+
+    def complete(check: CheckResult) -> CheckResult:
+        if not unmeasured.count:
+            return check
+        metrics = {**check.metrics, "not_measured": unmeasured.count}
+        if check.assessed and not check.passed:
+            return check.model_copy(
+                update={
+                    "message": f"{check.message} {unmeasured.count:,} {noun}(s) not measured.",
+                    "metrics": metrics,
+                }
+            )
+        evidence = inputs.evidence()
+        evidence.extend(check.affected_records)
+        evidence.extend(unmeasured.records)
+        evidence.count = check.affected_count + unmeasured.count
+        return check.model_copy(
+            update={
+                "passed": False,
+                "assessed": False,
+                "message": f"Not assessed: {spec.label}: {unmeasured.count:,} {noun}(s) have "
+                "an undefined measure on a present side."
+                + (f" {check.message}" if not check.assessed else ""),
+                "affected_count": evidence.count,
+                "affected_records": evidence.records,
+                "truncated": evidence.truncated,
+                "metrics": metrics,
+            }
+        )
+
     for position, row in enumerate(_rows(both, [*keys, left, right, *extra])):
         key = list(row[: len(keys)])
         before, after = row[len(keys)], row[len(keys) + 1]
+        if before is None or after is None:
+            unmeasured.append(
+                {
+                    **dict(zip(keys, key, strict=True)),
+                    "measure": spec.label,
+                    "reason": "the measure is undefined on a present side",
+                }
+            )
+            continue
         changed = judged.material(before, after)
         material += changed
         if tested:
@@ -458,6 +568,8 @@ def compare_measure(
         rtol=judged.rtol,
         atol=judged.atol,
     )
+    if both.is_empty():
+        return comparison, not_assessed(spec.label, f"no {noun} to compare on both sides")
     tolerance = f"rtol={judged.rtol:g}, atol={judged.atol:g}"
     if not tested:
         evidence = inputs.evidence()
@@ -472,7 +584,7 @@ def compare_measure(
             total=both.height,
             unit=f"{noun}s",
         )
-        return comparison, check
+        return comparison, complete(check)
     assert plan is not None and inference is not None
     judgement = judge(plan, inference, members, inputs.ctx.evidence_limit)
     failed, unassessed = judgement.failed, judgement.unassessed
@@ -531,7 +643,7 @@ def compare_measure(
             metrics=metrics,
         )
     comparison = comparison.model_copy(update={"significance": significance})
-    return comparison, check.model_copy(update={"significance": significance})
+    return comparison, complete(check.model_copy(update={"significance": significance}))
 
 
 def _member(
@@ -567,6 +679,10 @@ class GroupsLevel(ComparisonLevel):
     )
     Params: ClassVar[type[RuleParams]] = GroupsParams
     Result: ClassVar[type[LevelResult]] = GroupsResult
+
+    def required_columns(self) -> frozenset[str]:
+        params: GroupsParams = self.params  # type: ignore[assignment]
+        return frozenset(set(params.group_by) | measure_columns(params.measures))
 
     def evaluate(self, inputs: LevelInputs, name: str) -> GroupsResult:
         params: GroupsParams = self.params  # type: ignore[assignment]
@@ -615,28 +731,31 @@ class GroupsLevel(ComparisonLevel):
     ):
         assert params.rank is not None
         rank = params.rank
-        order = fresh_internal("rank_order", [*group_by, alias])
-        leaders: dict[str, dict[tuple[Any, ...], int]] = {}
+        leaders: dict[str, dict[bytes, int]] = {}
+        labels: dict[bytes, tuple[Any, ...]] = {}
         for side in SIDES:
-            frame = frames[side]
-            ordering = [
-                None if (value := exact_rational(v)) is None else float(value)
-                for v in frame[alias].to_list()
-            ]
-            top = (
-                frame.select(group_by)
-                .with_columns(pl.Series(order, ordering, dtype=pl.Float64))
-                .filter(pl.col(order).is_not_null())
-                .sort(
-                    [order, *group_by],
-                    descending=[rank.descending, *[False] * len(group_by)],
-                    nulls_last=True,
-                )
-                .head(rank.top_k)
-            )
-            leaders[side] = {
-                row: position for position, row in enumerate(top.select(group_by).iter_rows(), 1)
-            }
+            # Sort keys natively first for the documented deterministic tie order.
+            # The heap retains only k exact numeric order keys, never Float64 ranks.
+            frame = frames[side].sort(group_by, nulls_last=True)
+
+            def candidates(source: pl.DataFrame) -> Iterator[tuple[Fraction, int, tuple[Any, ...]]]:
+                for position, row in enumerate(_rows(source, [*group_by, alias])):
+                    value = exact_rational(row[-1])
+                    if value is None:
+                        raise ValueError("a group has an undefined or nonnumeric rank measure")
+                    yield (-value if rank.descending else value), position, tuple(row[:-1])
+
+            try:
+                top = nsmallest(rank.top_k, candidates(frame))
+            except ValueError as exc:
+                return None, not_assessed(f"rank: {rank.measure}", f"{side}: {exc}")
+            if not top:
+                return None, not_assessed(f"rank: {rank.measure}", f"{side} has no groups to rank")
+            leaders[side] = {}
+            for position, row in enumerate(top, 1):
+                key = canonical_key(row[2])
+                labels[key] = row[2]
+                leaders[side][key] = position
         before, after = leaders["baseline"], leaders["candidate"]
         evidence = inputs.evidence()
         entered = [group for group in after if group not in before]
@@ -646,7 +765,7 @@ class GroupsLevel(ComparisonLevel):
             for group in groups:
                 evidence.append(
                     {
-                        **dict(zip(group_by, group, strict=True)),
+                        **dict(zip(group_by, labels[group], strict=True)),
                         "change": change,
                         "baseline_rank": before.get(group),
                         "candidate_rank": after.get(group),

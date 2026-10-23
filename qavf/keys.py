@@ -110,3 +110,30 @@ def align_keys(
     if right_types:
         right = right.cast(right_types)  # type: ignore[arg-type]
     return left, right
+
+
+def cast_key(series: pl.Series, target: pl.DataType) -> pl.Series:
+    """Cast one key to a fixed domain only when every identity is preserved.
+
+    Use the same domain-admission policy as :func:`align_keys`, then prove the
+    requested storage conversion by an exact round trip. ``strict=True`` alone
+    is insufficient: floating-point to integer casts may truncate fractions.
+    """
+    if series.dtype == target:
+        return series
+    key_casts(
+        series.name, series.dtype, target,
+        exact_float=lambda: _integral_and_exact(series),
+    )
+    try:
+        converted = series.cast(target, strict=True)
+        restored = converted.cast(series.dtype, strict=True)
+    except (pl.exceptions.PolarsError, OverflowError, TypeError) as exc:
+        raise KeyTypeError(
+            f"key column {series.name!r} cannot all be represented as {target}"
+        ) from exc
+    if series.dtype != pl.Null and not series.eq_missing(restored).all():
+        raise KeyTypeError(
+            f"key column {series.name!r} cannot be cast losslessly from {series.dtype} to {target}"
+        )
+    return converted

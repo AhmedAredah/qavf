@@ -4,142 +4,83 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-10-23
 
-- Add the `distribution` comparison level: per column and member (group, zone or
-  time bucket), the population stability index over the baseline's quantile bins,
-  Kolmogorov-Smirnov, Anderson-Darling, Wasserstein and Jensen-Shannon distances and
-  quantile deltas for numbers; PSI, Jensen-Shannon, the chi-square (or G) test and
-  categories that appeared or disappeared for categories; thresholds per metric and
-  one corrected family of tests per column.
-- Add the `relationships` level: Pearson and Spearman correlation changes of column
-  pairs (Fisher z of two correlations, corrected), ratio invariants such as
-  `fatal / crashes` per member (Poisson rates), and the agreement of keyed records per
-  column (Bland-Altman bias and limits, Lin's concordance, MAE, RMSE, MAPE, sMAPE, R²
-  and an OLS or Deming fit tested against slope 1 and intercept 0).
-- Add the `contribution` level: each member's contribution to the total change of an
-  additive measure along any dimension (columns, zones, time buckets, combinations),
-  the smallest set of members explaining a share of it, and an exact mix-versus-rate
-  (shift-share, or Kitagawa's symmetric) decomposition of declared rates.
-- Reports show a dataset comparison section for CMP-001: a summary card with the
-  verdict per level, a drill-down with each check's evidence and tests, and inline SVG
-  charts (contribution waterfall, heat map of relative change, distribution overlays
-  and quantile deltas, series lines, a choropleth of zone outlines), bounded by
-  `HtmlLimits.max_chart_points` and `max_chart_bytes` and omitted with a note beyond
-  them. The typed comparison is kept with the first CMP-001 result
-  (`QAReport.comparisons()`), within the evidence limits. `DatasetComparison` gains
-  `write_html`, `write_json` (with disclosed truncation in `omitted`), `bounded` and
-  `verdict`; `qavf compare-datasets BASELINE CANDIDATE -c SPEC` runs a comparison and
-  writes both reports.
-- Shared building blocks: `quantile_cutpoints` and `bin_index` (STA-002's binning, its
-  results unchanged), `population_stability`, `jensen_shannon`, `ks_distance`,
-  `wasserstein` and `quantile_deltas` in `qavf.inference.effects`,
-  `qavf.inference.agreement` (`fit_line`, `identity_test`), a `variance` factor for
-  `compare_correlations`, exact decompositions in `qavf.statistics.decomposition`,
-  `qavf.spatial.outlines`, and for level authors `keyed_sides`, `member_values`,
-  `sample_extras` and `family_check`. Temporal and spatial results keep chart values
-  (`chart_points`), spatial results simplified zone outlines (`map`).
-- Add spatial comparison. `qavf.spatial` holds the shared building blocks: zone layers
-  from a configured dataset (WKB or WKT), GeoParquet, GeoJSON or a shapefile, validated
-  (`ST_IsValid`; invalid geometry is refused unless `repair: true`), with declared CRSs
-  (a file's own CRS must agree); x-first (`always_xy`) transforms; one haversine
-  distance for floats, arrays and Polars expressions; point-to-zone assignment through
-  a DuckDB spatial join with a bounding-box prefilter and explicit policies for
-  boundaries (`intersects` or `contains`, ties to the lowest zone id), overlapping
-  zones (`error`, `first`, `all`) and unassigned points (`max_unassigned`); regular
-  grid cells with labels and an expected grid; crosswalks and hierarchies with split
-  weights proven to sum to 1, and exact aggregation up a hierarchy; and neighbour
-  weights (queen and rook contiguity, nearest neighbours, distance bands, tables) with
-  islands reported.
-- Add the `assign_zones` alignment step (a layer per side when zones were re-drawn,
-  grid cells, or attribute zones, plus a crosswalk), the `spatial` level (measures per
-  zone, one-sided and expected zones, Spearman rank correlation, share redistribution,
-  global Moran's I of the changes and LISA clusters of change, corrected for multiple
-  testing) and the `locations` level (distance moved by keyed features, area and shape
-  changes of geometries). `assign_zones` with `temporal` compares zones bucket by
-  bucket. Steps and levels name the further datasets they read (`datasets()`), which
-  CMP-001 requires and validates.
-- Add `local_morans_i` (LISA with conditional permutation p-values and quadrants),
-  `morans_statistic` and `rank_correlation_test` (Spearman, Fisher z with the
-  Fieller-Hartley-Pearson variance) to `qavf.inference`.
-- GEO-001 takes an optional `within` zone layer or study area per point set (a
-  separate check; `boundary: intersects` or `contains`), and SPA-003 an optional
-  `zone_layer` whose ids are the expected entities. Existing configurations are
-  unchanged.
-- Geometry needs DuckDB's `spatial` extension: the Docker image and
-  `scripts/verify_release.py extensions` (now also run by the CI test job) install it.
-  Without it, every check that needs geometry is not assessed, with the reason;
-  attribute zones, grids in the data's CRS and tables work without it.
+### Added
 
-- Add `qavf.inference`, a statistical inference library shared by comparisons and
-  rules: paired (t, Wilcoxon, sign, permutation, bootstrap), equivalence (TOST),
-  independent-sample (Welch t, Mann-Whitney, KS, Anderson-Darling, Brown-Forsythe,
-  permutation, bootstrap), categorical (chi-square, Fisher, G, McNemar,
-  Stuart-Maxwell), count and rate (two-proportion, exact conditional Poisson), trend
-  and series (Mann-Kendall with Sen slope, seasonal Kendall, slope differences, Fisher
-  z, lag significance) and spatial (Moran's I from given weights) tests with a typed
-  `TestResult`; Bonferroni, Holm, Benjamini-Hochberg and Benjamini-Yekutieli
-  corrections; analytic, percentile and BCa intervals; seeded block bootstraps,
-  Newey-West errors and a work budget; effect sizes and agreement metrics; and
-  decision policies combining materiality with significance. Without the `stats`
-  extra a test is not assessed. Tests are pluggable (`register_test`, the
-  `qavf.inference.tests` entry-point group, `plugins.required: inference.tests:name`).
-- Comparisons now decide `material_and_significant` by default: a difference fails
-  only when it is material and statistically significant after a Benjamini-Hochberg
-  correction across each check's family. `decision`, `alpha`, `correction`, `seed`
-  and `max_work` are set per comparison or level, and `test:` per measure; each
-  measure has a default test (`mean`: Welch, `median`: Mann-Whitney, `count` and
-  integer `sum`: Poisson, other `sum` and `quantile`: bootstrap, `share` and
-  `null_count`: two-proportion, `std`: Brown-Forsythe), and `min`, `max` and
-  `distinct_count` are judged by materiality alone. `records` gains a `shift` check
-  of paired tests per column (and `shift_by` group); `series_shape` tests correlation
-  (Fisher z with an effective sample size), trend (block bootstrap or HAC) and lag
-  (block bootstrap). Evidence carries p-values, adjusted p-values, effects and
-  intervals, and every `significance` slot is filled. A core install without the
-  `stats` extra should set `decision: material`, the previous behaviour.
-- TMP-002, TMP-003 and STA-002 use the shared tests and corrections, gain an optional
-  `correction` (defaults unchanged) and report `p_value`, `adjusted_p` and `effect`
-  in their evidence.
-- Move the component registry to `qavf.plugins.registry`, shared by comparison
-  components and statistical tests; `qavf.compare.registry` re-exports it.
-- Add dataset comparison: `compare_datasets` (also `qavf.compare`) and the `CMP-001`
-  rule compare a candidate dataset with a baseline after an alignment pipeline
-  (column mapping, lossless casts, exact unit scaling, recoding, derived columns,
-  per-side and shared filters) at four levels: structure (with suggested renames),
-  key coverage, keyed records and grouped measures with comparators, materiality and
-  rank changes. Unassessable checks (missing mapped columns, lossy casts, too few rows)
-  are reported as not assessed.
-- Make alignment steps, measures, comparators and levels extensible through
-  registration decorators and the `qavf.compare.alignment`, `qavf.compare.measures`,
-  `qavf.compare.comparators` and `qavf.compare.levels` entry-point groups;
-  `plugins.required` accepts `compare.<kind>:name`.
-- Map renamed columns in regression comparisons: `column_map=` for `compare_frames`,
-  `compare_outputs` and `assert_outputs_match`, `rename` for REG-001 baselines and
-  `qavf compare --map OLD=NEW`. Comparison results count changed values per column
-  (`column_changes`).
-- Compare datasets over time: the `temporal` level compares measures per calendar
-  bucket (second to year, with multiples such as `15 minutes`) or cyclic profile
-  (hour of day to season) within groups, with one-sided buckets and expected-grid
-  gaps; the `series_shape` level compares each group's series by correlation
-  (Pearson and Spearman), trend slope, cyclic profile, peak timing and size,
-  cross-correlation lag and level shifts; the `shift_time` alignment step compares a
-  version at a shifted time (year over year, same weekday, or a lag). Buckets follow
-  the local calendar of a time zone, so DST days have 23 or 25 hours and the two
-  fall-back hours stay apart; rows that cannot be placed and series too short to
-  judge are not assessed.
-- Bucket the TMP series rules: `bucket`, `time_zone` and `time_format` let TMP-001 to
-  TMP-008 use Date, Datetime and text time columns; numeric time columns behave as
-  before. TMP-004 expects every bucket of the calendar grid of a bucketed series.
-  Rates and trends use a bucket's exact sequence position and TMP-007 seasons its
-  local calendar slot, so hourly seasons stay on the local hour across DST changes.
-- Add `qavf.temporal` (time buckets, bucket grids, explicit sequence and calendar
-  positions and calendar offsets as native expressions) and `qavf.statistics.series`
-  (exact least squares, Pearson and Spearman correlation, cross-correlation lags and
-  the level-shift screen).
-- Comparison steps can record data-dependent outcomes with `AlignmentContext.note`.
-- Add general exact helpers: checked casts and exact scaling (`qavf.typed_values`),
-  exact quantile interpolation (`qavf.statistics.ordered`), grouped exact means and
-  quantiles, and byte-bounded evidence collection.
+- **Dataset comparison.** `compare_datasets`, the `CMP-001` rule and
+  `qavf compare-datasets` compare a candidate dataset with a baseline, including
+  datasets whose columns differ. An alignment pipeline handles this: column mapping,
+  lossless casts, unit scaling, recoding, derived columns, filters, time shifts and
+  zone assignment. Comparison levels: structure, key coverage, keyed records,
+  grouped measures, temporal buckets and series shape, spatial zones and locations,
+  distributions, relationships and contributions (with an exact mix-versus-rate
+  decomposition). Checks that cannot be assessed are reported as such, never passed.
+- **Statistical inference.** `qavf.inference` provides paired, independent-sample,
+  equivalence, categorical, count, trend and spatial tests, multiple-testing
+  corrections, intervals, bootstraps, effect sizes and agreement metrics. By default
+  a comparison fails only when a difference is both material and significant after
+  Benjamini-Hochberg correction. TMP-002, TMP-003 and STA-002 use the same tests
+  and report `p_value`, `adjusted_p` and `effect`.
+- **Spatial building blocks** (`qavf.spatial`). Zone layers come from datasets,
+  GeoParquet, GeoJSON or shapefiles. Point-to-zone assignment has explicit boundary
+  and overlap policies. Also grids, crosswalks, hierarchies, neighbour weights,
+  Moran's I and LISA. GEO-001 accepts a `within` zone layer and SPA-003 a
+  `zone_layer`. Geometry needs DuckDB's `spatial` extension.
+- **Temporal building blocks** (`qavf.temporal`, `qavf.statistics.series`).
+  Calendar buckets follow local time zones and keep DST days intact. TMP-001 to
+  TMP-008 accept `bucket`, `time_zone` and `time_format` for Date, Datetime and
+  text time columns.
+- Reports show a comparison section: a summary, per-check evidence and inline SVG
+  charts within `HtmlLimits`. `DatasetComparison` can write its own HTML and JSON
+  reports.
+- Regression comparisons map renamed columns (`column_map=`, `rename`,
+  `qavf compare --map OLD=NEW`).
+- A new `spatial` extra (pyproj and SciPy) adds indexed neighbour searches and
+  authoritative CRS resolution. `all` now includes it.
+- Alignment steps, measures, comparators, levels and statistical tests are
+  pluggable through registration decorators and entry points. The shared component
+  registry lives in `qavf.plugins.registry`.
+
+### Changed
+
+- Fewer false passes: invalid or empty assessments, unsupported numeric values,
+  lossy casts, undefined statistics and duplicate keys are now failures or
+  explicitly unassessed. Some verdicts that were wrongly passing will change.
+- New default resource limits, with explicit refusal instead of partial results:
+  - polygon assignment: 1,000,000 point keys, 2,000,000 mappings, 20,000,000
+    candidate pairs;
+  - neighbour graphs: 1,000,000 edges;
+  - profiling category state: 1 MiB.
+
+  Raise these deliberately for larger workloads.
+- Unknown CRS classifications need `qavf[spatial]`. The minimum supported pyproj
+  is 3.6.1.
+- Invalid fractional byte sizes are rejected rather than rounded. Colliding HTML and
+  JSON report paths are refused before writing (CLI exit code 2). Typed Parquet
+  reads refuse explicit cloud credential-provider chains.
+- A core install without the `stats` extra should set `decision: material` for
+  comparisons.
+
+### Performance
+
+- Neighbour weights use compact sparse arrays.
+- Point-to-zone matching runs in batches, resolving overlaps natively.
+- Map outlines are checked against their vertex budget before they are built.
+- Compatible lazy column checks are evaluated in one scan.
+- Rule provenance no longer scans every installed package.
+- Fewer redundant source evaluations and serializations, plus bounded work for
+  resampling, correlations, graphs and reports.
+
+### Fixed
+
+- Exact numeric handling: Int128 scaling, Decimal rounding, nanosecond and missing
+  group identities, subnormal ratios and floating-point threshold boundaries.
+- Statistics: BCa acceleration, contingency counts, resampling stability, DST bucket
+  grids and dependent time ordering.
+- Execution: deadline monitoring through cleanup, cancellation at native operation
+  entry, plugin registration atomicity and retained-memory accounting.
+- Compatibility with the minimum supported Polars and DuckDB versions.
 
 ## [0.4.1] - 2026-10-18
 

@@ -6,7 +6,7 @@ import logging
 import threading
 import uuid
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, Literal
 
 import duckdb
 import polars as pl
@@ -15,10 +15,41 @@ from qavf.redaction import redact_text
 from qavf.sources.base import ConnectionBudget, SourceEnvironment, SourceError, SourceNotFoundError
 from qavf.sources.errors import redacted_error
 from qavf.sources.memory import reservation_is_stricter
-from qavf.sources.sql import sql_literal, validate_query
-from qavf.sources.storage import create_secret_statements
+from qavf.sources.sql import quote_identifier, sql_literal, validate_query
+from qavf.sources.storage import create_secret_statements, validate_secret_scopes
 
 logger = logging.getLogger(__name__)
+
+
+def _unwrap_relation(value: Any) -> Any:
+    return value._relation if isinstance(value, OwnedRelation) else value
+
+
+class OwnedRelation:
+    """Keep a lazy native relation inside its connection's cancellation boundary."""
+
+    def __init__(self, relation: duckdb.DuckDBPyRelation, connection: OwnedConnection) -> None:
+        self._relation = relation
+        self._connection = connection
+
+    def __getattr__(self, name: str) -> Any:
+        # Properties (including columns) can bind a lazy native query as well.
+        if name != "close":
+            self._connection._check_cancelled()
+        value = getattr(self._relation, name)
+        if not callable(value):
+            return value
+
+        def invoke(*args: Any, **kwargs: Any) -> Any:
+            if name != "close":
+                self._connection._check_cancelled()
+            result = value(
+                *(_unwrap_relation(arg) for arg in args),
+                **{key: _unwrap_relation(arg) for key, arg in kwargs.items()},
+            )
+            return self._connection._wrap_result(result)
+
+        return invoke
 
 
 class OwnedConnection:
@@ -41,7 +72,37 @@ class OwnedConnection:
             raise
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._connection, name)
+        value = getattr(self._connection, name)
+        if not callable(value):
+            return value
+
+        def invoke(*args: Any, **kwargs: Any) -> Any:
+            # DuckDB's interrupt affects current work, not future queries. An
+            # invocation cancelled during setup must not start its later read.
+            # Check on invocation, including previously captured bound methods.
+            if name not in {"interrupt", "unregister", "rollback"}:
+                self._check_cancelled()
+            result = value(
+                *(_unwrap_relation(arg) for arg in args),
+                **{key: _unwrap_relation(arg) for key, arg in kwargs.items()},
+            )
+            # DuckDB execute/register return the connection for chaining. Keep
+            # the owner in that chain so the next operation is checked as well.
+            return self._wrap_result(result)
+
+        return invoke
+
+    def _check_cancelled(self) -> None:
+        check = getattr(self._owner, "check_cancelled", None)
+        if check is not None:
+            check()
+
+    def _wrap_result(self, result: Any) -> Any:
+        if result is self._connection:
+            return self
+        if isinstance(result, duckdb.DuckDBPyRelation):
+            return OwnedRelation(result, self)
+        return result
 
     def close(self) -> None:
         with self._close_lock:
@@ -65,6 +126,19 @@ class OwnedConnection:
         self.close()
 
 
+def drop_temporary_relation(
+    connection: duckdb.DuckDBPyConnection | OwnedConnection,
+    name: str,
+    *,
+    kind: Literal["TABLE", "VIEW"],
+) -> None:
+    """Release a known temporary binding even after its invocation was cancelled."""
+    if kind not in {"TABLE", "VIEW"}:
+        raise ValueError("temporary relation kind must be TABLE or VIEW")
+    native = connection._connection if isinstance(connection, OwnedConnection) else connection
+    native.execute(f"DROP {kind} IF EXISTS {quote_identifier(name)}")
+
+
 def connect(
     env: SourceEnvironment, attach: Iterable[str] = ()
 ) -> duckdb.DuckDBPyConnection | OwnedConnection:
@@ -77,6 +151,7 @@ def connect(
     Raises:
         SourceError: for an unknown connection or a failed attachment.
     """
+    validate_secret_scopes(env.secrets)
     owner = env.connection_budget
     token, spill_bytes, memory_bytes = (
         owner.acquire() if owner else (None, env.spill_limit_bytes, None)
@@ -112,10 +187,12 @@ def connect(
                 # The statement carries credentials: report only the redacted
                 # native error, never the SQL that failed.
                 error = redacted_error(exc)
-                if secret.provider == "credential_chain":
+                if secret.provider == "credential_chain" and secret.chain is None:
                     # Newer DuckDB validates the chain on creation. Without
                     # credentials, only reads that need this secret can fail;
                     # unrelated local datasets on the connection still load.
+                    # An explicitly selected chain must fail instead of silently
+                    # falling back to a different account-discovery policy.
                     logger.warning(
                         "storage secret %r found no usable credentials: %s",
                         redact_text(name),

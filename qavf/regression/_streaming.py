@@ -153,6 +153,7 @@ def compare_native(
     )
     accumulator = ComparisonAccumulator(plan, baseline_rows, candidate_rows)
     columns = list(plan.shared)
+    ordered = bool(accumulator.state.remaining)
     occupied = set(plan.baseline_schema) | set(plan.candidate_schema)
     ordinal = "__qavf_comparison_ordinal"
     while ordinal.casefold() in {name.casefold() for name in occupied}:
@@ -161,7 +162,8 @@ def compare_native(
     selected = ", ".join(quote_identifier(column) for column in columns)
 
     def projected(relation: str) -> str:
-        return f"SELECT {selected}, row_number() OVER () AS {ordinal_sql} FROM {relation}"
+        marker = "row_number() OVER ()" if ordered else "CAST(1 AS UTINYINT)"
+        return f"SELECT {selected}, {marker} AS {ordinal_sql} FROM {relation}"
 
     left_names = [f"b{i}" for i in range(len(columns))]
     right_names = [f"c{i}" for i in range(len(columns))]
@@ -183,11 +185,14 @@ def compare_native(
     )
     query = (
         f"SELECT {', '.join(fields)} FROM ({projected(_relation(baseline, plan))}) AS b "
-        f"FULL OUTER JOIN ({projected(_relation(candidate))}) AS c ON {on} "
-        f"ORDER BY CASE WHEN c.{ordinal_sql} IS NULL THEN 0 "
-        f"WHEN b.{ordinal_sql} IS NULL THEN 1 ELSE 2 END, "
-        f"COALESCE(b.{ordinal_sql}, c.{ordinal_sql})"
+        f"FULL OUTER JOIN ({projected(_relation(candidate))}) AS c ON {on}"
     )
+    if ordered:
+        query += (
+            f" ORDER BY CASE WHEN c.{ordinal_sql} IS NULL THEN 0 "
+            f"WHEN b.{ordinal_sql} IS NULL THEN 1 ELSE 2 END, "
+            f"COALESCE(b.{ordinal_sql}, c.{ordinal_sql})"
+        )
     pending_left: list[pl.DataFrame] = []
     pending_right: list[pl.DataFrame] = []
     pending_rows = 0

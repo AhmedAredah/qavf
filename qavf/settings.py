@@ -12,10 +12,8 @@ String values may reference environment variables as ``${NAME}`` or
 from __future__ import annotations
 
 import importlib
-import json
 import logging
 import math
-import os
 import re
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime
@@ -23,7 +21,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -36,6 +33,8 @@ from pydantic import (
     model_validator,
 )
 
+from qavf.configuration import expand_env as expand_env
+from qavf.configuration import read_config_mapping as _read_config_mapping
 from qavf.engine.severity import Severity
 
 if TYPE_CHECKING:
@@ -66,7 +65,6 @@ Bound = Annotated[
 """A numeric or temporal bound. Integers stay integers (exact beyond 2**53); YAML
 dates (``2020-01-01``) parse as dates."""
 
-_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
 class _Strict(BaseModel):
@@ -883,6 +881,7 @@ class QAVFSettings(_Strict):
         check_sql_names(self.connections, "connection")
         check_sql_names(self.secrets, "secret")
         unscoped: dict[str, str] = {}
+        scoped: dict[tuple[str, str], str] = {}
         for name, secret in self.secrets.items():
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
                 raise ValueError(f"secret name {name!r} must be a plain SQL identifier")
@@ -892,6 +891,13 @@ class QAVFSettings(_Strict):
                     raise ValueError(
                         f"secrets {other!r} and {name!r} are both unscoped {secret.type} "
                         "secrets; give at least one a scope so each URL has one credential"
+                    )
+            for prefix in secret.scope:
+                other = scoped.setdefault((secret.type, prefix), name)
+                if other != name:
+                    raise ValueError(
+                        f"secrets {other!r} and {name!r} have the same {secret.type} scope; "
+                        "each URL prefix must select one credential"
                     )
         for name, spec in self.datasets.items():
             for fk in spec.foreign_keys:
@@ -998,134 +1004,6 @@ def check_sql_names(names: Iterable[str], kind: str) -> None:
                 f"the same table, so one would silently replace the other. Rename one."
             )
 
-
-class _UniqueKeyLoader(yaml.SafeLoader):
-    """A safe YAML loader that rejects duplicate mapping keys instead of keeping the last."""
-
-    def __init__(self, stream: Any) -> None:
-        super().__init__(stream)
-        self.validated_nodes: set[int] = set()
-
-
-def _validate_yaml_keys(loader: _UniqueKeyLoader, node: yaml.Node) -> None:
-    """Check raw mappings before merge flattening, including referenced anchors.
-
-    An explicit override of an inherited merge value is legal YAML; two explicit
-    occurrences in the same mapping are not. Checking before flattening preserves
-    that distinction, including when an anchor is consumed before its own mapping.
-    """
-    if id(node) in loader.validated_nodes:
-        return
-    loader.validated_nodes.add(id(node))
-    if isinstance(node, yaml.MappingNode):
-        first: dict[Any, tuple[int, int]] = {}
-        for key_node, value_node in node.value:
-            key = (
-                "<<"
-                if key_node.tag == "tag:yaml.org,2002:merge"
-                else loader.construct_object(key_node, deep=False)
-            )
-            location = (key_node.start_mark.line + 1, key_node.start_mark.column + 1)
-            try:
-                if key in first:
-                    earlier = first[key]
-                    raise ValueError(
-                        f"duplicate key {key!r} at line {location[0]}, column {location[1]} "
-                        f"(first defined at line {earlier[0]}, column {earlier[1]}); "
-                        "a repeated key would silently replace the earlier entry"
-                    )
-                first[key] = location
-            except TypeError:
-                pass  # PyYAML supplies the precise invalid-mapping-key error.
-            _validate_yaml_keys(loader, value_node)
-    elif isinstance(node, yaml.SequenceNode):
-        for child in node.value:
-            _validate_yaml_keys(loader, child)
-
-
-def _construct_unique_mapping(
-    loader: _UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False
-) -> Any:
-    _validate_yaml_keys(loader, node)
-    loader.flatten_mapping(node)
-    return loader.construct_mapping(node, deep=deep)
-
-
-_UniqueKeyLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_unique_mapping
-)
-
-
-def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError(
-                f"duplicate key {key!r}; a repeated key would silently replace the earlier entry"
-            )
-        result[key] = value
-    return result
-
-
-def _describe_yaml_error(exc: yaml.YAMLError) -> str:
-    """One-line description of a YAML error with its 1-based line and column."""
-    problem = getattr(exc, "problem", None) or str(exc).splitlines()[0]
-    mark = getattr(exc, "problem_mark", None)
-    if mark is None:
-        return str(problem)
-    return f"{problem} (line {mark.line + 1}, column {mark.column + 1})"
-
-
-def expand_env(value: Any, environ: Mapping[str, str] | None = None) -> Any:
-    """Recursively replace ``${NAME}`` / ``${NAME:-default}`` in strings.
-
-    Raises:
-        ValueError: for a reference to an unset variable without a default.
-    """
-    env = os.environ if environ is None else environ
-    if isinstance(value, str):
-
-        def substitute(match: re.Match[str]) -> str:
-            name, default = match.group(1), match.group(2)
-            if name in env:
-                return env[name]
-            if default is not None:
-                return default
-            raise ValueError(f"environment variable {name!r} is not set")
-
-        return _ENV_REFERENCE.sub(substitute, value)
-    if isinstance(value, dict):
-        return {key: expand_env(item, env) for key, item in value.items()}
-    if isinstance(value, list):
-        return [expand_env(item, env) for item in value]
-    return value
-
-
-def _read_config_mapping(path: str | Path) -> tuple[dict[str, Any], Path]:
-    """Parse one configuration document before callers assemble inline contracts."""
-    source = Path(path).resolve()
-    text = source.read_text(encoding="utf-8")
-    match source.suffix.lower():
-        case ".yaml" | ".yml":
-            try:
-                raw = yaml.load(text, Loader=_UniqueKeyLoader)  # a SafeLoader subclass
-            except yaml.YAMLError as exc:
-                raise ValueError(f"{source}: invalid YAML: {_describe_yaml_error(exc)}") from exc
-        case ".json":
-            try:
-                raw = json.loads(text, object_pairs_hook=_unique_json_object)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"{source}: invalid JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})"
-                ) from exc
-        case other:
-            raise ValueError(f"unsupported configuration format {other!r}; use YAML or JSON")
-    if raw is None:
-        raw = {}
-    if not isinstance(raw, dict):
-        raise ValueError(f"{source}: top level of the configuration must be a mapping")
-    raw.pop("$schema", None)
-    return expand_env(raw), source
 
 
 def load_settings(path: str | Path) -> QAVFSettings:

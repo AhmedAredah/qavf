@@ -14,7 +14,7 @@ all one nonzero constant differ with certainty for the t-test (``p = 0``).
 from __future__ import annotations
 
 import math
-from itertools import product
+from itertools import islice, product
 
 import numpy as np
 import numpy.typing as npt
@@ -38,9 +38,13 @@ from qavf.inference.resampling import (
     Statistic,
     batches,
     bootstrap_distribution,
+    check_resamples,
     check_work,
+    checked_statistics,
+    evaluate,
     generator,
     interval_p_value,
+    jackknife,
     permutation_p_value,
 )
 from qavf.inference.results import Alternative, TestResult
@@ -195,12 +199,18 @@ def paired_permutation(
     """
     d, unit = differences(baseline, candidate)
     at_least(len(d), 2, "pairs", n={"pairs": len(d)})
+    check_resamples(resamples)
     observed = float(d.mean())
     exact = len(d) < 63 and 2 ** len(d) <= resamples
     check_work((2 ** len(d) if exact else resamples) * len(d), max_work, "paired permutation")
     if exact:
-        signs = np.array(list(product((1.0, -1.0), repeat=len(d))))
-        distribution = mean_statistic(signs * d)
+        assignments = product((1.0, -1.0), repeat=len(d))
+        distribution = np.empty(2 ** len(d))
+        done = 0
+        for step in batches(len(distribution), len(d)):
+            signs = np.array(list(islice(assignments, step)))
+            distribution[done : done + step] = mean_statistic(signs * d)
+            done += step
         p = permutation_p_value(distribution, observed, alternative, exact=True)
     else:
         rng = generator(seed)
@@ -247,18 +257,30 @@ def paired_bootstrap(
     as in :func:`~qavf.inference.independent.bootstrap_difference`.
     """
     check_confidence(confidence)
-    d, unit = differences(baseline, candidate)
+    check_resamples(resamples)
+    if interval not in ("percentile", "bca"):
+        raise ValueError(f"interval must be 'percentile' or 'bca', got {interval!r}")
+    if statistic is mean_statistic:
+        d, unit = differences(baseline, candidate)
+    else:
+        b, c = observations(baseline, "baseline"), observations(candidate, "candidate")
+        if len(b) != len(c):
+            raise Unassessable("paired samples differ in length")
+        with np.errstate(over="ignore", invalid="ignore"):
+            d = checked_statistics(c - b, (len(b),))
+        unit = 1.0
     at_least(len(d), 2, "pairs", n={"pairs": len(d)})
     check_work(
         resamples * len(d) + (len(d) ** 2 if interval == "bca" else 0), max_work, "bootstrap"
     )
-    observed = float(statistic(d))
-    distribution = bootstrap_distribution(generator(seed), (d,), statistic, resamples)
+    observed = float(evaluate(statistic, d))
+    distribution = bootstrap_distribution(
+        generator(seed), (d,), lambda values: evaluate(statistic, values), resamples
+    )
     p = interval_p_value(distribution, alternative)
     if interval == "bca":
-        keep = ~np.eye(len(d), dtype=bool)
-        jackknife = statistic(np.broadcast_to(d, keep.shape)[keep].reshape(len(d), -1))
-        low, high = bca_interval(observed, distribution, [jackknife], confidence)
+        omitted = jackknife(d, statistic)
+        low, high = bca_interval(observed, distribution, [omitted], confidence)
     else:
         low, high = percentile_interval(distribution, confidence)
     return TestResult(

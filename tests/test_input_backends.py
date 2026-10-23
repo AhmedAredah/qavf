@@ -8,10 +8,11 @@ import pytest
 
 from qavf.engine.context import DataContext
 from qavf.engine.severity import Status
+from qavf.rules._column_batch import ColumnInputs
 from qavf.rules.freshness_checks import FreshnessRule
 from qavf.rules.helpers import aggregate, align_keys, exact_sum_expr
 from qavf.rules.input_checks import ColumnCheckRule
-from qavf.rules.reconciliation_checks import _missing_grid_sample
+from qavf.rules.reconciliation_checks import KeyGridRule
 from qavf.settings import QAVFSettings
 from qavf.testing import rule_results
 
@@ -205,24 +206,40 @@ def test_simple_lazy_checks_share_one_reduction_scan(monkeypatch):
         {"datasets": {"d": {"schema": {"columns": {"x": {"ge": 0, "le": 10}, "y": {"ge": 0}}}}}}
     )
     calls = []
-    collect = pl.LazyFrame.collect
+    collect = ColumnInputs.collect
+    source_reads = []
 
     def counted(self, *args, **kwargs):
         calls.append(1)
         return collect(self, *args, **kwargs)
 
-    monkeypatch.setattr(pl.LazyFrame, "collect", counted)
+    def source(frame):
+        source_reads.append(1)
+        return frame
+
+    # Empty typed preflight plans do not read data. Count the one reduction
+    # of compact or owned inputs and independently verify one source evaluation.
+    monkeypatch.setattr(ColumnInputs, "collect", counted)
+    frame = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]})
     with DataContext.from_settings(
-        settings, frames={"d": pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]}).lazy()}
+        settings, frames={"d": frame.lazy().map_batches(source, schema=frame.schema)}
     ) as ctx:
+        monkeypatch.setattr(ctx, "get", lambda *args: pytest.fail("full input materialization"))
         assert all(f.passed for f in ColumnCheckRule().evaluate(ctx))
     assert len(calls) == 1
+    assert source_reads == [1]
 
 
 def test_zero_grid_evidence_does_not_sort_or_enumerate(monkeypatch):
     monkeypatch.setattr(pl.DataFrame, "sort", lambda *args, **kwargs: pytest.fail("unneeded sort"))
-    empty = _missing_grid_sample(pl.DataFrame({"k": [1]}), {"k": pl.Series([1, 2])}, 0)
-    assert empty.height == 0 and empty.columns == ["k"]
+    with DataContext(frames={"d": pl.DataFrame({"k": [1]})}, evidence_limit=0) as ctx:
+        [finding] = KeyGridRule(
+            {"grids": [{"dataset": "d", "dimensions": {"k": {"values": [1, 2]}}}]}
+        ).evaluate(ctx)
+    assert finding.assessed and not finding.passed
+    assert finding.affected_count == 1
+    assert isinstance(finding.affected, pl.DataFrame)
+    assert finding.affected.is_empty() and finding.affected.columns == ["k"]
 
 
 def test_spatial_membership_does_not_truncate_configured_ids():

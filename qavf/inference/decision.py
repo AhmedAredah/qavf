@@ -25,6 +25,7 @@ it: never a pass.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -84,6 +85,8 @@ def decide(
     no sound test exists for the quantity; the decision then falls back to
     materiality. ``alpha`` applies when the result was not judged already.
     """
+    if not 0 < alpha < 1:
+        raise ValueError("alpha must lie in (0, 1)")
     if policy not in POLICIES:
         raise ValueError(f"unknown decision policy {policy!r}; use one of {', '.join(POLICIES)}")
     if not applicable or policy == "material":
@@ -96,9 +99,9 @@ def decide(
     if test is None or not test.assessed:
         reason = "no test result" if test is None else f"test not assessed: {test.reason}"
         return Decision("not_assessed", "significance", reason)
-    significant = test.significant
-    if significant is None:
-        significant = test.p is not None and test.p < alpha
+    if test.p is None or not math.isfinite(test.p) or not 0 <= test.p <= 1:
+        return Decision("not_assessed", "significance", "test has no finite p-value in [0, 1]")
+    significant = test.p < (test.alpha if test.alpha is not None else alpha)
     p = f"p = {test.p:.3g}" if test.p is not None else "no p-value"
     if policy == "equivalence":
         if significant:

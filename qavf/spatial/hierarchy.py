@@ -26,8 +26,9 @@ from pydantic import Field, model_validator
 
 from qavf.aggregation import exact_sum_expr, narrow_integer
 from qavf.engine.registry import RuleParams
+from qavf.keys import cast_key
 from qavf.numeric import exact_rational, report_number
-from qavf.rules.helpers import plural
+from qavf.rules.helpers import fresh_internal, plural
 
 if TYPE_CHECKING:
     from qavf.engine.context import DataContext
@@ -189,10 +190,12 @@ def apply_crosswalk(
     """
     dtype = plan.collect_schema()[column]
     try:
-        source = frame[SOURCE].cast(dtype, strict=True)
-    except Exception:
-        raise ValueError(f"crosswalk ids cannot all be represented as {dtype}") from None
-    target = f"{taken}_to"
+        source = cast_key(frame[SOURCE], dtype)
+    except ValueError:
+        raise ValueError(
+            f"crosswalk ids cannot all be represented as {dtype} without changing identity"
+        ) from None
+    target = fresh_internal(f"{taken}_to", [*plan.collect_schema(), taken])
     mapping = pl.DataFrame({column: source, target: frame[TARGET], taken: frame[WEIGHT]})
     joined = plan.join(mapping.lazy(), on=column, how="left")
     if split(frame):

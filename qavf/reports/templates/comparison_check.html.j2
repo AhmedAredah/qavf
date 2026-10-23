@@ -1,0 +1,33 @@
+
+  <tr>
+    <td class="mono">{{ check.label }}</td>
+    <td>{{ verdict_chip(check.verdict) }}</td>
+    <td>{{ check.message }}{% if check.family %}<br><span class="muted">{{ check.family }}</span>{% endif %}</td>
+    <td class="num">{{ check.affected }}</td>
+  </tr>
+  {% if check.records or check.tests %}
+  <tr class="evidence"><td colspan="4">
+    <details>
+      <summary>Evidence and significance of {{ check.label }}{% if check.truncated %} (evidence bounded){% endif %}</summary>
+      {% if check.records %}{% with records = check.records %}{% include "records.html.j2" %}{% endwith %}{% endif %}
+      {% if check.tests %}
+      <div class="scroll"><table class="tests">
+        <thead><tr><th>Member</th><th>Test</th><th class="num">p</th><th class="num">Adjusted p</th><th>Effect</th><th class="num">Interval</th><th>Significant</th></tr></thead>
+        <tbody>
+        {% for test in check.tests %}
+          <tr>
+            <td>{{ test.label }}</td>
+            <td class="mono">{{ test.method }}</td>
+            <td class="num">{{ test.p_value | number }}</td>
+            <td class="num">{{ test.adjusted_p | number }}</td>
+            <td>{% if test.effect is not none %}{{ test.effect | number }} <span class="muted">{{ test.effect_name or "" }}</span>{% else %}{{ test.reason or "—" }}{% endif %}</td>
+            <td class="num">{% if test.ci_low is not none %}{{ test.ci_low | number }} to {{ test.ci_high | number }}{% else %}—{% endif %}</td>
+            <td>{{ {True: "yes", False: "no"}.get(test.significant, "—") }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+      {% endif %}
+    </details>
+  </td></tr>
+  {% endif %}

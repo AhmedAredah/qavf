@@ -182,6 +182,7 @@ class FileSource(DataSource[FileParams]):
             if not hasattr(self, "_typed_parquet"):
                 required = False
                 union_by_name = bool(self.params.options.get("union_by_name"))
+                selected = set(self.params.columns) if self.params.columns else None
                 combined: dict[str, pl.DataType] = {}
                 folded_names: dict[str, str] = {}
                 try:
@@ -191,7 +192,11 @@ class FileSource(DataSource[FileParams]):
                         # again or copying the entire file through a Python
                         # file-like object on versions that read it eagerly.
                         schema = pl.scan_parquet(path, glob=False).collect_schema()
-                        required |= any(needs_typed_reader(dtype) for dtype in schema.values())
+                        required |= any(
+                            needs_typed_reader(dtype)
+                            for name, dtype in schema.items()
+                            if selected is None or name in selected
+                        )
                         if index and not union_by_name and schema.keys() != combined.keys():
                             raise SourceError(
                                 "Parquet files require matching column names unless "
@@ -203,7 +208,9 @@ class FileSource(DataSource[FileParams]):
                             # Parquet names must not be collapsed or renamed by
                             # a SQL union, including within a single file.
                             previous_name = folded_names.setdefault(name.casefold(), name)
-                            required |= previous_name != name
+                            required |= previous_name != name and (
+                                selected is None or name in selected or previous_name in selected
+                            )
                             if name in combined and combined[name] != dtype:
                                 raise SourceError(
                                     "Parquet files require matching logical types for "
@@ -329,7 +336,18 @@ class FileSource(DataSource[FileParams]):
         args = "".join(
             f", {quote_identifier(key)} = {sql_literal(value)}" for key, value in options.items()
         )
-        select = ", ".join(quote_identifier(c) for c in params.columns) if params.columns else "*"
+        # SQL identifier resolution is case-insensitive, including quoted names.
+        # Match decoded column names as string values instead: an unavailable
+        # physical spelling must fail, never select a differently cased column.
+        # A separate expression preserves the caller's projection order.
+        select = (
+            ", ".join(
+                f"COLUMNS(__qavf_exact_column -> __qavf_exact_column = {sql_literal(c)})"
+                for c in params.columns
+            )
+            if params.columns
+            else "*"
+        )
         if type(self) is FileSource and files is not None:
             # Only the built-in local reader embeds its pinned manifest. All
             # other source kinds retain their existing parameterized binding.

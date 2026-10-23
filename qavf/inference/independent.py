@@ -20,7 +20,7 @@ import math
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from itertools import combinations
+from itertools import combinations, islice
 
 import numpy as np
 import numpy.typing as npt
@@ -31,7 +31,6 @@ from qavf.inference._support import (
     at_least,
     check_confidence,
     common_scale,
-    common_unit,
     observations,
     require_scipy,
     sizes,
@@ -46,9 +45,12 @@ from qavf.inference.resampling import (
     Statistic,
     batches,
     bootstrap_distribution,
+    check_resamples,
     check_work,
+    evaluate,
     generator,
     interval_p_value,
+    jackknife,
     permutation_p_value,
 )
 from qavf.inference.results import Alternative, TestResult
@@ -80,11 +82,24 @@ def _two(
 def welch_terms(b: Moments, c: Moments) -> tuple[float, float]:
     """Standard error of the difference of means and Welch-Satterthwaite degrees of
     freedom (``n_b + n_c - 2`` when both samples are constant)."""
-    se2 = b.variance / b.n + c.variance / c.n
-    if se2 == 0:
+    for sample in (b, c):
+        if (
+            isinstance(sample.n, bool)
+            or not isinstance(sample.n, int | np.integer)
+            or sample.n < 2
+            or not math.isfinite(sample.variance)
+            or sample.variance < 0
+        ):
+            raise Unassessable("moments need an integer size >= 2 and finite non-negative variance")
+    # Squaring an unscaled variance over/underflows long before its standard
+    # error becomes unrepresentable. Relative contributions keep df near one.
+    a, d = math.sqrt(b.variance) / math.sqrt(b.n), math.sqrt(c.variance) / math.sqrt(c.n)
+    scale = max(a, d)
+    if scale == 0:
         return 0.0, float(b.n + c.n - 2)
-    df = se2**2 / ((b.variance / b.n) ** 2 / (b.n - 1) + (c.variance / c.n) ** 2 / (c.n - 1))
-    return math.sqrt(se2), df
+    va, vd = (a / scale) ** 2, (d / scale) ** 2
+    df = (va + vd) ** 2 / (va**2 / (b.n - 1) + vd**2 / (c.n - 1))
+    return math.hypot(a, d), df
 
 
 def _welch(
@@ -103,12 +118,8 @@ def _welch(
         t = 0.0 if difference == 0 else math.copysign(math.inf, difference)
         p = 1.0 if difference == 0 else t_p_value(t, df, alternative)
     else:
-        stats = require_scipy()
-        result = stats.ttest_ind_from_stats(
-            c.mean, math.sqrt(c.variance), c.n, b.mean, math.sqrt(b.variance), b.n,
-            equal_var=False, alternative=alternative,
-        )  # fmt: skip
-        t, p = float(result.statistic), float(result.pvalue)
+        t = difference / se if math.isfinite(difference) else c.mean / se - b.mean / se
+        p = float(t_p_value(t, df, alternative))
     low, high = t_interval(difference, se, df, confidence)
     return TestResult(
         method=method,
@@ -323,22 +334,36 @@ def permutation(
     ``resamples``; otherwise ``resamples`` seeded random relabellings with the
     ``(k + 1) / (B + 1)`` p-value. At least 2 values on each side.
     """
+    check_resamples(resamples)
     b, c = _two(baseline, candidate, 2)
-    (sb, sc), unit = common_unit(b, c)
+    # Scaling is an implementation detail only for a known homogeneous statistic.
+    # Arbitrary callbacks receive their documented original measurement units.
+    (sb, sc), unit = common_scale(b, c) if statistic is mean_statistic else ([b, c], 1.0)
     joined = np.concatenate([sb, sc])
     n = sizes(baseline=b, candidate=c)
-    observed = float(statistic(sc) - statistic(sb))
-    labellings = math.comb(len(joined), len(sc))
+    observed = float(evaluate(statistic, sc) - evaluate(statistic, sb))
+    labellings = 1
+    for k in range(1, min(len(sb), len(sc)) + 1):
+        labellings = labellings * (len(joined) - k + 1) // k
+        if labellings > resamples:
+            break
     exact = labellings <= resamples
     check_work((labellings if exact else resamples) * len(joined), max_work, "permutation")
     if exact:
-        picks = np.array(list(combinations(range(len(joined)), len(sc))))
-        mask = np.zeros((len(picks), len(joined)), dtype=bool)
-        np.put_along_axis(mask, picks, True, axis=1)
-        values = np.broadcast_to(joined, mask.shape)
-        drawn_c = values[mask].reshape(len(picks), len(sc))
-        drawn_b = values[~mask].reshape(len(picks), len(sb))
-        distribution = statistic(drawn_c) - statistic(drawn_b)
+        choices = combinations(range(len(joined)), len(sc))
+        distribution = np.empty(labellings)
+        done = 0
+        for step in batches(labellings, len(joined)):
+            picks = np.array(list(islice(choices, step)))
+            mask = np.zeros((step, len(joined)), dtype=bool)
+            np.put_along_axis(mask, picks, True, axis=1)
+            values = np.broadcast_to(joined, mask.shape)
+            drawn_c = values[mask].reshape(step, len(sc))
+            drawn_b = values[~mask].reshape(step, len(sb))
+            distribution[done : done + step] = evaluate(statistic, drawn_c) - evaluate(
+                statistic, drawn_b
+            )
+            done += step
         p = permutation_p_value(distribution, observed, alternative, exact=True)
     else:
         rng = generator(seed)
@@ -346,8 +371,8 @@ def permutation(
         done = 0
         for step in batches(resamples, len(joined)):
             order = rng.permuted(np.broadcast_to(joined, (step, len(joined))), axis=1)
-            distribution[done : done + step] = statistic(order[:, len(sb) :]) - statistic(
-                order[:, : len(sb)]
+            distribution[done : done + step] = evaluate(statistic, order[:, len(sb) :]) - evaluate(
+                statistic, order[:, : len(sb)]
             )
             done += step
         p = permutation_p_value(distribution, observed, alternative)
@@ -381,19 +406,28 @@ def resampled_difference(
     Raises:
         Unassessable: beyond the work budget, or for a statistic that is not finite.
     """
+    check_resamples(resamples)
     check_work(resamples * (len(b) + len(c)) + extra_work, max_work, "bootstrap")
-    observed = float(statistic(c) - statistic(b))
+    unit = 1.0
+    if statistic is mean_statistic:
+        (b, c), unit = common_scale(b, c)
+    observed = float(evaluate(statistic, c) - evaluate(statistic, b))
     distribution = bootstrap_distribution(
-        generator(seed), (b, c), lambda xb, xc: statistic(xc) - statistic(xb), resamples
+        generator(seed),
+        (b, c),
+        lambda xb, xc: evaluate(statistic, xc) - evaluate(statistic, xb),
+        resamples,
     )
+    with np.errstate(over="ignore", invalid="ignore"):
+        observed *= unit
+        distribution *= unit
     if not (math.isfinite(observed) and np.isfinite(distribution).all()):
         raise Unassessable("the statistic is not finite in the bootstrap resamples")
     return observed, distribution
 
 
 def _jackknife(sample: np.ndarray, statistic: Statistic) -> np.ndarray:
-    keep = ~np.eye(len(sample), dtype=bool)
-    return statistic(np.broadcast_to(sample, keep.shape)[keep].reshape(len(sample), -1))
+    return jackknife(sample, statistic)
 
 
 @assessed("bootstrap")
@@ -428,9 +462,13 @@ def bootstrap_difference(
     observed, distribution = resampled_difference(b, c, statistic, resamples, seed, max_work, extra)
     p = interval_p_value(distribution, alternative)
     if interval == "bca":
+        if statistic is mean_statistic:
+            (b, c), unit = common_scale(b, c)
+        else:
+            unit = 1.0
         jackknife = [
-            _jackknife(b, statistic) * -1 + float(statistic(c)),
-            float(statistic(b)) * -1 + _jackknife(c, statistic),
+            (-_jackknife(b, statistic) + float(evaluate(statistic, c))) * unit,
+            (-float(evaluate(statistic, b)) + _jackknife(c, statistic)) * unit,
         ]
         low, high = bca_interval(observed, distribution, jackknife, confidence)
     else:

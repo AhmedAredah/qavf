@@ -21,14 +21,19 @@ def exact_number(value: int | float | Decimal) -> Decimal:
     return Decimal.from_float(value) if isinstance(value, float) else Decimal(value)
 
 
+def tolerance_fraction(value: int | float | Decimal | Fraction) -> Fraction:
+    """An exact tolerance from configuration spelling, reusing precomputed rationals."""
+    return value if isinstance(value, Fraction) else Fraction(str(value))
+
+
 def numeric_close(a: Any, b: Any, rtol: float = 0, atol: float = 0) -> bool:
     """Finite-only symmetric tolerance using exact rational intermediates."""
     if a is None or b is None:
         return False
     try:
         x, y = Fraction(a), Fraction(b)
-        absolute, relative = Fraction(str(atol)), Fraction(str(rtol))
-    except (ValueError, OverflowError, TypeError):
+        absolute, relative = tolerance_fraction(atol), tolerance_fraction(rtol)
+    except (ValueError, OverflowError, TypeError, ZeroDivisionError):
         return False
     return abs(x - y) <= max(absolute, relative * max(abs(x), abs(y)))
 
@@ -50,7 +55,7 @@ def exact_rational(value: Any) -> Fraction | None:
     if isinstance(value, str):
         try:
             return Fraction(value)
-        except ValueError:
+        except (ValueError, ZeroDivisionError):
             return None
     return None
 
@@ -69,7 +74,10 @@ def report_number(value: Fraction | float | None) -> int | float | None:
 
 def checked_float(value: int | float | Decimal) -> float:
     """Convert finite exact data only when its stored value is representable."""
-    result = float(value)
+    try:
+        result = float(value)
+    except OverflowError:
+        raise ValueError("value cannot be represented exactly as Float64") from None
     if not math.isfinite(result) or Fraction(result) != Fraction(value):
         raise ValueError("value cannot be represented exactly as Float64")
     return result

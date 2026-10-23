@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from types import NotImplementedType
 from typing import ClassVar
 
+import polars as pl
+
 from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
-from qavf.rules._column_plan import column_checks, column_plans
+from qavf.rules._column_plan import coherent_column_checks, column_checks, column_plans
 from qavf.rules._execution import (
     projected_frame,
 )
@@ -81,29 +85,98 @@ class ColumnCheckRule(_SelectsDatasets):
         kind = ctx.execution_kind(dataset)
         if kind not in ("lazy", "native_sql"):
             return evaluate_eager(ctx, dataset, schema)
+        actual = ctx.schema(dataset)
+        if not ctx.is_materialized(dataset) and not ctx.repeatable_scan(dataset):
+            items = column_plans(schema, actual)
+            if kind == "lazy":
+                assessed = coherent_column_checks(
+                    ctx,
+                    dataset,
+                    schema,
+                    actual,
+                    items,
+                    lambda item: values._check_name(item.check) if item.check else item.kind,
+                    values._statistic,
+                    values._within,
+                    values._show,
+                )
+                if assessed is not None:
+                    return self._planned_dataset(ctx, dataset, schema, actual, assessed=assessed)
+            needed = {item.column for item in items}
+            if ctx.evidence_limit:
+                needed.update(schema.primary_key or [])
+            for item in items:
+                try:
+                    needed.update(item.dependencies)
+                except Exception:
+                    # Preparation reports this contract's invalid expression;
+                    # independent sibling checks still share one observation.
+                    continue
+            needed.intersection_update(actual)
+            if needed:
+                # Independent contracts and their evidence describe the same data,
+                # including when a supplied plan changes on every evaluation.
+                try:
+                    with ctx.observe(
+                        dataset, [name for name in actual if name in needed]
+                    ) as observed:
+                        return self._planned_dataset(ctx, dataset, schema, actual, observed)
+                except Exception as exc:
+                    failures = [
+                        values._missing_column(dataset, column)
+                        for column, spec in schema.columns.items()
+                        if column not in actual and spec.required
+                    ]
+                    for item in items:
+                        label = values._check_name(item.check) if item.check else item.kind
+                        failures.append(
+                            Finding.unassessed(
+                                f"Not assessed: '{label}' on {dataset}.{item.column}: "
+                                f"{type(exc).__name__}: {exc}.",
+                                check=f"{dataset}.{item.column}: {label}",
+                                severity=item.check.severity if item.check else None,
+                                datasets=(dataset,),
+                            )
+                        )
+                    return failures, []
         # Preserve fused reductions when every contract fits the simple backend;
         # an unsupported sibling now selects per-check plans, never a full load.
         fused = evaluate_simple(ctx, dataset, schema)
         if fused is not None:
             return fused
-        actual = ctx.schema(dataset)
+        return self._planned_dataset(ctx, dataset, schema, actual)
+
+    def _planned_dataset(
+        self,
+        ctx: DataContext,
+        dataset: str,
+        schema: SchemaSpec,
+        actual: dict[str, pl.DataType],
+        observation: Observation | None = None,
+        *,
+        assessed: list[Finding | Exception | NotImplementedType | None] | None = None,
+    ) -> tuple[list[Finding], list[str]]:
         failures: list[Finding] = []
         passed: list[str] = []
         for column, spec in schema.columns.items():
             if column not in actual and spec.required:
                 failures.append(values._missing_column(dataset, column))
         items = column_plans(schema, actual)
-        assessed = column_checks(
-            ctx,
-            dataset,
-            schema,
-            actual,
-            items,
-            lambda item: values._check_name(item.check) if item.check is not None else item.kind,
-            values._statistic,
-            values._within,
-            values._show,
-        )
+        if assessed is None:
+            assessed = column_checks(
+                ctx,
+                dataset,
+                schema,
+                actual,
+                items,
+                lambda item: (
+                    values._check_name(item.check) if item.check is not None else item.kind
+                ),
+                values._statistic,
+                values._within,
+                values._show,
+                observation,
+            )
         for item, finding in zip(items, assessed, strict=True):
             label = values._check_name(item.check) if item.check is not None else item.kind
             try:
@@ -119,7 +192,11 @@ class ColumnCheckRule(_SelectsDatasets):
                 # Unsupported exact operations project only this contract's
                 # dependencies; siblings retain their source-side reductions.
                 dependencies = list(item.dependencies)
-                projected = projected_frame(ctx, dataset, dependencies)
+                projected = (
+                    observation.collect(observation.scan().select(dependencies))
+                    if observation is not None
+                    else projected_frame(ctx, dataset, dependencies)
+                )
                 # The where condition sees each dependency's missing policy.
                 contract = schema.model_copy(
                     update={

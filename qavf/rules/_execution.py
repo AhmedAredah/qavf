@@ -9,6 +9,7 @@ from typing import Literal
 import polars as pl
 
 from qavf.engine.context import DataContext
+from qavf.engine.sql import missing_sql
 from qavf.keys import KeyTypeError, key_casts
 from qavf.rules._key_summary import KeySelection, KeySummary, summarize_keys
 from qavf.rules.helpers import missing_expr
@@ -229,6 +230,16 @@ def key_relation(
     )
     if selected_backend == "native_sql":
         selected = ", ".join(quote_identifier(name) for name in keys)
+        source = quote_identifier(dataset)
+        if normalize_missing:
+            spec = ctx.specs.get(dataset)
+            contracts = spec.schema_spec.columns if spec is not None and spec.schema_spec else {}
+            normalized = ", ".join(
+                f"CASE WHEN {missing_sql(name, schema[name], contracts.get(name))} THEN NULL "
+                f"ELSE {quote_identifier(name)} END AS {quote_identifier(name)}"
+                for name in keys
+            )
+            source = f"(SELECT {normalized} FROM {source}) AS normalized_keys"
         return KeyRelation(
             ctx,
             (dataset,),
@@ -237,9 +248,11 @@ def key_relation(
             result_schema,
             sql=(
                 f"SELECT {selected}, count(*)::UBIGINT AS {quote_identifier(frequency)} "
-                f"FROM {quote_identifier(dataset)} GROUP BY {selected}"
+                f"FROM {source} GROUP BY {selected}"
             ),
-            normalize_missing=normalize_missing,
+            # Only this key's columns are normalized above. A malformed missing
+            # policy on an unrelated field must not poison this contract.
+            normalize_missing=False,
         )
     plan = (_snapshot.lazy() if _snapshot is not None else ctx.scan(dataset)).select(keys)
     if normalize_missing:

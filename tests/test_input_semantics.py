@@ -108,7 +108,9 @@ def test_native_unicode_regex_streams_without_projected_materialization(tmp_path
     failed = next(r for r in report.results if r.status.value == "FAIL")
     assert failed.affected_count == 140_000
     assert len(failed.affected_records) == 3
-    assert [row["original"] for row in failed.affected_records] == [0, 1, 2]
+    assert [row["_row"] for row in failed.affected_records] == [0, 1, 2]
+    assert all(row["x"] == "٣" for row in failed.affected_records)
+    assert all(set(row) == {"x", "_row", "violates"} for row in failed.affected_records)
 
 
 def test_category_state_is_bounded_after_cardinality_threshold():

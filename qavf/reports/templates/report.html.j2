@@ -19,7 +19,7 @@
 <main>
   <h1>{{ title }}</h1>
   <p class="sub">
-    {{ metadata.project }}{% for name, options in metadata.extensions.items() %} · {{ name }}{% for k, v in options.items() %} {{ k }}={{ v }}{% endfor %}{% endfor %} ·
+    {{ metadata.project }}{% for name, options in metadata.extensions.items() %} · {{ name }}{% for k, v in options.items() %} {{ k }}={{ v | cell }}{% endfor %}{% endfor %} ·
     {{ metadata.started_at.strftime("%Y-%m-%d %H:%M UTC") }} · run <span class="mono">{{ metadata.run_id }}</span>
   </p>
 
@@ -60,18 +60,23 @@
   <section class="charts">
     <div class="card">
       <h3>Results by category</h3>
-      {{ status_chart }}
+      {% if status_chart.svg %}{{ status_chart.svg }}{% endif %}
+      {% if status_chart.note %}<p class="note">{{ status_chart.note }}</p>{% endif %}
       <div class="legend">
         {% for status in statuses %}<span><span class="dot s-{{ status.value | lower }}"></span>{{ status.value | title }}</span>{% endfor %}
       </div>
     </div>
     <div class="card">
       <h3>Failed rules by severity</h3>
-      {% if failures %}{{ severity_chart }}{% else %}<p class="empty">No failures.</p>{% endif %}
+      {% if failures %}
+        {% if severity_chart.svg %}{{ severity_chart.svg }}{% endif %}
+        {% if severity_chart.note %}<p class="note">{{ severity_chart.note }}</p>{% endif %}
+      {% else %}<p class="empty">No failures.</p>{% endif %}
     </div>
     <div class="card">
       <h3>Slowest rules</h3>
-      {{ timing_chart }}
+      {% if timing_chart.svg %}{{ timing_chart.svg }}{% endif %}
+      {% if timing_chart.note %}<p class="note">{{ timing_chart.note }}</p>{% endif %}
     </div>
   </section>
 
@@ -119,9 +124,9 @@
   {% endfor %}
 
   {% if comparisons %}
-  {% from "comparison.html.j2" import comparison_section with context %}
+
   <h2 id="comparisons">Dataset comparisons ({{ comparisons | length }})</h2>
-  {{ comparison_section(comparisons) }}
+  {% include "comparison.html.j2" %}
   {% endif %}
 
   <h2>All results</h2>

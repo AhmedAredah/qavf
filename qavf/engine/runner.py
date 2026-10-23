@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -224,6 +225,7 @@ class QARunner:
             execution_plan = build_plan(rules, self.settings, context.declared())
             if ctx is None:
                 context._execution_plan = execution_plan
+            context.reporting_snapshot()
             started = datetime.now(UTC)
             logger.info("Running %d rule(s) with %d worker(s)", len(rules), workers)
 
@@ -259,6 +261,7 @@ class QARunner:
 
         # Everything below only describes the run: it never loads data.
         config = self.effective_config()
+        snapshot = context.reporting_snapshot()
         report = QAReport(
             metadata=RunMetadata(
                 run_id=uuid.uuid4().hex[:12],
@@ -267,9 +270,9 @@ class QARunner:
                 started_at=started,
                 finished_at=finished,
                 config_path=str(self.settings.source_path) if self.settings.source_path else None,
-                datasets=context.describe(),
-                unused_datasets=context.unused(),
-                unavailable_datasets=context.unavailable(),
+                datasets=snapshot["datasets"],
+                unused_datasets=snapshot["unused_datasets"],
+                unavailable_datasets=snapshot["unavailable_datasets"],
                 parallel=workers > 1,
                 max_workers=workers,
                 extensions=redact(self.settings.extensions),
@@ -284,8 +287,8 @@ class QARunner:
                     {"rules": [info.model_dump(mode="python") for info in infos]}
                 ),
                 environment=environment(),
-                resource_usage=context.resource_usage(),
-                query_plans=context.query_plans() + execution_plan.describe(),
+                resource_usage=snapshot["resource_usage"],
+                query_plans=snapshot["query_plans"] + execution_plan.describe(),
             ),
             results=self._with_requirements(
                 [
@@ -437,7 +440,9 @@ class QARunner:
         if not engine.parallel or n_rules < 2:
             return 1
         limit = engine.max_workers or min(_MAX_DEFAULT_WORKERS, os.cpu_count() or 1)
-        return max(1, min(limit, n_rules))
+        from qavf.engine.thread_budget import memory_workers
+
+        return memory_workers(max(1, min(limit, n_rules)), engine.memory_budget_bytes)
 
     def _run_with_deadlines(
         self, rules: list[Rule], ctx: DataContext, workers: int, timeout: float
@@ -478,29 +483,75 @@ class QARunner:
         results: list[list[RuleResult] | None] = [None] * len(rules)
         started: dict[int, tuple[float, Invocation]] = {}
         abandoned: set[int] = set()
-        lock = threading.Lock()
+        lock = threading.Condition()
 
         worker_threads: dict[Invocation, threading.Thread] = {}
 
         def worker() -> None:
+            index: int | None = None
             try:
                 while True:
-                    try:
-                        index = pending.get_nowait()
-                    except queue.Empty:
-                        return
-                    invocation = Invocation()
                     with lock:
+                        if index is not None and index in abandoned:
+                            return
+                        try:
+                            following = pending.get_nowait()
+                        except queue.Empty:
+                            return
+                        if index is not None:
+                            started.pop(index, None)
+                        index = following
+                        invocation = Invocation()
                         started[index] = (time.monotonic(), invocation)
                         worker_threads[invocation] = threading.current_thread()
-                    outcome = self._execute(rules[index], ctx, invocation)
+                        lock.notify_all()
+                    try:
+                        outcome = self._execute(
+                            rules[index], ctx, invocation, finish_invocation=False
+                        )
+                    except BaseException as exc:
+                        # A plugin can terminate its worker with SystemExit;
+                        # it must not leave queued rules without a live owner.
+                        rule = rules[index]
+                        outcome = [self._result(
+                            rule, Status.ERROR,
+                            f"Rule worker failed: {exception_details(exc)}",
+                            severity=max(rule.severity, Severity.ERROR),
+                        )]
                     with lock:
-                        started.pop(index, None)
                         if index in abandoned:
                             return
                         results[index] = outcome
+                        lock.notify_all()
             finally:
-                ctx.finish_worker()
+                try:
+                    # Keep the session active until the native handles are closed.
+                    # An owned context must not race this cleanup with a second
+                    # close after the deadline monitor returns an incomplete report.
+                    for cleanup in (ctx.finish_worker, ctx.end_rule):
+                        try:
+                            cleanup()
+                        except BaseException as exc:
+                            with lock:
+                                if index is not None and index not in abandoned:
+                                    rule = rules[index]
+                                    results[index] = [
+                                        *(results[index] or []),
+                                        self._result(
+                                            rule, Status.ERROR,
+                                            f"Rule worker cleanup failed: {exception_details(exc)}",
+                                            severity=max(rule.severity, Severity.ERROR),
+                                        ),
+                                    ]
+                finally:
+                    # Publishing a rule result does not release its worker's
+                    # connection. Keep the final invocation deadline-monitored
+                    # until cleanup completes; the next invocation transfers
+                    # this ownership atomically when a worker is reused.
+                    with lock:
+                        if index is not None:
+                            started.pop(index, None)
+                        lock.notify_all()
 
         for _ in range(min(capacity, len(rules))):
             threading.Thread(target=worker, name="qavf-rule", daemon=True).start()
@@ -545,7 +596,9 @@ class QARunner:
                                 severity=max(rule.severity, Severity.ERROR),
                             )
                         ]
-                finished = all(result is not None for result in results)
+                finished = all(result is not None for result in results) and all(
+                    index in abandoned for index in started
+                )
             for invocation in cancel:
                 ctx.cancel_rule(invocation)
             if finished:
@@ -553,10 +606,20 @@ class QARunner:
                 while ctx._active and time.monotonic() < grace:
                     time.sleep(min(0.005, max(0.0, grace - time.monotonic())))
                 return [result for result in results if result is not None]
-            time.sleep(0.005)
+            with lock:
+                # Recheck under the notification lock: completion can race cancellation.
+                if all(result is not None for result in results) and all(
+                    index in abandoned for index in started
+                ):
+                    continue
+                deadlines = [stamp + timeout for index, (stamp, _) in started.items()
+                             if index not in abandoned]
+                delay = max(0.0, min(deadlines) - time.monotonic()) if deadlines else None
+                lock.wait(timeout=delay)
 
     def _execute(
-        self, rule: Rule, ctx: DataContext, invocation: Invocation | None = None
+        self, rule: Rule, ctx: DataContext, invocation: Invocation | None = None,
+        *, finish_invocation: bool = True,
     ) -> list[RuleResult]:
         """Isolate the complete invocation, including entry and resource release."""
         began = False
@@ -601,7 +664,8 @@ class QARunner:
                         )
                     )
                 finally:
-                    ctx.end_rule()
+                    if finish_invocation:
+                        ctx.end_rule()
         return results
 
     def _execute_isolated(self, rule: Rule, ctx: DataContext) -> list[RuleResult]:
@@ -687,15 +751,20 @@ class QARunner:
         # Time is measured per rule; attribute it to the first result only.
         results = []
         for index, finding in enumerate(findings):
-            severity = None
-            if not finding.assessed:
-                status = Status.ERROR
-                severity = max(finding.severity or rule.severity, Severity.ERROR)
-            elif finding.skipped:
-                status = Status.SKIPPED
-            else:
-                status = Status.PASS if finding.passed else Status.FAIL
             try:
+                if not isinstance(finding, Finding):
+                    raise TypeError("each rule result must be a Finding")
+                # Subclasses may override construction hooks. Reapply the base
+                # verdict/count contract at the engine's admission boundary.
+                Finding.__post_init__(finding)
+                severity = None
+                if not finding.assessed:
+                    status = Status.ERROR
+                    severity = max(finding.severity or rule.severity, Severity.ERROR)
+                elif finding.skipped:
+                    status = Status.SKIPPED
+                else:
+                    status = Status.PASS if finding.passed else Status.FAIL
                 result = self._result(
                     rule,
                     status,
@@ -742,7 +811,10 @@ class QARunner:
         raw_metrics = finding.metrics if finding else {}
         # Coverage is the outcome ledger, not optional evidence. It is preserved
         # exactly and bounded only by the complete-report budget.
-        coverage = raw_metrics.get("passed_checks")
+        coverage = (
+            _coverage_labels(raw_metrics["passed_checks"])
+            if "passed_checks" in raw_metrics else None
+        )
         evidence_metrics = {
             key: value for key, value in raw_metrics.items() if key != "passed_checks"
         }
@@ -862,6 +934,61 @@ def _distribution(module: str) -> str | None:
     return None
 
 
+@functools.cache
+def _builtin_distribution() -> tuple[bool, str | None]:
+    """Canonical metadata for built-ins, without scanning unrelated distributions.
+
+    Some editable installations do not declare their top-level packages. Keep
+    their provenance unknown, as with ``packages_distributions()``. A checkout
+    without canonical metadata retains the generic lookup for other providers.
+    """
+    try:
+        distribution = importlib.metadata.distribution("qavf")
+        declared = (distribution.read_text("top_level.txt") or "").split()
+        claims_package = (
+            "qavf" in declared
+            if declared
+            else any(
+                len(path.parts) > 1 and path.parts[0] == "qavf"
+                for path in distribution.files or ()
+            )
+        )
+        name = distribution.metadata["Name"]
+        return True, f"{name}=={distribution.version}" if claims_package and name else None
+    except Exception:
+        # Missing/unreadable optional metadata keeps the established fallback.
+        return False, None
+
+
+def _is_builtin_rule(rule_type: type[Rule]) -> bool:
+    """Recognize an actual exported class in this package's built-in modules."""
+    if not rule_type.__module__.startswith("qavf.rules."):
+        return False
+    module = sys.modules.get(rule_type.__module__)
+    if module is None or getattr(module, rule_type.__name__, None) is not rule_type:
+        return False
+    origin = getattr(getattr(module, "__spec__", None), "origin", None)
+    if not isinstance(origin, str):
+        return False
+    try:
+        package = Path(__file__).resolve().parent.parent
+        expected = package.joinpath(*rule_type.__module__.split(".")[1:])
+        return Path(origin).resolve() in (
+            expected.with_suffix(".py").resolve(),
+            (expected / "__init__.py").resolve(),
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _rule_distribution(rule_type: type[Rule]) -> str | None:
+    if _is_builtin_rule(rule_type):
+        available, distribution = _builtin_distribution()
+        if available:
+            return distribution
+    return _distribution(rule_type.__module__)
+
+
 def _rule_info(rule: Rule) -> RuleInfo:
     module = type(rule).__module__
     return RuleInfo(
@@ -869,7 +996,7 @@ def _rule_info(rule: Rule) -> RuleInfo:
         severity=rule.severity,
         params=redact(rule.params.model_dump(mode="python")),
         module=module,
-        distribution=_distribution(module),
+        distribution=_rule_distribution(type(rule)),
     )
 
 
@@ -897,6 +1024,15 @@ def environment() -> dict[str, str]:
 def _jsonable(value: Any) -> Any:
     """Normalize through the report codec's supported, detached evidence contract."""
     return normalize_evidence(value)
+
+
+def _coverage_labels(value: Any) -> list[str]:
+    """Validate the reserved outcome ledger before exact requirement matching."""
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise TypeError("Finding.metrics.passed_checks must be a sequence of nonempty strings")
+    if any(not isinstance(label, str) or not label.strip() for label in value):
+        raise TypeError("Finding.metrics.passed_checks must contain only nonempty strings")
+    return list(value)
 
 
 def _bounded_diagnostic(message: str, limit: int) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +84,12 @@ def run_tests(
     }
     write_json(output, record)
     try:
-        process = subprocess.run(command, cwd=workdir, env=environment, check=False)
+        # A fresh owned base avoids pytest's shared pytest-current symlink cleanup
+        # on Windows. Never give --basetemp a caller-owned directory: pytest clears it.
+        with tempfile.TemporaryDirectory(prefix="qavf-pytest-") as directory:
+            command.extend(["--basetemp", str(Path(directory) / "tests")])
+            write_json(output, record)
+            process = subprocess.run(command, cwd=workdir, env=environment, check=False)
         record["process_exit_code"] = process.returncode
         if results.is_file():
             record["tests"] = json.loads(results.read_text(encoding="utf-8"))

@@ -6,6 +6,7 @@ import polars as pl
 import pytest
 
 from qavf.engine.context import DataContext
+from qavf.rules._column_batch import ColumnInputs
 from qavf.rules.input_checks import ColumnCheckRule
 from qavf.settings import QAVFSettings
 from qavf.sources.base import SourceError
@@ -30,6 +31,16 @@ def context(frame, columns, backend, tmp_path, *, evidence_limit=0):
 
 def count_reads(ctx, backend, monkeypatch):
     reads = []
+    if backend == "lazy":
+        execute = ColumnInputs.collect
+
+        def observed(self, *args, **kwargs):
+            reads.append(args)
+            return execute(self, *args, **kwargs)
+
+        monkeypatch.setattr(ColumnInputs, "collect", observed)
+        monkeypatch.setattr(ctx, "get", lambda *args: pytest.fail("full dataset materialization"))
+        return reads
     method = "collect" if backend == "lazy" else "sql"
     execute = getattr(ctx, method)
 
@@ -61,13 +72,13 @@ def test_mixed_contracts_share_one_source_reduction(backend, tmp_path, monkeypat
     with context(frame, columns, backend, tmp_path) as ctx:
         reads = count_reads(ctx, backend, monkeypatch)
         scans = []
-        scan = ctx.scan
+        scan = ctx.observe
 
         def counted_scan(*args, **kwargs):
             scans.append(args)
             return scan(*args, **kwargs)
 
-        monkeypatch.setattr(ctx, "scan", counted_scan)
+        monkeypatch.setattr(ctx, "observe", counted_scan)
         found = ColumnCheckRule().evaluate(ctx)
         assert all(f.passed for f in found), [f.message for f in found]
         assert len(reads) == 1
@@ -164,7 +175,9 @@ def test_shared_read_failure_is_not_retried(backend, tmp_path, monkeypatch):
             calls.append(args)
             raise SourceError("non-retryable source read")
 
-        monkeypatch.setattr(ctx, "collect" if backend == "lazy" else "sql", failed)
+        # Lazy checks now capture one owned observation before all contracts.
+        # A failed capture must be attempted once and leave every check unassessed.
+        monkeypatch.setattr(ctx, "observe" if backend == "lazy" else "sql", failed)
         found = ColumnCheckRule().evaluate(ctx)
         assert len(found) == 2
         assert all(not f.assessed for f in found)
@@ -193,6 +206,11 @@ def test_raw_missing_evidence_and_aliases_survive_fusion(backend, tmp_path):
         },
         "s": {"nullable": True, "blank_as_missing": True, "regex": "[A-Z]"},
         "scope": {"nullable": True, "missing_values": [-1]},
+        # Declared contracts keep these user columns in the coherent projection
+        # so collisions with generated aliases are still exercised.
+        "__QAVF_ROW": {},
+        "__QAVF_ORIGINAL_X": {},
+        "__QAVF_VIOLATES": {},
     }
     with context(frame, columns, backend, tmp_path, evidence_limit=1) as ctx:
         found = [f for f in ColumnCheckRule().evaluate(ctx) if not f.passed]

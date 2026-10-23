@@ -111,6 +111,10 @@ class ComparisonLevel(Component):
             return ["needs the comparison's 'keys'"]
         return []
 
+    def required_columns(self) -> frozenset[str] | None:
+        """Aligned columns read; None preserves all columns for schema checks/plugins."""
+        return None
+
     def datasets(self) -> frozenset[str]:
         """Further configured datasets the level reads (e.g. a zone layer)."""
         return frozenset()

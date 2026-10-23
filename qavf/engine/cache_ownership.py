@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Any, cast
+from typing import Any, BinaryIO, cast
 
 import numpy as np
 import polars as pl
@@ -44,6 +44,65 @@ class _ArrowSnapshot:
     payload: bytes
 
 
+@dataclass(frozen=True, slots=True)
+class _PolarsSnapshot:
+    value: pl.DataFrame | pl.Series
+    size: int
+
+
+class _CountingSink:
+    """IPC-compatible size-only writer; never retain the encoded payload."""
+
+    def __init__(self) -> None:
+        self.size = 0
+
+    def write(self, data: bytes) -> int:
+        self.size += len(data)
+        return len(data)
+
+    def tell(self) -> int:
+        return self.size
+
+    def flush(self) -> None:
+        pass
+
+
+def _numpy_dtype_supported(dtype: np.dtype) -> bool:
+    """Copies share dtype objects, so reject their hidden Python payloads too."""
+    if dtype.hasobject or dtype.metadata is not None:
+        return False
+    if dtype.fields is None and dtype.subdtype is None:
+        return True
+    pending, seen = [dtype], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.hasobject or current.metadata is not None:
+            return False
+        if current.subdtype is not None:
+            pending.append(current.subdtype[0])
+        if current.fields is not None:
+            for field in current.fields.values():
+                # NumPy permits arbitrary objects as field titles; unlike an
+                # ordinary string title, these may be mutable and unbounded.
+                if len(field) > 2 and type(field[2]) is not str:
+                    return False
+                pending.append(field[0])
+    return True
+
+
+def _pandas_dtype_supported(dtype: Any) -> bool:
+    if not isinstance(dtype, np.dtype):
+        return True
+    # Plain object columns/indexes have their values detached recursively below.
+    # Their dtype itself must still be free of unowned metadata.
+    if dtype == np.dtype(object) and dtype.metadata is None:
+        return True
+    return _numpy_dtype_supported(dtype)
+
+
 def _own_arrow(value: pa.Table | pa.Array | pa.ChunkedArray) -> _ArrowSnapshot:
     table = value if isinstance(value, pa.Table) else pa.table({"value": value})
     sink = pa.BufferOutputStream()
@@ -64,6 +123,8 @@ def _index_payload_size(index: Any, seen: set[int]) -> int:
     if id(index) in seen:
         return 0
     seen.add(id(index))
+    if not _pandas_dtype_supported(index.dtype):
+        return sys.maxsize
     pd = sys.modules["pandas"]
     if isinstance(index, pd.MultiIndex):
         return (
@@ -99,6 +160,8 @@ def _snapshot_index(index: Any, memo: dict[int, Any], *, compact: bool) -> Any:
     if id(index) in memo:
         return memo[id(index)]
     pd = sys.modules["pandas"]
+    if not _pandas_dtype_supported(index.dtype):
+        raise TypeError("pandas dtype metadata requires an explicit cache representation")
     if _arrow_pandas_dtype(index.dtype) and not isinstance(index.dtype, pd.StringDtype):
         raise TypeError("Arrow-backed pandas indexes require an explicit Arrow cache value")
     name = _snapshot(index.name, memo, compact=compact)
@@ -187,6 +250,29 @@ def compact_polars(value: pl.DataFrame | pl.Series) -> pl.DataFrame | pl.Series:
     return pl.DataFrame([_compact_series(column) for column in value])
 
 
+def compact_polars_with_size(
+    value: pl.DataFrame | pl.Series,
+) -> tuple[pl.DataFrame | pl.Series, int]:
+    """Detach once and retain the size already known for serialized nested columns."""
+    _check_polars(value)
+    if isinstance(value, pl.DataFrame) and not value.width:
+        return value.clone(), 0
+    columns = [value] if isinstance(value, pl.Series) else list(value)
+    owned, size = [], 0
+    for column in columns:
+        if column.dtype.is_nested():
+            stream = io.BytesIO()
+            column.to_frame().write_ipc(stream, compression="uncompressed")
+            size += 2 * stream.tell()
+            owned.append(pl.read_ipc(stream.getvalue()).to_series())
+        else:
+            copied = _compact_series(column)
+            owned.append(copied)
+            size += _polars_size(copied)
+    result = owned[0] if isinstance(value, pl.Series) else pl.DataFrame(owned)
+    return result, size
+
+
 def _polars_size(value: pl.DataFrame | pl.Series) -> int:
     _check_polars(value)
     if isinstance(value, pl.DataFrame):
@@ -194,8 +280,8 @@ def _polars_size(value: pl.DataFrame | pl.Series) -> int:
     if value.dtype.is_nested():
         # Native IPC may retain a serialized parent. Count its complete backing
         # and decoded buffers; avoid nested newest-compat exports on Polars 1.32.
-        stream = io.BytesIO()
-        value.to_frame().write_ipc(stream, compression="uncompressed")
+        stream = _CountingSink()
+        value.to_frame().write_ipc(cast(BinaryIO, stream), compression="uncompressed")
         return 2 * stream.tell()
     try:
         # Unlike estimated_size, this includes StringView descriptors and enum
@@ -207,8 +293,8 @@ def _polars_size(value: pl.DataFrame | pl.Series) -> int:
         # An unsupported nested dtype uses the native IPC ownership fallback.
         # Count both an entire serialized backing allocation and decoded buffers
         # conservatively; IPC includes their descriptors, validity and metadata.
-        stream = io.BytesIO()
-        value.to_frame().write_ipc(stream, compression="uncompressed")
+        stream = _CountingSink()
+        value.to_frame().write_ipc(cast(BinaryIO, stream), compression="uncompressed")
         return 2 * stream.tell()
 
 
@@ -220,6 +306,8 @@ def retained_size(value: Any, seen: set[int] | None = None) -> int:
     seen.add(id(value))
     if isinstance(value, _ArrowSnapshot):
         return sys.getsizeof(value) + sys.getsizeof(value.payload)
+    if isinstance(value, _PolarsSnapshot):
+        return value.size
     if isinstance(value, pl.DataFrame | pl.Series):
         try:
             return _polars_size(value)
@@ -232,7 +320,10 @@ def retained_size(value: Any, seen: set[int] | None = None) -> int:
     series = getattr(pd, "Series", ())
     if isinstance(value, dataframe):
         assert pd is not None
-        if any(_arrow_pandas_dtype(dtype) for dtype in value.dtypes):
+        if any(
+            _arrow_pandas_dtype(dtype) or not _pandas_dtype_supported(dtype)
+            for dtype in value.dtypes
+        ):
             return sys.maxsize
         size = int(value.memory_usage(index=False, deep=False).sum())
         size += _index_payload_size(value.index, seen) + _index_payload_size(value.columns, seen)
@@ -250,7 +341,7 @@ def retained_size(value: Any, seen: set[int] | None = None) -> int:
         )
     if isinstance(value, series):
         assert pd is not None
-        if _arrow_pandas_dtype(value.dtype):
+        if _arrow_pandas_dtype(value.dtype) or not _pandas_dtype_supported(value.dtype):
             return sys.maxsize
         size = int(value.memory_usage(index=False, deep=False))
         size += _index_payload_size(value.index, seen) + retained_size(value.name, seen)
@@ -263,7 +354,16 @@ def retained_size(value: Any, seen: set[int] | None = None) -> int:
             else 0
         )
     if isinstance(value, np.ndarray):
-        return sys.maxsize if value.dtype.hasobject else int(value.nbytes)
+        return int(value.nbytes) if _numpy_dtype_supported(value.dtype) else sys.maxsize
+    if isinstance(value, np.void):
+        # Structured scalars can be mutable views into an arbitrarily large
+        # array. Insertion detaches non-object records; object fields require
+        # an explicit supported representation, just like object ndarrays.
+        return (
+            sys.getsizeof(value) + value.dtype.itemsize
+            if _numpy_dtype_supported(value.dtype)
+            else sys.maxsize
+        )
     if isinstance(value, pa.Table | pa.Array | pa.ChunkedArray):
         return int(value.get_total_buffer_size())
     size = sys.getsizeof(value)
@@ -284,13 +384,26 @@ def _snapshot(value: Any, memo: dict[int, Any] | None = None, *, compact: bool =
         return memo[id(value)]
     if isinstance(value, _ArrowSnapshot):
         return value.value
+    if isinstance(value, _PolarsSnapshot):
+        return value.value.clone()
     if isinstance(value, pl.DataFrame | pl.Series):
         _check_polars(value)
-        result = memo[id(value)] = compact_polars(value) if compact else value.clone()
+        result = memo[id(value)] = (
+            _PolarsSnapshot(*compact_polars_with_size(value)) if compact else value.clone()
+        )
         return result
     if isinstance(value, np.ndarray):
-        if value.dtype.hasobject:
-            raise TypeError("object arrays require an explicit cache representation")
+        if not _numpy_dtype_supported(value.dtype):
+            raise TypeError(
+                "NumPy object or metadata payloads require an explicit cache representation"
+            )
+        result = memo[id(value)] = value.copy()
+        return result
+    if isinstance(value, np.void):
+        if not _numpy_dtype_supported(value.dtype):
+            raise TypeError(
+                "NumPy object or metadata payloads require an explicit cache representation"
+            )
         result = memo[id(value)] = value.copy()
         return result
     pd = sys.modules.get("pandas")
@@ -298,6 +411,9 @@ def _snapshot(value: Any, memo: dict[int, Any] | None = None, *, compact: bool =
     series = getattr(pd, "Series", ())
     if isinstance(value, (dataframe, series)):
         assert pd is not None
+        dtypes = value.dtypes if isinstance(value, dataframe) else [value.dtype]
+        if any(not _pandas_dtype_supported(dtype) for dtype in dtypes):
+            raise TypeError("pandas dtype metadata requires an explicit cache representation")
         result = memo[id(value)] = value.copy(deep=True)
         result.index = _snapshot_index(value.index, memo, compact=compact)
         result.attrs = _snapshot(value.attrs, memo, compact=compact)

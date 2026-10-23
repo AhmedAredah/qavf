@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 
 import numpy as np
 import numpy.typing as npt
@@ -41,7 +42,9 @@ from qavf.inference.resampling import (
     DEFAULT_MAX_WORK,
     DEFAULT_RESAMPLES,
     DEFAULT_SEED,
+    batches,
     block_indices,
+    check_resamples,
     check_work,
     default_block_length,
     default_hac_lags,
@@ -60,12 +63,44 @@ def kendall_tau(
 ) -> TestResult:
     """Kendall's tau-b of ``y`` against ``x`` with SciPy's p-value (``auto`` method).
 
-    The values are passed to SciPy as given (ranks need no conversion). An
-    undefined tau (a constant or missing value) is not assessed.
+    Dense integer ranks are formed without float conversion, preserving large
+    integer and fine-resolution time order before SciPy evaluates the test.
+    An undefined tau (a constant or missing value) is not assessed.
     """
+    if alternative not in ("two-sided", "less", "greater"):
+        raise ValueError(f"unknown alternative {alternative!r}")
     stats = require_scipy()
-    a, b = np.asarray(x), np.asarray(y)
-    result = stats.kendalltau(a, b, alternative=alternative)
+    try:
+        a, b = np.asarray(x), np.asarray(y)
+    except (ValueError, TypeError):
+        raise Unassessable("Kendall's tau needs paired one-dimensional observations") from None
+    if a.ndim != 1 or b.ndim != 1 or len(a) != len(b):
+        raise Unassessable("Kendall's tau needs paired one-dimensional observations")
+    for sample in (a, b):
+        if sample.dtype.kind in "fc" and not np.isfinite(sample).all():
+            raise Unassessable("Kendall's tau needs finite observations", n={"pairs": len(a)})
+        if sample.dtype.kind in "mM" and np.isnat(sample).any():
+            raise Unassessable("Kendall's tau needs nonmissing times", n={"pairs": len(a)})
+        if sample.dtype.kind == "O":
+            for value in sample:
+                missing = (
+                    value is None
+                    or (isinstance(value, float | np.floating) and not math.isfinite(value))
+                    or (isinstance(value, Decimal) and not value.is_finite())
+                    or (isinstance(value, np.datetime64 | np.timedelta64) and np.isnat(value))
+                )
+                if missing:
+                    raise Unassessable(
+                        "Kendall's tau needs finite nonmissing observations", n={"pairs": len(a)}
+                    )
+    try:
+        # Some SciPy releases coerce integer/time observations to floats before
+        # ranking. Dense integer ranks preserve exact ties and order first.
+        ranked_a = np.unique(a, return_inverse=True)[1]
+        ranked_b = np.unique(b, return_inverse=True)[1]
+        result = stats.kendalltau(ranked_a, ranked_b, alternative=alternative)
+    except (ValueError, TypeError, ArithmeticError):
+        raise Unassessable("Kendall's tau observations cannot be ordered") from None
     tau, p = float(result.statistic), float(result.pvalue)
     n = {"pairs": len(a)}
     if math.isnan(tau) or math.isnan(p):
@@ -104,7 +139,8 @@ def _s_and_variance(y: np.ndarray) -> tuple[int, float]:
     """Mann-Kendall ``S`` of an ordered series and its tie-corrected null variance."""
     s = 0
     for i in range(len(y) - 1):
-        s += int(np.sign(y[i + 1 :] - y[i]).sum())
+        later = y[i + 1 :]
+        s += int(np.count_nonzero(later > y[i])) - int(np.count_nonzero(later < y[i]))
     n = len(y)
     _, ties = np.unique(y, return_counts=True)
     variance = (n * (n - 1) * (2 * n + 5) - float((ties * (ties - 1) * (2 * ties + 5)).sum())) / 18
@@ -115,6 +151,27 @@ def _z(s: int, variance: float) -> float:
     if s == 0 or variance == 0:
         return 0.0
     return (s - math.copysign(1, s)) / math.sqrt(variance)
+
+
+def _slope_coordinates(x: np.ndarray, y: np.ndarray):
+    """Preserve ranks and pairwise slopes without raw signed-range subtraction."""
+    try:
+        sx, ux, _ = center_scale_observations(x)
+        sy, uy, _ = center_scale_observations(y)
+    except ValueError as exc:
+        raise Unassessable(str(exc)) from None
+    return sx, sy, ux, uy
+
+
+def _slope_units(slope: float, y_unit: float, x_unit: float) -> float:
+    """Apply the ratio of exact binary units without an overflowing intermediate."""
+    try:
+        value = math.ldexp(float(slope), math.frexp(y_unit)[1] - math.frexp(x_unit)[1])
+    except OverflowError:
+        raise Unassessable("the slope cannot be represented in data units") from None
+    if not math.isfinite(value):
+        raise Unassessable("the slope cannot be represented in data units")
+    return value
 
 
 @assessed("mann_kendall")
@@ -142,17 +199,18 @@ def mann_kendall(
     stats = require_scipy()
     s, variance = _s_and_variance(y)
     z = _z(s, variance)
-    slope, _, low, high = stats.theilslopes(y, x, alpha=confidence)
+    sx, sy, x_unit, y_unit = _slope_coordinates(x, y)
+    slope, _, low, high = stats.theilslopes(sy, sx, alpha=confidence)
     return TestResult(
         method="mann_kendall",
         statistic=float(s),
         statistic_name="S",
         p_value=normal_p_value(z, alternative) if variance else 1.0,
         alternative=alternative,
-        effect=float(slope),
+        effect=_slope_units(slope, y_unit, x_unit),
         effect_name="sen_slope",
-        ci_low=float(low),
-        ci_high=float(high),
+        ci_low=_slope_units(low, y_unit, x_unit),
+        ci_high=_slope_units(high, y_unit, x_unit),
         confidence=confidence,
         n=n,
         assumptions=["independent observations (no serial correlation)", "monotone trend"],
@@ -196,6 +254,7 @@ def seasonal_kendall(
     if not pairs:
         raise Unassessable("no season has two values", n=n)
     check_work(pairs, max_work, "seasonal Kendall")
+    x, y, x_unit, y_unit = _slope_coordinates(x, y)
     s, variance = 0, 0.0
     slopes = []
     for members in groups.values():
@@ -214,7 +273,7 @@ def seasonal_kendall(
         statistic_name="S",
         p_value=normal_p_value(z, alternative) if variance else 1.0,
         alternative=alternative,
-        effect=float(np.median(np.concatenate(slopes))),
+        effect=_slope_units(float(np.median(np.concatenate(slopes))), y_unit, x_unit),
         effect_name="seasonal_sen_slope",
         n=n,
         assumptions=["independent seasons", "no serial correlation within a season"],
@@ -245,10 +304,12 @@ def slope_difference(
     errors (``'hac'``; Student t with ``n - 2`` degrees of freedom), or a
     null-imposed circular block bootstrap (``'block'``, the default): blocks of
     the centred difference, at the fixed positions, give the slope's
-    distribution without a trend, and the p-value is the share of resampled
-    slopes at least as large as the observed one (the interval is the
-    observed slope minus that distribution's quantiles, conservative when
-    there is a trend). HAC errors are known to be liberal
+    distribution without a trend. Variances from block lengths ``l`` and
+    ``min(2*l,n)`` are extrapolated as ``max(2*v_2l-v_l,v_2l)``. Its square root
+    is a standard error, used with Student t(``n-2``) for both the p-value and
+    interval; this is not a permutation-tail p-value or percentile interval.
+    Positions are sorted before dependence calculations; lag/block adjacency
+    refers to consecutive observed positions. HAC errors are known to be liberal
     for short autocorrelated series; the block bootstrap holds its level
     better. At least 4 positions.
     """
@@ -263,19 +324,21 @@ def slope_difference(
     at_least(len(x), 4, "positions", n=n)
     if len(np.unique(x)) < len(x):
         raise Unassessable("two values share one position", n=n)
+    # Dependence follows the declared chronology, not the caller's row order.
+    order = np.argsort(x, kind="stable")
+    x, b, c = x[order], b[order], c[order]
     try:
         sx, x_unit, _ = center_scale_observations(x)
         joined, unit, _ = center_scale_observations(np.concatenate([b, c]))
     except ValueError as exc:
         raise Unassessable(str(exc), n=n) from None
     d = joined[len(b) :] - joined[: len(b)]
-    scale = unit / x_unit
     slope, _, _, residual = ols_slope(sx, d)
     common = {
         "method": "slope_difference",
         "statistic_name": "t",
         "alternative": alternative,
-        "effect": slope * scale,
+        "effect": _slope_units(slope, unit, x_unit),
         "effect_name": "slope_difference",
         "confidence": confidence,
         "n": n,
@@ -284,7 +347,7 @@ def slope_difference(
     df = len(x) - 2
     if not np.any(residual):
         t = 0.0 if slope == 0 else math.copysign(math.inf, slope)
-        point = slope * scale
+        point = _slope_units(slope, unit, x_unit)
         return TestResult(
             statistic=t, p_value=1.0 if slope == 0 else t_p_value(t, df, alternative),
             ci_low=point, ci_high=point, notes=["the difference is exactly linear"], **common,
@@ -293,6 +356,7 @@ def slope_difference(
     if dependence == "block":
         length = min(len(x), default_block_length(len(x)) if block is None else block)
         longer = min(len(x), 2 * length)
+        check_resamples(resamples)
         check_work(2 * resamples * len(x), max_work, "block bootstrap")
         # Null-imposed: blocks of the centred difference (no trend) at the fixed
         # positions give the slope's spread without a trend. (Residuals around the
@@ -302,8 +366,14 @@ def slope_difference(
         centred = d - d.mean()
         variances = []
         for size in (length, longer):
-            errors = centred[block_indices(rng, len(x), resamples, size)]
-            slopes = (errors - errors.mean(axis=1, keepdims=True)) @ xc / float(xc @ xc)
+            slopes = np.empty(resamples)
+            done = 0
+            for step in batches(resamples, len(x)):
+                errors = centred[block_indices(rng, len(x), step, size)]
+                slopes[done : done + step] = (
+                    (errors - errors.mean(axis=1, keepdims=True)) @ xc / float(xc @ xc)
+                )
+                done += step
             variances.append(float(slopes.var(ddof=1)))
         # A block bootstrap variance is biased low by O(1/l); extrapolating from
         # blocks of l and 2l removes the leading term (Richardson extrapolation).
@@ -320,13 +390,13 @@ def slope_difference(
     else:
         se = math.sqrt(float(residual @ residual) / df / float(((sx - sx.mean()) ** 2).sum()))
         assumption = "independent residuals"
-    t = slope / se
+    t = slope / se if se else (math.copysign(math.inf, slope) if slope else 0.0)
     low, high = t_interval(slope, se, df, confidence)
     return TestResult(
         statistic=t,
         p_value=t_p_value(t, df, alternative),
-        ci_low=low * scale,
-        ci_high=high * scale,
+        ci_low=_slope_units(low, unit, x_unit),
+        ci_high=_slope_units(high, unit, x_unit),
         assumptions=[assumption, "linear trends"],
         **common,
         **resampled,
@@ -339,12 +409,21 @@ def _pearson(x: np.ndarray, y: np.ndarray) -> float | None:
     return None if spread == 0 else float(xc @ yc) / spread
 
 
-def effective_size(x: np.ndarray, y: np.ndarray, lags: int | None = None) -> float:
+def effective_size(
+    x: np.ndarray, y: np.ndarray, lags: int | None = None, *, max_work: int = DEFAULT_MAX_WORK
+) -> float:
     """Bartlett's effective sample size of a correlation of two autocorrelated series:
     ``n / (1 + 2 * sum_k r_x(k) r_y(k))`` over lags ``1..lags`` (``n // 5`` by
     default), never above ``n``."""
     n = len(x)
     lags = max(1, n // 5) if lags is None else lags
+    if isinstance(lags, bool) or not isinstance(lags, int | np.integer) or lags < 0:
+        raise ValueError("lags must be a non-negative integer")
+    used = min(lags, max(0, n - 2))
+    # Two autocorrelations each touch both overlapping slices at every lag.
+    check_work(
+        4 * (used * n - used * (used + 1) // 2), max_work, "effective sample size lag correlations"
+    )
     total = 0.0
     for k in range(1, min(lags, n - 2) + 1):
         rx, ry = _pearson(x[:-k], x[k:]), _pearson(y[:-k], y[k:])
@@ -366,6 +445,7 @@ def correlation_test(
     alternative: Alternative = "two-sided",
     dependence: Dependence = "none",
     confidence: float = 0.95,
+    max_work: int = DEFAULT_MAX_WORK,
 ) -> TestResult:
     """Fisher's z test of Pearson's correlation against ``rho``.
 
@@ -392,7 +472,9 @@ def correlation_test(
     r = _pearson(sa, sb)
     if r is None:
         raise Unassessable("a series is constant; the correlation is undefined", n=n)
-    size = effective_size(sa, sb) if dependence == "effective_n" else float(len(a))
+    size = (
+        effective_size(sa, sb, max_work=max_work) if dependence == "effective_n" else float(len(a))
+    )
     if size <= 3:
         raise Unassessable(f"the effective sample size {size:.3g} is too small", n=n)
     root = math.sqrt(size - 3)
@@ -559,8 +641,8 @@ def lag_test(
         raise Unassessable("a series is constant; correlations are undefined", n=n)
     observed = at_lag - at_zero
     length = default_block_length(len(x)) if block is None else block
+    check_resamples(resamples)
     check_work(resamples * len(x), max_work, "lag block bootstrap")
-    indices = block_indices(generator(seed), len(x), resamples, length)
 
     def correlations(a: np.ndarray, b: np.ndarray) -> np.ndarray:
         ac = a - a.mean(axis=1, keepdims=True)
@@ -569,7 +651,15 @@ def lag_test(
         with np.errstate(invalid="ignore", divide="ignore"):
             return (ac * bc).sum(axis=1) / spread
 
-    gain = correlations(x[indices], yk[indices]) - correlations(x[indices], y0[indices])
+    gain = np.empty(resamples)
+    rng = generator(seed)
+    done = 0
+    for step in batches(resamples, len(x)):
+        indices = block_indices(rng, len(x), step, length)
+        gain[done : done + step] = correlations(x[indices], yk[indices]) - correlations(
+            x[indices], y0[indices]
+        )
+        done += step
     gain = np.where(np.isnan(gain), 0.0, gain)  # an undefined resample counts as no gain
     low, high = percentile_interval(gain, 0.95)
     return TestResult(

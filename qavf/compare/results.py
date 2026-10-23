@@ -20,8 +20,9 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field, SerializeAsAny, ValidationInfo, field_serializer, field_validator
 
+from qavf.audit_codec import encode_audit as encode_non_finite
 from qavf.inference.results import Significance, TestResult
-from qavf.reports.models import SnapshotModel, encode_non_finite
+from qavf.snapshots import SnapshotModel
 
 
 class CheckResult(SnapshotModel):
@@ -62,11 +63,11 @@ class LevelResult(SnapshotModel):
 
     @property
     def assessed(self) -> bool:
-        return all(check.assessed for check in self.checks)
+        return bool(self.checks) and all(check.assessed for check in self.checks)
 
     @property
     def passed(self) -> bool:
-        return all(check.passed for check in self.checks)
+        return self.assessed and all(check.passed for check in self.checks)
 
     def without_details(self) -> LevelResult:
         """This result with its :attr:`detail_fields` reset (checks and counts kept)."""
@@ -202,6 +203,16 @@ class RecordsResult(LevelResult):
     """How the keyed comparison ran (see :class:`qavf.regression.ComparisonResult`)."""
     shifted: list[str] = Field(default_factory=list)
     """Columns whose systematic shift fails the decision policy."""
+
+    def without_details(self) -> LevelResult:
+        """Drop categorical examples while retaining every per-column change count."""
+        return self.model_copy(
+            update={
+                "columns": [
+                    column.model_copy(update={"transitions": []}) for column in self.columns
+                ]
+            }
+        )
 
 
 # ------------------------------------------------------------------- groups
@@ -732,7 +743,11 @@ class DatasetComparison(SnapshotModel):
     @property
     def assessed(self) -> bool:
         """Every configured check was assessed."""
-        return self.error is None and all(level.assessed for level in self.levels)
+        return (
+            self.error is None
+            and bool(self.levels)
+            and all(level.assessed for level in self.levels)
+        )
 
     @property
     def passed(self) -> bool:
@@ -758,11 +773,14 @@ class DatasetComparison(SnapshotModel):
             f"{level.name}: {check.check}"
             for level in self.levels
             for check in level.checks
-            if not check.passed
+            if check.assessed and not check.passed
         ]
-        if not failed:
-            return f"{self.name}: datasets agree ({len(self.levels)} level(s) compared)"
-        return f"{self.name}: differs: " + "; ".join(failed)
+        if failed:
+            return f"{self.name}: differs: " + "; ".join(failed)
+        if not self.assessed:
+            missing = "; ".join(level.name for level in self.levels if not level.assessed)
+            return f"{self.name}: not assessed: {missing or 'no comparison levels'}"
+        return f"{self.name}: datasets agree ({len(self.levels)} level(s) compared)"
 
     @property
     def verdict(self) -> Literal["passed", "failed", "incomplete"]:
@@ -799,10 +817,12 @@ class DatasetComparison(SnapshotModel):
         current = self
         omitted = list(self.omitted)
         for disclosure, strip in steps:
-            omitted.append(disclosure)
-            current = current.model_copy(
-                update={"levels": [strip(level) for level in current.levels], "omitted": omitted}
-            )
+            levels = [strip(level) for level in current.levels]
+            if levels == current.levels:
+                continue
+            if disclosure not in omitted:
+                omitted.append(disclosure)
+            current = current.model_copy(update={"levels": levels, "omitted": omitted})
             if current.json_size_bytes() <= max_bytes:
                 break
         return current
@@ -859,17 +879,48 @@ class DatasetComparison(SnapshotModel):
 
 
 def _without_tests(level: LevelResult) -> LevelResult:
-    def lean(significance: Significance | None) -> Significance | None:
-        return None if significance is None else significance.model_copy(update={"tests": []})
+    """Visit every typed nested snapshot, including plugin result extensions."""
 
-    checks = [c.model_copy(update={"significance": lean(c.significance)}) for c in level.checks]
-    return level.model_copy(update={"checks": checks, "significance": lean(level.significance)})
+    def lean(value: Any) -> Any:
+        if isinstance(value, Significance):
+            return value.model_copy(update={"tests": []}) if value.tests else value
+        if isinstance(value, TestResult):
+            # A standalone result may be required by a plugin's typed schema.
+            # Only the optional lists in Significance are removed at this stage.
+            return value
+        if isinstance(value, SnapshotModel):
+            updates = {}
+            for name in type(value).model_fields:
+                original = getattr(value, name)
+                trimmed = lean(original)
+                if trimmed is not original:
+                    updates[name] = trimmed
+            return value.model_copy(update=updates) if updates else value
+        if isinstance(value, list):
+            items = [lean(item) for item in value]
+            return items if any(a is not b for a, b in zip(items, value, strict=True)) else value
+        if isinstance(value, tuple):
+            members = tuple(lean(item) for item in value)
+            return (
+                members if any(a is not b for a, b in zip(members, value, strict=True)) else value
+            )
+        if isinstance(value, dict):
+            mapping = {key: lean(item) for key, item in value.items()}
+            return (
+                mapping if any(mapping[key] is not item for key, item in value.items()) else value
+            )
+        return value
+
+    return lean(level)  # type: ignore[no-any-return]
 
 
 def _without_evidence(level: LevelResult) -> LevelResult:
     checks = [
         check.model_copy(
-            update={"affected_records": [], "truncated": bool(check.affected_records)}
+            update={
+                "affected_records": [],
+                "truncated": check.truncated or bool(check.affected_records),
+            }
         )
         for check in level.checks
     ]

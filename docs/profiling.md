@@ -12,6 +12,8 @@ source = File("counts.parquet")
 profile = profile_input(
     source,
     max_categories=20,
+    max_category_bytes=1 << 20,
+    max_category_value_bytes=64 << 10,
     resources=ResourceLimits(target_memory="256MiB", max_spill="1GiB"),
 )
 print(profile.rows, profile.columns)
@@ -22,6 +24,14 @@ Native SQL sources use one complete batch stream. The reducer keeps exact counts
 and extrema, string length bounds, and at most `max_categories` labels per text
 column. After that threshold is exceeded it discards the category set permanently;
 it never retains an entire high-cardinality set. Processing does not sample rows.
+Retained categories also share `max_category_bytes` (default 1 MiB) across the
+whole profile, with `max_category_value_bytes` (default 64 KiB) per value. These
+nonnegative integer limits apply to `profile_input` and `profile_frame`; zero
+disables category retention. Oversized values are detected before conversion to
+Python strings. If either byte limit is exceeded, the column keeps exact string
+lengths and missingness instead of an incomplete `isin` list, with a description
+explaining the fallback. The category accounting includes Python string storage
+and conservative set-entry overhead; it is not a process RSS ceiling.
 A row-bounded decoded batch can still be large if individual values are large.
 
 Typed/lazy sources use a coherent, owned observation under the run's temporary

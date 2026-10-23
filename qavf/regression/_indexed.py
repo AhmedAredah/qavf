@@ -13,7 +13,6 @@ from io import BytesIO
 from typing import Any, Protocol
 
 import polars as pl
-from polars.datatypes import DataTypeClass
 
 from qavf.audit_codec import decode_audit, iter_audit_json
 from qavf.engine.resources import ResourceLimitError
@@ -23,7 +22,7 @@ from qavf.keys import FLOAT_EXACT_LIMIT, KeyTypeError, key_casts
 from qavf.regression._comparison import ComparisonAccumulator
 from qavf.regression._plan import ComparisonPlan
 from qavf.regression.models import ComparisonResult
-from qavf.typed_values import encode_temporal
+from qavf.typed_values import encode_temporal, has_object
 
 
 class BatchInput(Protocol):
@@ -65,15 +64,8 @@ class ProjectedInput:
 def supported(plan: ComparisonPlan) -> bool:
     """Opaque Object cells have no portable typed reader/writer contract."""
 
-    def opaque(dtype: pl.DataType | DataTypeClass) -> bool:
-        if isinstance(dtype, (pl.List, pl.Array)):
-            return opaque(dtype.inner)
-        if isinstance(dtype, pl.Struct):
-            return any(opaque(field.dtype) for field in dtype.fields)
-        return dtype == pl.Object
-
     return not any(
-        opaque(schema[column])
+        has_object(schema[column])
         for schema in (plan.baseline_schema, plan.candidate_schema)
         for column in plan.shared
     )

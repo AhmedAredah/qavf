@@ -50,7 +50,7 @@ from qavf.compare.levels import (
     not_assessed,
     register_level,
 )
-from qavf.compare.levels.groups import MeasureSpec, reduce_groups
+from qavf.compare.levels.groups import MeasureSpec, precise_frame, reduce_groups
 from qavf.compare.levels.temporal import TimeAxisParams, bucketed_sides
 from qavf.compare.results import (
     CheckResult,
@@ -59,12 +59,21 @@ from qavf.compare.results import (
     ShapeAssessment,
     ShapeResult,
 )
-from qavf.compare.significance import Inference, MeasureTest, Member, evidence_fields, judge
+from qavf.compare.significance import (
+    Inference,
+    MeasureTest,
+    Member,
+    centered_values,
+    evidence_fields,
+    judge,
+)
 from qavf.compare.significance import label as member_label
 from qavf.compare.spec import InferenceParams, Side
 from qavf.engine.registry import RuleParams
 from qavf.inference.results import Alternative, Significance, TestResult
+from qavf.inference.results import not_assessed as untested
 from qavf.inference.trend import correlation_test, lag_test, slope_difference
+from qavf.key_codec import canonical_key
 from qavf.numeric import exact_rational, report_number
 from qavf.rules.helpers import BoundedEvidence, fresh_internal, plural
 from qavf.statistics.series import (
@@ -201,17 +210,17 @@ type _Series = dict[int, _Point]
 
 def _series(
     frame: pl.DataFrame, group_by: list[str], columns: tuple[str, str, str, str | None]
-) -> dict[tuple[Any, ...], _Series]:
+) -> dict[bytes, _Series]:
     """Each group's buckets by ordinal; buckets without a measure value are absent."""
     label, value, position, profile = columns
-    result: dict[tuple[Any, ...], _Series] = {}
+    result: dict[bytes, _Series] = {}
     selected = [*group_by, label, value, position, *([profile] if profile else [])]
-    for row in frame.select(selected).iter_rows():
+    for row in precise_frame(frame.select(selected)).iter_rows():
         key, rest = tuple(row[: len(group_by)]), row[len(group_by) :]
         exact = exact_rational(rest[1])
         if exact is None:
             continue
-        points = result.setdefault(key, {})
+        points = result.setdefault(canonical_key(key), {})
         if rest[2] in points:
             raise ValueError("two buckets of a series share one position")
         points[rest[2]] = _Point(exact, rest[0], rest[3] if profile else None)
@@ -316,6 +325,14 @@ class SeriesShapeLevel(ComparisonLevel):
     Params: ClassVar[type[RuleParams]] = ShapeParams
     Result: ClassVar[type[LevelResult]] = ShapeResult
 
+    def required_columns(self) -> frozenset[str]:
+        from qavf.compare.levels.groups import measure_columns
+
+        params: ShapeParams = self.params  # type: ignore[assignment]
+        return frozenset(
+            {params.time_column, *params.group_by} | measure_columns((params.measure,))
+        )
+
     def evaluate(self, inputs: LevelInputs, name: str) -> ShapeResult:
         params: ShapeParams = self.params  # type: ignore[assignment]
         group_by = list(params.group_by)
@@ -356,14 +373,21 @@ class SeriesShapeLevel(ComparisonLevel):
         }
         period = params.bucket.cycle_length if params.bucket is not None else None
         groups = (
-            list(aligned.joined.select(group_by).unique(maintain_order=True).iter_rows())
+            list(
+                precise_frame(
+                    aligned.joined.select(group_by).unique(maintain_order=True)
+                ).iter_rows()
+            )
             if group_by
             else [()]
         )
         present = {
-            side: set(aligned.frames[side].select(group_by).iter_rows())
+            side: {
+                canonical_key(key)
+                for key in precise_frame(aligned.frames[side].select(group_by)).iter_rows()
+            }
             if group_by
-            else ({()} if aligned.frames[side].height else set())
+            else ({canonical_key(())} if aligned.frames[side].height else set())
             for side in SIDES
         }
         checks = {
@@ -384,7 +408,8 @@ class SeriesShapeLevel(ComparisonLevel):
         compared = too_short = 0
         for key in groups:
             group = dict(zip(group_by, key, strict=True))
-            on = {side: key in present[side] for side in SIDES}
+            identity = canonical_key(key)
+            on = {side: identity in present[side] for side in SIDES}
             if on["baseline"] != on["candidate"]:
                 lone: Side = "baseline" if on["baseline"] else "candidate"
                 only[lone] += 1
@@ -392,7 +417,7 @@ class SeriesShapeLevel(ComparisonLevel):
                 continue
             # A series whose measure has no value in some buckets (all inputs missing)
             # just has fewer buckets; with too few it is not assessed.
-            b, c = series["baseline"].get(key, {}), series["candidate"].get(key, {})
+            b, c = series["baseline"].get(identity, {}), series["candidate"].get(identity, {})
             compared += 1
             common = sorted(set(b) & set(c))
             if len(common) < params.needed:
@@ -526,11 +551,13 @@ class SeriesShapeLevel(ComparisonLevel):
         name = member_label(list(group), list(group.values()))
         seed = 0 if inference is None else inference.seed + ordinal
         work = 0 if inference is None else inference.max_work
-        floats = (
-            np.array([float(v) for v in xb]),
-            np.array([float(v) for v in xc]),
-            np.array(common, dtype=float),
-        )
+        floats: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        float_problem = None
+        if inference is not None:
+            try:
+                floats = (centered_values(xb), centered_values(xc), np.array(common, dtype=float))
+            except ValueError as exc:
+                float_problem = str(exc)
         shape: dict[str, Any] = {"group": group, "buckets": len(common)}
         if (correlation := params.correlation) is not None:
             r = pearson(xb, xc) if not any(flat) else None
@@ -559,8 +586,15 @@ class SeriesShapeLevel(ComparisonLevel):
                 dependence = correlation.dependence
 
                 def test() -> TestResult:
+                    if floats is None:
+                        return untested("fisher_z", float_problem or "no test values")
                     return correlation_test(
-                        floats[0], floats[1], rho=limit, alternative=side, dependence=dependence
+                        floats[0],
+                        floats[1],
+                        rho=limit,
+                        alternative=side,
+                        dependence=dependence,
+                        max_work=inference.max_work,
                     )
 
             record = {**group, **found, "buckets": len(common)}
@@ -577,6 +611,10 @@ class SeriesShapeLevel(ComparisonLevel):
 
             def slopes() -> TestResult:
                 assert trend is not None
+                if inference is not None and inference.decision == "equivalence":
+                    return untested("slope_difference", "slope_difference has no equivalence form")
+                if floats is None:
+                    return untested("slope_difference", float_problem or "no test values")
                 return slope_difference(
                     floats[2], floats[0], floats[1], dependence=trend.dependence,
                     seed=seed, max_work=work,
@@ -622,14 +660,22 @@ class SeriesShapeLevel(ComparisonLevel):
             }
             shape |= {"lag": found["lag"], "lag_correlation": found["correlation"]}
             gain = None
-            if best is not None and best.lag != 0:
-                shift = best.lag
-                pairs = (
-                    {p: float(v) for p, v in values_b.items()},
-                    {p: float(v) for p, v in values_c.items()},
-                )
+            if inference is not None and inference.decision == "equivalence":
 
                 def gain() -> TestResult:
+                    return untested("lag", "lag has no equivalence form")
+
+            elif best is not None and best.lag != 0:
+                shift = best.lag
+
+                def gain() -> TestResult:
+                    try:
+                        pairs = tuple(
+                            dict(zip(values, centered_values(list(values.values())), strict=True))
+                            for values in (values_b, values_c)
+                        )
+                    except ValueError as exc:
+                        return untested("lag", str(exc))
                     return lag_test(
                         pairs[0], pairs[1], shift, period=period, seed=seed, max_work=work,
                         minimum=params.min_buckets,

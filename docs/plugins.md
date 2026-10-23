@@ -183,6 +183,10 @@ QAVF does not blindly deep-copy arbitrary plugin objects. `verify_identity()` ca
 enforce a source snapshot; raise `SourceIntegrityError` on a detected change.
 Native connections created through the supplied environment participate in run
 cancellation and cleanup. Borrowed connections remain owned by the caller.
+`bound_environment` snapshots source-owned paths, connection definitions and
+storage secrets, including empty mappings, while borrowing the run's resource
+policy. A run cannot replace the source's credentials implicitly. Custom `bind`
+implementations should preserve this ownership boundary.
 
 Rule dependency hooks must declare every dataset their SQL/helpers access. Return
 `None` for a dynamic access list. Discovery registers a module atomically: a bad or
@@ -418,10 +422,18 @@ and entry points.
 component cannot satisfy a failed rule component. Duplicate entry-point names within a
 group are rejected before either entry point loads.
 
-QAVF stages public `@register` changes while discovering an extension and publishes
-those changes only after successful loading and declaration validation. A failed import
-cannot leave an active rule behind. This transaction governs QAVF registries; plugin
-code remains responsible for any external effects it performs during import.
+QAVF uses one context-local registration transaction across rule, source,
+comparison-component and inference-component registries. An extension's changes,
+installed-plugin origin and nested discovery state publish together only after
+successful loading and declaration validation. Failed imports leave no active
+registrations in another family. Concurrent unrelated registrations survive both
+commit and rollback. Imports run outside the common publication lock.
+
+Registrations caused by an entry point remain installed-plugin registrations
+across families, so later runs with `plugins.entry_points: false` cannot resolve
+them. Enabled runs load component plugins before copying public rule decorators
+into their run registry. This transaction governs QAVF registries; plugin code
+remains responsible for external effects it performs during import.
 
 A source's `concurrent_loads`, retry safety and identity hooks apply to eager loads,
 SQL operations, typed lazy collection and snapshot preparation. Use context operations

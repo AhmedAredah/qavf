@@ -28,8 +28,9 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -80,12 +81,34 @@ class CheckView:
     tests: list[TestRow] = field(default_factory=list)
 
 
-@dataclass(frozen=True, slots=True)
 class ChartView:
-    title: str
-    svg: Markup | None = None
-    note: str | None = None
-    """Why the chart is not drawn, or what it leaves out."""
+    """A chart whose admitted SVG is built only when the streaming template reads it."""
+
+    __slots__ = ("_load", "_note", "_svg", "title")
+
+    def __init__(
+        self,
+        title: str,
+        svg: Markup | None = None,
+        note: str | None = None,
+        load: Callable[[], tuple[Markup | None, str | None]] | None = None,
+    ) -> None:
+        self.title, self._svg, self._note, self._load = title, svg, note, load
+
+    def _resolve(self) -> None:
+        if self._load is not None:
+            load, self._load = self._load, None
+            self._svg, self._note = load()
+
+    @property
+    def svg(self) -> Markup | None:
+        self._resolve()
+        return self._svg
+
+    @property
+    def note(self) -> str | None:
+        self._resolve()
+        return self._note
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,16 +153,24 @@ class ChartBudget:
                 note=f"Chart omitted: too large ({marks:,} marks; the limit is "
                 f"{self.limits.max_chart_points:,}).",
             )
-        svg = build()
-        size = len(str(svg).encode("utf-8"))
-        if self.used + size > self.limits.max_chart_bytes:
-            return ChartView(
-                title,
-                note=f"Chart omitted: too large (the document's "
-                f"{self.limits.max_chart_bytes:,}-byte chart budget is used).",
+
+        def load() -> tuple[Markup | None, str | None]:
+            omitted = (
+                f"Chart omitted: too large (the document's "
+                f"{self.limits.max_chart_bytes:,}-byte chart budget is used)."
             )
-        self.used += size
-        return ChartView(title, svg, note)
+            if self.used >= self.limits.max_chart_bytes:
+                return None, omitted
+            svg = build()
+            size = len(str(svg).encode("utf-8"))
+            if self.used + size > self.limits.max_chart_bytes:
+                # An oversized chart exhausts this document's rendering allowance.
+                self.used = self.limits.max_chart_bytes
+                return None, omitted
+            self.used += size
+            return svg, note
+
+        return ChartView(title, load=load)
 
 
 def partial_chart(chart: Callable[..., Markup], *args: Any) -> Callable[[], Markup]:
@@ -166,7 +197,14 @@ def _relative(baseline: Any, candidate: Any) -> float | None:
         return None
     if not baseline or not math.isfinite(baseline) or not math.isfinite(candidate):
         return None
-    return (candidate - baseline) / abs(baseline)
+    difference = candidate - baseline
+    if math.isfinite(difference):
+        return difference / abs(baseline)
+    # The difference can overflow while the relative change remains finite.
+    try:
+        return float((Fraction(candidate) - Fraction(baseline)) / abs(Fraction(baseline)))
+    except OverflowError:
+        return None
 
 
 def _number(value: Any) -> float | None:
@@ -210,7 +248,7 @@ def _counts(verdicts: Iterable[str]) -> dict[str, int]:
 def _rolled(counts: Mapping[str, int]) -> str:
     if counts["failed"]:
         return "failed"
-    return "not assessed" if counts["not assessed"] else "passed"
+    return "not assessed" if counts["not assessed"] or not counts["passed"] else "passed"
 
 
 def _affected(count: int, total: int | None, unit: str | None) -> str:
@@ -463,7 +501,7 @@ def comparison_view(
     )
     if charts_note:
         notes.append(charts_note)
-    verdict = "not assessed" if result.error else _rolled(counts)
+    verdict = "not assessed" if result.verdict == "incomplete" else result.verdict
     return ComparisonView(
         name=result.name,
         anchor=_slug(result.name),
@@ -479,6 +517,28 @@ def comparison_view(
     )
 
 
+def _structured_identity(result: RuleResult) -> tuple[str, str, str] | None:
+    """Accept producer metadata only when it agrees with the finding label."""
+    value = result.metrics.get("_qavf_comparison_identity")
+    if isinstance(value, Mapping):
+        name, level, check = (value.get(key) for key in ("name", "level", "check"))
+        if (
+            isinstance(name, str) and isinstance(level, str) and isinstance(check, str)
+            and result.check == f"{name}: {level}: {check}"
+        ):
+            return name, level, check
+    return None
+
+
+def _identity(result: RuleResult) -> tuple[str, str, str]:
+    """Prefer exact comparison identity; older reports have only a display label."""
+    identity = _structured_identity(result)
+    if identity is not None:
+        return identity
+    name, level, check = ([*(result.check or "").split(": ", 2), "", ""])[:3]
+    return name, level, check
+
+
 def _from_results(name: str, results: list[RuleResult]) -> ComparisonView:
     """A comparison's section from its findings alone (no typed detail, no charts)."""
     from qavf.engine.severity import Status
@@ -486,7 +546,7 @@ def _from_results(name: str, results: list[RuleResult]) -> ComparisonView:
     by_level: dict[str, list[CheckView]] = {}
     for result in results:
         assert result.check is not None
-        _, level, check = ([*result.check.split(": ", 2), "", ""])[:3]
+        _, level, check = _identity(result)
         verdict = {Status.PASS: "passed", Status.FAIL: "failed"}.get(result.status, "not assessed")
         metrics = result.metrics
         family = None
@@ -533,11 +593,13 @@ def _from_results(name: str, results: list[RuleResult]) -> ComparisonView:
     )
 
 
-def report_views(report: QAReport, limits: HtmlLimits | None = None) -> list[ComparisonView]:
+def report_views(
+    report: QAReport, limits: HtmlLimits | None = None, *, budget: ChartBudget | None = None
+) -> list[ComparisonView]:
     """The comparison sections of a report: one per comparison of its ``CMP-001`` results."""
     from qavf.compare.results import DatasetComparison
 
-    budget = ChartBudget(limits or HtmlLimits())
+    budget = budget if budget is not None else ChartBudget(limits or HtmlLimits())
     found = [r for r in report.results if r.rule_id == "CMP-001" and r.check]
     views: list[ComparisonView] = []
     covered: list[str] = []
@@ -554,12 +616,29 @@ def report_views(report: QAReport, limits: HtmlLimits | None = None) -> list[Com
     remaining: dict[str, list[RuleResult]] = {}
     for result in found:
         assert result.check is not None
-        if any(result.check.startswith(f"{name}: ") for name in covered):
+        name, _, _ = _identity(result)
+        if name in covered or (
+            _structured_identity(result) is None
+            and any(result.check.startswith(f"{covered_name}: ") for covered_name in covered)
+        ):
             continue
-        name = result.check.split(": ", 1)[0]
         remaining.setdefault(name, []).append(result)
     views.extend(_from_results(name, results) for name, results in remaining.items())
-    return views
+    # Distinct names can sanitize to the same HTML slug. Keep links unique in
+    # report order without changing the comparison's identity or display name.
+    seen: dict[str, int] = {}
+    emitted: set[str] = set()
+    unique = []
+    for view in views:
+        count = seen.get(view.anchor, 0) + 1
+        anchor = view.anchor if count == 1 else f"{view.anchor}-{count}"
+        while anchor in emitted:
+            count += 1
+            anchor = f"{view.anchor}-{count}"
+        seen[view.anchor] = count
+        emitted.add(anchor)
+        unique.append(replace(view, anchor=anchor) if anchor != view.anchor else view)
+    return unique
 
 
 # -------------------------------------------------------------- standalone

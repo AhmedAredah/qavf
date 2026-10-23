@@ -33,7 +33,7 @@ and `report.metadata.query_plans` to see execution choices and tracked usage.
 | Setting | Enforced scope |
 |---|---|
 | `memory_budget_bytes` | Target for tracked state, native buffer allocations and post-collection size checks; not total process RSS |
-| `cache_max_bytes` | Total retained frame, pandas and aggregate-cache allocation |
+| `cache_max_bytes` | Shared admission ceiling for retained frame, pandas and aggregate caches plus coherent in-memory observations |
 | `spill_max_bytes` | Separately enforced run-owned frame spill and reserved DuckDB temporary-storage partitions; excludes transport and arbitrary plugin files |
 | `temp_directory` | Parent of an isolated directory created and cleaned up for each run |
 | `max_workers` | Active rule calls; timed-out calls retain their slots until they stop |
@@ -49,10 +49,23 @@ and `report.metadata.query_plans` to see execution choices and tracked usage.
 
 SQL/Query adapters and returned LazyFrames apply `row_budget + 1` before result
 collection, allowing an exact over-budget decision without building the full result.
+For a lazy reader with a row budget, `scan()` admits one capped coherent observation;
+subsequent `collect()`, `project()` and `reduce()` calls use those admitted values.
+The budget probe cannot observe different values from the accepted read. The
+observation remains owned until dataset release or context close. Use `scan()` to
+build plans passed to `collect()`; an unrelated caller-created plan cannot be
+attributed to a named source by inspecting its result.
 A Python loader that creates an eager frame has already allocated it before QAVF
 receives it. Upstream joins, sorting and aggregate state may still exceed the row
 result limit. Native reservations use the worker capacity of the selected execution
 mode, including one worker for sequential execution and at most the scheduled tasks.
+When a memory target is present, automatic rule scheduling allows at most one worker
+per 32 MiB of target memory, with a minimum of one worker. Each worker reserves two
+possible native handles; this avoids dividing a small target among many idle handles.
+`max_workers` is a ceiling, not a requirement to run that many checks concurrently.
+A directly constructed `DataContext` defaults to two native handles; advanced users
+can explicitly change `connection_slots`. Reservations remain conservative fixed
+ceilings within the selected concurrency, not dynamically resized live connections.
 
 HTML presentation adds markup and escaping and has no independent file-size ceiling.
 Writing or rendering reports after validation returns runs in the parent, outside
@@ -87,6 +100,16 @@ of optional derived aggregates. `DataContext.project()` reads only selected colu
 projection avoids a complete Python bytes buffer and does not promote the whole
 frame back into cache. Projected IPC read-byte counts are unmeasured, not zero.
 
+On Polars versions providing incremental `collect_batches`, coherent observations
+retain admitted chunks in available cache memory and spill incrementally when the
+shared ceiling is reached. Native batch readers use the same admission policy.
+This does not replay a volatile source. Older supported Polars versions retain the
+exact IPC staging fallback. `retained_total_bytes` and `peak_retained_total_bytes`
+include caches and observation leases; `retained_observation_bytes` reports the
+portion retained by observations. Shared frame/observation leases stay charged until
+their final owner closes, including after the dataset's cache entry is released.
+Memory targets still exclude transient decoding/native operator allocations.
+
 Native-safe repeatable file regression uses a source-owned join and bounded batches.
 DuckDB manages join/sort state under its memory/spill policy. In-memory and exact
 projected fallbacks still retain selected input frames and key indexes. Results
@@ -97,7 +120,9 @@ An availability check on a known spilled frame reads only metadata. Materializin
 that frame still reads its IPC file. Memoization locks exist only while a computation
 or a waiter is active. Retained caches account for native Series/array buffers,
 detach supported mutable values on insertion/retrieval, and refuse opaque objects
-whose native allocation cannot be measured. A plugin can return a supported value
+whose native allocation cannot be measured. Nested cache insertion carries the size
+measured during ownership compaction; size-only IPC accounting uses a counting sink
+without allocating another complete encoded payload. A plugin can return a supported value
 representation rather than assuming a small Python wrapper implies small storage.
 
 
@@ -122,6 +147,20 @@ incomplete. Metadata checks, and optional hashes, detect changes; they do not ma
 an arbitrary external writer atomic. Use immutable files or a database snapshot
 when a consistent snapshot is required.
 
+
+Eligible row-local column checks on a non-repeatable lazy input now share a single
+streaming reduction. Each batch emits exact counts and bounded typed evidence;
+merging by original row position preserves deterministic samples without retaining
+the complete projected input. This fast path admits at most 64 compatible checks.
+Global statistics, incompatible scopes and larger groups use the coherent
+observation path. Partial reduction state can grow as batches × checks × evidence
+rows; upstream operators and variable-width values add memory. It is not a hard
+process-memory limit. A failed source is not replayed by this optimization.
+
+Polygon assignment, neighbor graphs and optional map outlines also perform explicit
+cardinality admission before expensive transfer or expansion. See [spatial data](spatial.md)
+for scopes, defaults and refusal behavior. Bounds count logical work/retained results,
+not every internal native operation.
 
 ## Deadlines and cleanup
 

@@ -31,6 +31,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from typing import Any, ClassVar, Literal
 
 import numpy as np
@@ -46,7 +47,7 @@ from qavf.inference.multiple import adjust
 from qavf.inference.pvalues import t_p_value
 from qavf.inference.results import Correction
 from qavf.inference.trend import kendall_tau
-from qavf.numeric import exact_number, numeric_close
+from qavf.numeric import exact_number, finite_float, numeric_close
 from qavf.redaction import exception_details
 from qavf.rules._contracts import isolate_contract, unassessed_contract
 from qavf.rules._exact_grouped import exact_grouped, supports_exact
@@ -60,6 +61,7 @@ from qavf.rules._grouped import (
     supports_grouped,
 )
 from qavf.rules._ordered_grouped import ordered_grouped
+from qavf.rules._period_gaps import PeriodDomain
 from qavf.rules.helpers import (
     AggregatedMetric,
     BoundedEvidence,
@@ -485,8 +487,9 @@ def _outcome(
             datasets=datasets,
         )
     elif not examined:
+        reason = "no group could be assessed" if blocked else untestable
         main = Finding.unassessed(
-            f"Not assessed: {untestable} in {', '.join(s.label for s in used)}.",
+            f"Not assessed: {reason} in {', '.join(s.label for s in used)}.",
             total_records=0,
             unit=unit,
             metrics=metrics,
@@ -729,6 +732,7 @@ class TrendDirectionRule(_TemporalRule):
         """Kendall p-values of every examined series with a defined tau."""
         against: list[tuple[int, float, dict[str, Any]]] = []
         """Wrong-way series: their place in ``family``, tau and evidence."""
+        corrected = self.params.correction != "none"
         for spec in self.params.series:
             with isolate_contract(spec.label, (spec.dataset,), blocked):
                 if spec.expected_trend is None:
@@ -743,18 +747,39 @@ class TrendDirectionRule(_TemporalRule):
                         if frame.height < self.params.min_points:
                             too_short += 1
                             continue
+                        values = frame[_name(spec, "value")]
+                        if values.min() == values.max():
+                            # A constant series cannot trend in the wrong direction.
+                            examined += 1
+                            continue
                         result = kendall_tau(
                             _sequence(spec, frame).to_numpy(),
-                            frame[_name(spec, "value")].to_numpy(),
+                            values.to_numpy(),
                         )
-                        examined += 1
-                        if not result.assessed:  # an undefined tau (constant values)
+                        if not result.assessed:
+                            blocked.append(
+                                Finding.unassessed(
+                                    f"Not assessed: {spec.label}: "
+                                    f"{result.reason or 'Kendall trend could not be resolved'}.",
+                                    check=f"{spec.label}: trend",
+                                    affected=[key],
+                                    datasets=(spec.dataset,),
+                                )
+                            )
                             continue
+                        examined += 1
                         assert result.statistic is not None and result.p_value is not None
-                        family.append(result.p_value)
+                        if corrected:
+                            family.append(result.p_value)
                         tau = result.statistic
                         if sign * tau > -self.params.min_tau:
                             continue
+                        if not corrected:
+                            if self.params.alpha is not None and result.p_value > self.params.alpha:
+                                continue
+                            if len(records.records) >= records.limit:
+                                records.count += 1
+                                continue
                         record = annotate(
                             key,
                             series=spec.label,
@@ -764,8 +789,19 @@ class TrendDirectionRule(_TemporalRule):
                             first_value=frame[_name(spec, "value")][0],
                             last_value=frame[_name(spec, "value")][-1],
                         )
-                        against.append((len(family) - 1, tau, record))
-        adjusted = adjust(family, self.params.correction)
+                        if corrected:
+                            against.append((len(family) - 1, tau, record))
+                        else:
+                            records.append(
+                                {
+                                    **record,
+                                    "p_value": round(result.p_value, 6),
+                                    "adjusted_p": round(result.p_value, 6),
+                                    "correction": "none",
+                                    "effect": round(tau, 4),
+                                }
+                            )
+        adjusted = adjust(family, self.params.correction) if against else np.empty(0)
         for index, tau, record in against:
             if self.params.alpha is not None and adjusted[index] > self.params.alpha:
                 continue
@@ -952,9 +988,7 @@ def _trend_outlier_test(
     # Where long double is only double (Windows, Apple Silicon), a near-perfect
     # trend with a large offset loses its small residuals; fit exactly instead.
     exact = np.finfo(np.longdouble).nmant < 63
-    core = (_exact_trend_core if exact else _extended_trend_core)(
-        times, values, response, use_log
-    )
+    core = (_exact_trend_core if exact else _extended_trend_core)(times, values, response, use_log)
     if core is None or isinstance(core, _TrendTest):
         return core
     x, sxx, residual, sse, fitted, deviation, difference = core
@@ -967,9 +1001,7 @@ def _trend_outlier_test(
     zeros = np.zeros(len(values))
     if sse <= len(values) * rounding * rounding:
         material = np.abs(deviation) >= min_relative_deviation
-        distinguishable = difference > (
-            8 * np.abs(np.spacing(np.asarray(values, dtype=float)))
-        )
+        distinguishable = difference > (8 * np.abs(np.spacing(np.asarray(values, dtype=float))))
         if np.any(material & distinguishable):
             return None
         return _TrendTest(fitted, deviation, zeros, np.ones(len(values)), np.ones(len(values)))
@@ -1044,7 +1076,12 @@ def _extended_trend_core(
         fitted = np.exp(fitted_response) if use_log else fitted_response
         deviation = _relative_deviation(original, fitted)
     return (
-        x, sxx, residual, sse, np.asarray(fitted, dtype=float), deviation,
+        x,
+        sxx,
+        residual,
+        sse,
+        np.asarray(fitted, dtype=float),
+        deviation,
         np.abs(original - fitted),
     )
 
@@ -1094,14 +1131,14 @@ def _exact_trend_core(
         # exp() of the fitted log is approximate anyway; compare in Float64.
         with np.errstate(over="ignore", invalid="ignore"):
             fitted = np.exp(fitted_response)
-        return (
-            *shape, fitted, _relative_deviation(values, fitted), np.abs(values - fitted)
-        )
+        return (*shape, fitted, _relative_deviation(values, fitted), np.abs(values - fitted))
     # Response and original values coincide, so the difference is the residual.
-    deviation = np.array([
-        r / abs(n) if n != 0 else (0.0 if value == 0 else math.inf)
-        for r, n, value in zip(residual, numerator, y, strict=True)
-    ])
+    deviation = np.array(
+        [
+            r / abs(n) if n != 0 else (0.0 if value == 0 else math.inf)
+            for r, n, value in zip(residual, numerator, y, strict=True)
+        ]
+    )
     difference = np.array([abs(r) / (denominator * unit) for r in residual])
     return (*shape, fitted_response, deviation, difference)
 
@@ -1151,7 +1188,9 @@ class MissingPeriodRule(_TemporalRule):
                 if series is None:
                     continue
                 try:
-                    expected = self._expected(ctx, spec, series)
+                    domain = PeriodDomain(self._expected(ctx, spec, series))
+                    if not len(domain):
+                        raise ValueError("there are no expected or observed periods to assess")
                 except ValueError as exc:
                     blocked.append(
                         unassessed_contract(
@@ -1177,14 +1216,12 @@ class MissingPeriodRule(_TemporalRule):
                 if absent is None:
                     continue
                 used.append(spec)
-                shown_all = (
-                    expected.to_list()
-                    if isinstance(expected, pl.Series)
-                    else sorted(int(m) if m == int(m) else m for m in expected)
-                )
-                shown_sample = shown_all[: ctx.evidence_limit]
+                shown_sample = domain.prefix(ctx.evidence_limit)
                 for key in absent:
                     groups += 1
+                    if len(records.records) >= ctx.evidence_limit:
+                        records.count += 1
+                        continue
                     records.append(
                         annotate(
                             key,
@@ -1192,8 +1229,8 @@ class MissingPeriodRule(_TemporalRule):
                             missing_periods=shown_sample,
                             missing_group=True,
                             **(
-                                {"missing_period_count": len(shown_all)}
-                                if len(shown_all) > ctx.evidence_limit
+                                {"missing_period_count": len(domain)}
+                                if len(domain) > ctx.evidence_limit
                                 else {}
                             ),
                         )
@@ -1203,29 +1240,22 @@ class MissingPeriodRule(_TemporalRule):
                         groups += 1
                         # A period whose values are all missing is as absent as one with no rows.
                         with_value = frame.filter(pl.col(_name(spec, "value")).is_not_null())
-                        if isinstance(expected, pl.Series):
-                            # Labels compare natively: two fall-back hours stay distinct.
-                            present_periods = with_value.select(spec.time_column)
-                            shown = (
-                                expected.to_frame(spec.time_column)
-                                .join(present_periods, on=spec.time_column, how="anti")
-                                .sort(spec.time_column)[spec.time_column]
-                                .to_list()
-                            )
-                        else:
-                            missing = sorted(
-                                expected - set(with_value[spec.time_column].to_list())
-                            )
-                            shown = [int(m) if m == int(m) else m for m in missing]
-                        if shown:
+                        retain = len(records.records) < ctx.evidence_limit
+                        missing_count, shown = domain.missing(
+                            with_value[spec.time_column], ctx.evidence_limit if retain else 0
+                        )
+                        if missing_count:
+                            if not retain:
+                                records.count += 1
+                                continue
                             records.append(
                                 annotate(
                                     key,
                                     series=spec.label,
-                                    missing_periods=shown[: ctx.evidence_limit],
+                                    missing_periods=shown,
                                     **(
-                                        {"missing_period_count": len(shown)}
-                                        if len(shown) > ctx.evidence_limit
+                                        {"missing_period_count": missing_count}
+                                        if missing_count > ctx.evidence_limit
                                         else {}
                                     ),
                                 )
@@ -1696,15 +1726,35 @@ class SeasonalAnomalyRule(_TemporalRule):
                                 result = detect_outliers(
                                     values, OutlierMethod.MODIFIED_ZSCORE, p.threshold
                                 )
+                                middle = len(values) // 2
+                                left = middle - 1 if len(values) % 2 == 0 else middle
+                                endpoints = np.partition(values, (left, middle))
+                                midpoint = (
+                                    Fraction(float(endpoints[left]))
+                                    + Fraction(float(endpoints[middle]))
+                                ) / 2
+                                try:
+                                    median = finite_float(midpoint)
+                                except ValueError:
+                                    if p.min_relative_deviation > 0:
+                                        raise
+                                    median = None
+                                # A disabled materiality filter must not refuse
+                                # an assessed detector for a display-only value.
+                                # Canonical rational text preserves that exact
+                                # diagnostic when Float64 cannot represent it.
+                                median_evidence = median if median is not None else str(midpoint)
                                 examined += len(values)
-                                unit = float(np.abs(values).max())
-                                median = float(np.median(values / unit)) * unit if unit else 0.0
                                 for index in np.flatnonzero(result.mask):
-                                    relative = (
-                                        abs(values[index] / median - 1.0) if median else math.inf
-                                    )
-                                    if relative < p.min_relative_deviation:
-                                        continue
+                                    if p.min_relative_deviation > 0:
+                                        assert median is not None
+                                        relative = (
+                                            abs(values[index] / median - 1.0)
+                                            if median
+                                            else math.inf
+                                        )
+                                        if relative < p.min_relative_deviation:
+                                            continue
                                     records.append(
                                         annotate(
                                             key,
@@ -1712,7 +1762,7 @@ class SeasonalAnomalyRule(_TemporalRule):
                                             period=part[spec.time_column][int(index)],
                                             season=season_value,
                                             value=float(values[index]),
-                                            season_median=median,
+                                            season_median=median_evidence,
                                             score=round(float(result.scores[index]), 3),
                                         )
                                     )

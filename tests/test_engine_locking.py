@@ -265,14 +265,14 @@ def test_observation_lazy_row_budget_is_checked_on_same_capped_evaluation(monkey
     import qavf.engine.observation as observations
 
     calls, staged_rows = [], []
-    original = observations._sink
+    original = observations._observe_plan
 
     def record(ctx, plan):
-        owned = original(ctx, plan)
-        staged_rows.append(pl.scan_ipc(owned.path).select(pl.len()).collect().item())
-        return owned
+        observed = original(ctx, plan)
+        staged_rows.append(observed.reduce(lambda data: data.select(pl.len())).item())
+        return observed
 
-    monkeypatch.setattr(observations, "_sink", record)
+    monkeypatch.setattr(observations, "_observe_plan", record)
     plan = (
         pl.DataFrame({"id": range(100)})
         .lazy()
@@ -347,7 +347,9 @@ def test_observation_batch_budget_measures_detached_slice(lazy):
 
 def test_observation_spill_failure_removes_partial_files(tmp_path):
     plan = pl.DataFrame({"x": range(10000)}).lazy()
-    with DataContext(frames={"data": plan}, spill_max_bytes=1000, temp_directory=tmp_path) as ctx:
+    with DataContext(
+        frames={"data": plan}, cache_max_bytes=0, spill_max_bytes=1000, temp_directory=tmp_path
+    ) as ctx:
         with pytest.raises(ResourceLimitError, match="spill budget"), ctx.observe("data"):
             pytest.fail("oversized observation admitted")
         assert ctx.resource_usage()["owned_spill_bytes"] == 0

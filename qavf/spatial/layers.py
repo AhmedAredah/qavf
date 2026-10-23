@@ -263,9 +263,12 @@ def load_zones(
     notes: list[str] = []
 
     def offenders(condition: str) -> tuple[int, list[Any]]:
-        rows = fetch(con, f"SELECT zone_order FROM {name} WHERE {condition} ORDER BY zone_order")
-        orders = rows["zone_order"].to_list()
-        return len(orders), frame[ZONE].gather(orders[:5]).to_list()
+        count = int(con.execute(f"SELECT count(*) FROM {name} WHERE {condition}").fetchone()[0])
+        rows = fetch(
+            con, f"SELECT zone_order FROM {name} WHERE {condition} ORDER BY zone_order LIMIT 5"
+        ) if count else None
+        orders = rows["zone_order"].to_list() if rows is not None else []
+        return count, frame[ZONE].gather(orders).to_list()
 
     for condition, problem in (
         ("geom IS NULL OR ST_IsEmpty(geom)", "without a geometry"),
@@ -291,6 +294,15 @@ def load_zones(
         notes.append(
             f"zone layer {label!r}: repaired the invalid geometry of {plural(count, 'zone')}"
         )
+        count, sample = offenders(
+            "geom IS NULL OR ST_IsEmpty(geom) OR NOT ST_IsValid(geom) OR "
+            "CAST(ST_GeometryType(geom) AS VARCHAR) NOT IN ('POLYGON', 'MULTIPOLYGON')"
+        )
+        if count:
+            raise ValueError(
+                f"zone layer {label!r}: repair left {plural(count, 'zone')} without a "
+                f"nonempty valid polygon {sample}"
+            )
     con.execute(
         f"CREATE OR REPLACE TEMP TABLE {name} AS SELECT zone_order, geom, ST_XMin(geom) AS xmin, "
         f"ST_XMax(geom) AS xmax, ST_YMin(geom) AS ymin, ST_YMax(geom) AS ymax FROM {name}"

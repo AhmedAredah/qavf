@@ -10,7 +10,7 @@ import polars as pl
 
 from qavf.engine.projection import selected_columns
 from qavf.engine.sql_read import consume_native
-from qavf.sources.base import DataSource, SourceError, SourceRegistry
+from qavf.sources.base import DataSource, SourceRegistry
 from qavf.sources.sql import quote_identifier
 
 if TYPE_CHECKING:
@@ -29,6 +29,7 @@ class SourceReadView:
         self._frame: pl.DataFrame | None = None
         self._kind: str | None = None
         self._closed = False
+        self._budget_observation: Observation | None = None
         self._alias = "__qavf_adhoc_source"
         while self._alias.lower() in {name.lower() for name in ctx.declared()}:
             self._alias += "_"
@@ -43,16 +44,10 @@ class SourceReadView:
             if self._plan is not None:
                 budget = self._source.params.row_budget
                 if budget is not None:
-                    count = (
-                        self._plan.limit(budget + 1)
-                        .select(pl.len())
-                        .collect(engine="streaming")
-                        .item()
-                    )
-                    if count > budget:
-                        raise SourceError(
-                            f"ad-hoc source has more than {budget:,} rows (row_budget)"
-                        )
+                    from qavf.engine.observation import _lazy
+
+                    self._budget_observation = _lazy(self._ctx, self._plan, None, budget)
+                    self._plan = self._budget_observation.scan()
                 self._kind = "lazy"
             elif self._source.snapshot_connection() is None and self._source.scan() is not None:
                 self._kind = "native"
@@ -114,6 +109,8 @@ class SourceReadView:
         """Own an exact projection of this same bound source for repeated passes."""
         if self._closed:
             raise RuntimeError("ad-hoc source read has ended")
+        if self._budget_observation is not None:
+            return self._budget_observation.borrow(columns)
         from qavf.engine.observation import observe_source
 
         return observe_source(self._ctx, self._source, columns)
@@ -127,6 +124,9 @@ class SourceReadView:
         self._closed = True
         self._plan = None
         self._frame = None
+        if self._budget_observation is not None:
+            self._budget_observation.close()
+            self._budget_observation = None
 
 
 def read_source[T](

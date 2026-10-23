@@ -16,11 +16,14 @@ import polars as pl
 
 from qavf.aggregation import accumulator_sql
 from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding
 from qavf.rules._column_batch import (
+    BATCH_SIZE,
     ColumnInputs,
     ColumnReduction,
     independent_scope,
+    reduce_captured_columns,
     reduce_columns,
 )
 from qavf.rules._column_rows import native_row_check
@@ -30,6 +33,7 @@ from qavf.rules._regex import sql_compatible
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import present
 from qavf.settings import COLUMN_CONSTRAINTS, ROW_CONSTRAINTS, ColumnCheck, ColumnSpec, SchemaSpec
+from qavf.value_policy import is_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +98,11 @@ def column_plans(schema: SchemaSpec, actual: dict[str, pl.DataType]) -> list[Col
     return plans
 
 
+def _unsafe_unit_cast(item: ColumnPlan, actual: dict[str, pl.DataType]) -> bool:
+    """Empty preflight cannot validate a data-dependent non-text cast to String."""
+    return item.kind == "units" and not is_text(actual.get(str(item.spec.unit_column), pl.Null()))
+
+
 def _lazy_column_reduction(
     ctx: DataContext,
     dataset: str,
@@ -105,6 +114,7 @@ def _lazy_column_reduction(
     within: Callable[[Any, Any], bool],
     show: Callable[[Any], str],
     inputs: ColumnInputs,
+    capture_columns: tuple[str, ...] | None = None,
 ) -> ColumnReduction[pl.Expr]:
     """Assess one lazy contract with scalar reductions and a bounded row sample."""
     column, check = item.column, item.check
@@ -189,6 +199,27 @@ def _lazy_column_reduction(
     if check and check.where and not pl.sql_expr(check.where).meta.root_names():
         reducers["applicable"] = pl.when(scope).then(pl.len()).otherwise(pl.lit(0))
 
+    if capture_columns is not None and ctx.evidence_limit:
+        reasons = (
+            pl.concat_str(
+                [pl.when(p).then(pl.lit(name)).otherwise(None) for name, p in predicates],
+                separator="; ",
+                ignore_nulls=True,
+            )
+            if predicates
+            else pl.lit("")
+        )
+        reducers["sample"] = (
+            pl.struct(
+                *(pl.col(inputs.saved[c]).alias(c) for c in capture_columns),
+                pl.col(row),
+                reasons.alias(reason),
+            )
+            .filter(bad)
+            .head(ctx.evidence_limit)
+            .implode()
+        )
+
     def finish(summary: dict[str, Any]) -> Finding | None:
         applicable = int(summary["applicable"] or 0)
         if check and applicable < check.min_applicable_rows:
@@ -235,16 +266,23 @@ def _lazy_column_reduction(
                 separator="; ",
                 ignore_nulls=True,
             )
-            sample = ctx.collect(
-                dataset,
-                inputs.lazy(dependencies)
-                .filter(bad)
-                .with_columns(reasons.alias(reason))
-                .limit(ctx.evidence_limit),
-            )
-            sample = sample.drop(list(saved)).rename({v: k for k, v in saved.items()})
+            if capture_columns is not None:
+                sample = summary["sample"]
+            else:
+                sample = inputs.collect(
+                    inputs.lazy(dependencies)
+                    .filter(bad)
+                    .with_columns(reasons.alias(reason))
+                    .limit(ctx.evidence_limit),
+                )
+                sample = sample.drop(list(saved)).rename({v: k for k, v in saved.items()})
             sample = temporal_evidence(
-                present(sample.select(*actual, row, reason), {row: "_row", reason: "violates"})
+                present(
+                    sample.select(
+                        *(name for name in actual if name in sample.columns), row, reason
+                    ),
+                    {row: "_row", reason: "violates"},
+                )
             )
         return Finding.fail(
             f"{count:,} value{'s' if count != 1 else ''} of {applicable:,} "
@@ -264,7 +302,8 @@ def _lazy_column_reduction(
         dependencies,
         reducers,
         finish,
-        independent_scope(check.where if check else None, actual)
+        _unsafe_unit_cast(item, actual)
+        or independent_scope(check.where if check else None, actual)
         or any(name.startswith("stat_") for name in reducers),
     )
 
@@ -295,6 +334,10 @@ def _native_column_reduction(
     column, check = item.column, item.check
     dtype = actual[column]
     constraints = check.constraints() if check else {}
+    # DuckDB's non-text VARCHAR casts can differ from the typed reference
+    # kernel (notably Binary escapes versus UTF-8 decoding). Preserve parity.
+    if _unsafe_unit_cast(item, actual):
+        return NotImplemented
     if check is not None and check.regex is not None and not sql_compatible(check.regex):
         return NotImplemented
     statistics = {
@@ -501,10 +544,11 @@ def column_checks(
     statistic: Callable[[pl.Series, str], Any],
     within: Callable[[Any, Any], bool],
     show: Callable[[Any], str],
+    observation: Observation | None = None,
 ) -> list[Finding | Exception | NotImplementedType | None]:
     """Reduce compatible contracts together; preserve independent failures and fallbacks."""
-    inputs = ColumnInputs(ctx, dataset, schema, actual)
-    lazy = ctx.execution_kind(dataset) == "lazy"
+    inputs = ColumnInputs(ctx, dataset, schema, actual, observation)
+    lazy = observation is not None or ctx.execution_kind(dataset) == "lazy"
     jobs: dict[int, ColumnReduction[Any]] = {}
     results: list[Finding | Exception | NotImplementedType | None] = [None] * len(items)
     for index, item in enumerate(items):
@@ -539,5 +583,65 @@ def column_checks(
             results[index] = exc
     results_by_index = reduce_columns(inputs, jobs, lazy=lazy)
     for index, result in results_by_index.items():
+        results[index] = result
+    return results
+
+
+def coherent_column_checks(
+    ctx: DataContext,
+    dataset: str,
+    schema: SchemaSpec,
+    actual: dict[str, pl.DataType],
+    items: list[ColumnPlan],
+    label: Callable[[ColumnPlan], str],
+    statistic: Callable[[pl.Series, str], Any],
+    within: Callable[[Any, Any], bool],
+    show: Callable[[Any], str],
+) -> list[Finding | Exception | NotImplementedType | None] | None:
+    """Read eligible lazy row contracts once, retaining only counts and samples.
+
+    Global statistics, arbitrary scope expressions and large contract sets keep
+    the owned observation path. Preparation never evaluates the user's source.
+    """
+    if len(items) > BATCH_SIZE:
+        return None
+    for item in items:
+        if _unsafe_unit_cast(item, actual):
+            return None
+        check = item.check
+        if check and (
+            independent_scope(check.where, actual)
+            or set(check.constraints()) - set(ROW_CONSTRAINTS) - {"max_null_fraction"}
+        ):
+            return None
+    inputs = ColumnInputs(ctx, dataset, schema, actual)
+    needed = set(schema.primary_key or []) if ctx.evidence_limit else set()
+    for item in items:
+        try:
+            needed.update(item.dependencies)
+        except Exception:
+            # The check-specific preparation below records invalid syntax.
+            continue
+    captured = tuple(name for name in actual if name in needed) if ctx.evidence_limit else ()
+    jobs: dict[int, ColumnReduction[pl.Expr]] = {}
+    results: list[Finding | Exception | NotImplementedType | None] = [None] * len(items)
+    for index, item in enumerate(items):
+        try:
+            jobs[index] = _lazy_column_reduction(
+                ctx,
+                dataset,
+                schema,
+                actual,
+                item,
+                label(item),
+                statistic,
+                within,
+                show,
+                inputs,
+                captured,
+            )
+        except Exception as exc:
+            results[index] = exc
+    for index, result in reduce_captured_columns(inputs, jobs, captured).items():
         results[index] = result
     return results

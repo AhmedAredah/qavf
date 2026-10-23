@@ -109,11 +109,16 @@ def check_threshold(threshold: float) -> float:
     Raises:
         ValueError: otherwise.
     """
-    if (
-        isinstance(threshold, bool)
-        or not isinstance(threshold, int | float | np.integer | np.floating)
-        or not (math.isfinite(threshold) and threshold > 0)
-    ):
+    try:
+        valid = (
+            not isinstance(threshold, bool)
+            and isinstance(threshold, int | float | np.integer | np.floating)
+            and math.isfinite(threshold)
+            and threshold > 0
+        )
+    except OverflowError:
+        valid = False
+    if not valid:
         raise ValueError(f"threshold must be a finite number > 0, got {threshold!r}")
     return float(threshold)
 

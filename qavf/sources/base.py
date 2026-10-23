@@ -41,6 +41,13 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from qavf.plugins.transactions import (
+    LOCK,
+    installed_origin,
+    installed_visible,
+    mapping,
+    transaction,
+)
 from qavf.redaction import exception_details, redact_text
 
 if TYPE_CHECKING:
@@ -160,11 +167,27 @@ class DataSource[P: SourceParams](ABC):
         effect, rows the reader rejected, files matched); set by :meth:`load`."""
 
     def bound_environment(self, env: SourceEnvironment) -> SourceEnvironment:
-        """Keep the source's location/credentials while borrowing a run's resource policy."""
+        """Keep source identity while borrowing only the run's execution policy.
+
+        Source-owned locations, connections and secrets take precedence in full,
+        including an empty mapping. A run cannot silently substitute credentials;
+        construct a new source definition to change its identity.
+        """
         return replace(
             env,
             base_dir=self.env.base_dir,
-            connections=MappingProxyType(dict(self.env.connections)),
+            connections=MappingProxyType(
+                {
+                    name: type(spec).model_validate(spec.model_dump())
+                    for name, spec in self.env.connections.items()
+                }
+            ),
+            secrets=MappingProxyType(
+                {
+                    name: type(spec).model_validate(spec.model_dump())
+                    for name, spec in self.env.secrets.items()
+                }
+            ),
         )
 
     def bind(self, env: SourceEnvironment) -> DataSource[P]:
@@ -283,6 +306,9 @@ class SourceRegistry:
 
     def __init__(self) -> None:
         self._sources: dict[str, type[DataSource]] = {}
+        self._origins: dict[str, bool] = {}
+        self._visibility: dict[str, bool] = {}
+        self._entry_points_enabled = False
         self.plugins: dict[str, str] = {}
         """Entry points tried by :meth:`discover`: ``"loaded"`` or the error."""
 
@@ -292,32 +318,48 @@ class SourceRegistry:
         Raises:
             ValueError: if a different class already uses the same ``type``.
         """
-        existing = self._sources.get(source_cls.kind)
-        if existing is not None and existing is not source_cls:
-            same = (existing.__module__, existing.__qualname__) == (
-                source_cls.__module__,
-                source_cls.__qualname__,
-            )
-            if not same:
-                raise ValueError(f"duplicate source type {source_cls.kind!r}")
-        self._sources[source_cls.kind] = source_cls
+        with LOCK:
+            sources = mapping(self, "_sources")
+            existing = sources.get(source_cls.kind)
+            if existing is not None and existing is not source_cls:
+                same = (existing.__module__, existing.__qualname__) == (
+                    source_cls.__module__,
+                    source_cls.__qualname__,
+                )
+                if not same:
+                    raise ValueError(f"duplicate source type {source_cls.kind!r}")
+            sources[source_cls.kind] = source_cls
+            origins = mapping(self, "_origins")
+            origins[source_cls.kind] = origins.get(source_cls.kind, True) and installed_origin()
         return source_cls
+
+    @property
+    def _entry_points_enabled(self) -> bool:
+        with LOCK:
+            return bool(mapping(self, "_visibility").get("entry_points", False))
+
+    @_entry_points_enabled.setter
+    def _entry_points_enabled(self, value: bool) -> None:
+        with LOCK:
+            mapping(self, "_visibility")["entry_points"] = value
+
+    def _plugin_status(self, name: str, status: str) -> None:
+        with LOCK:
+            mapping(self, "plugins")[name] = status
 
     def register_module(self, module: ModuleType) -> list[type[DataSource]]:
         """Register every concrete source class defined in ``module``."""
-        staged = SourceRegistry()
-        staged._sources = dict(self._sources)
         found = []
-        for obj in vars(module).values():
-            if (
-                inspect.isclass(obj)
-                and issubclass(obj, DataSource)
-                and obj.__module__ == module.__name__
-                and not inspect.isabstract(obj)
-                and getattr(obj, "kind", None)
-            ):
-                found.append(staged.register(obj))
-        self._sources = staged._sources
+        with transaction():
+            for obj in vars(module).values():
+                if (
+                    inspect.isclass(obj)
+                    and issubclass(obj, DataSource)
+                    and obj.__module__ == module.__name__
+                    and not inspect.isabstract(obj)
+                    and getattr(obj, "kind", None)
+                ):
+                    found.append(self.register(obj))
         return found
 
     def discover(
@@ -326,7 +368,9 @@ class SourceRegistry:
         """Register built-in sources, then sources from ``modules`` and entry points."""
         from qavf.sources.builtin import BUILTIN_SOURCES
 
-        with self._transaction():
+        self._entry_points_enabled = use_entry_points
+
+        with transaction(installed=False):
             for source_cls in BUILTIN_SOURCES:
                 self.register(source_cls)
         for name in modules:
@@ -342,11 +386,13 @@ class SourceRegistry:
             counts = Counter(entry.name for entry in entries)
             for entry in entries:
                 if counts[entry.name] > 1:
-                    self.plugins[entry.name] = "error: duplicate entry-point name in sources group"
+                    self._plugin_status(
+                        entry.name, "error: duplicate entry-point name in sources group"
+                    )
                     logger.error("Duplicate source entry point %r", redact_text(entry.name))
                     continue
                 try:
-                    with self._transaction():
+                    with transaction(installed=True):
                         loaded = entry.load()
                         if inspect.ismodule(loaded):
                             self.register_module(loaded)
@@ -359,24 +405,25 @@ class SourceRegistry:
                     logger.error(
                         "Failed to load source entry point %r: %s", redact_text(entry.name), message
                     )
-                    self.plugins[entry.name] = f"error: {message}"
+                    self._plugin_status(entry.name, f"error: {message}")
                     continue
-                self.plugins[entry.name] = "loaded"
+                self._plugin_status(entry.name, "loaded")
         return self
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
-        # A source module can use the public rule decorator too. Its imports
-        # participate in the same QAVF-owned registration transaction.
-        from qavf.engine.registry import registration_transaction
+        with transaction():
+            yield
 
-        before = dict(self._sources)
-        try:
-            with registration_transaction():
-                yield
-        except BaseException:
-            self._sources = before
-            raise
+    def _visible(self) -> dict[str, type[DataSource]]:
+        with LOCK:
+            sources = mapping(self, "_sources")
+            if self._entry_points_enabled or installed_visible() or installed_origin():
+                return dict(sources)
+            origins = mapping(self, "_origins")
+            return {
+                name: source for name, source in sources.items() if not origins.get(name, False)
+            }
 
     def get(self, source_type: str) -> type[DataSource]:
         """Return the class for ``source_type``.
@@ -385,9 +432,9 @@ class SourceRegistry:
             KeyError: for an unknown type.
         """
         try:
-            return self._sources[source_type]
+            return self._visible()[source_type]
         except KeyError:
-            available = ", ".join(sorted(self._sources))
+            available = ", ".join(sorted(self._visible()))
             raise KeyError(
                 redact_text(f"unknown source type {source_type!r}; available: {available}")
             ) from None
@@ -417,10 +464,10 @@ class SourceRegistry:
             ) from None
 
     def __iter__(self) -> Iterator[type[DataSource]]:
-        return iter(sorted(self._sources.values(), key=lambda s: s.kind))
+        return iter(sorted(self._visible().values(), key=lambda s: s.kind))
 
     def __contains__(self, source_type: object) -> bool:
-        return source_type in self._sources
+        return source_type in self._visible()
 
     def __len__(self) -> int:
-        return len(self._sources)
+        return len(self._visible())

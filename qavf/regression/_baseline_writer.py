@@ -15,11 +15,10 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation
 from qavf.engine.source_read import SourceReadView
-from qavf.engine.spill import SpillFile
 from qavf.inputs.normalize import Configuration, prepare
 from qavf.inputs.resources import ResourceLimits
 from qavf.output_format import TableOutput, table_output
-from qavf.regression._indexed import compare_indexed
+from qavf.regression._indexed import ProjectedInput, compare_indexed
 from qavf.regression._plan import comparison_plan
 from qavf.regression.models import ComparisonResult
 from qavf.sources.base import SourceError
@@ -29,22 +28,6 @@ from qavf.sources.base import SourceError
 class StagedBaseline:
     columns: dict[str, str]
     rows: int
-
-
-class _Projection:
-    """Expose just the comparison plan's shared columns from an owned observation."""
-
-    def __init__(self, observation: Observation, columns: Sequence[str]) -> None:
-        self.observation = observation
-        self.columns = list(columns)
-
-    def schema(self) -> dict[str, pl.DataType]:
-        schema = self.observation.schema()
-        return {column: schema[column] for column in self.columns}
-
-    def batches(self, batch_rows: int = 65536) -> Iterator[pl.DataFrame]:
-        for frame in self.observation.batches(batch_rows):
-            yield frame.select(self.columns)
 
 
 def _key_summary(observation: Observation, keys: Sequence[str]) -> int:
@@ -112,8 +95,8 @@ def _roundtrip(
             with context.work_store("baseline-roundtrip") as store:
                 return compare_indexed(
                     store,
-                    _Projection(original, plan.shared),
-                    _Projection(restored, plan.shared),
+                    ProjectedInput(original, plan.shared),
+                    ProjectedInput(restored, plan.shared),
                     plan,
                 )
 
@@ -158,7 +141,7 @@ def stage_baseline(
         context.observe(name) as observation,
     ):
         rows = _key_summary(observation, keys)
-        with SpillFile(staged, context._resources.spill_budget) as payload:
+        with context.spill_file(staged) as payload:
             with payload.writer() as raw:
                 if output.compressed:
                     with gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as compressed:

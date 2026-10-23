@@ -19,14 +19,17 @@ groups) corrected together.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Any, ClassVar
 
 import numpy as np
 import polars as pl
 from pydantic import Field, model_validator
 
+from qavf._float_accumulator import ExactFloatAccumulator
 from qavf.compare.comparators import Materiality
-from qavf.compare.levels import ComparisonLevel, LevelInputs, graded, register_level
+from qavf.compare.levels import ComparisonLevel, LevelInputs, graded, not_assessed, register_level
+from qavf.compare.levels.groups import group_partitions, precise_frame
 from qavf.compare.results import CheckResult, ColumnChanges, LevelResult, RecordsResult, Transition
 from qavf.compare.significance import (
     Inference,
@@ -49,7 +52,7 @@ from qavf.regression._plan import ComparisonPlan, comparison_plan
 from qavf.regression._schema import _nested
 from qavf.regression.compare_outputs import _compare_projected
 from qavf.regression.models import ComparisonResult, SchemaPolicy
-from qavf.rules.helpers import LargestEvidence, fresh_internal, plural
+from qavf.rules.helpers import BoundedEvidence, LargestEvidence, fresh_internal, plural
 from qavf.typed_values import encode_temporal
 
 
@@ -91,6 +94,13 @@ def _categorical(dtype: pl.DataType) -> bool:
 
 def _difference(b: pl.Expr, c: pl.Expr, db: pl.DataType, dc: pl.DataType) -> pl.Expr:
     """Exact ``|c - b|`` for integers and decimals; binary64 when a float is involved."""
+    if db == pl.Int128 or dc == pl.Int128:
+        # The difference of two signed 128-bit values can need 129 bits. Compute
+        # it with Python's unbounded integers before rounding the display size.
+        return pl.struct(b.alias("before"), c.alias("after")).map_elements(
+            lambda pair: _difference_size(pair["before"], pair["after"])[0],
+            return_dtype=pl.Float64,
+        )
     if db.is_integer() and dc.is_integer():
         return (c.cast(pl.Int128) - b.cast(pl.Int128)).abs()
     if not (db.is_float() or dc.is_float()):
@@ -180,6 +190,34 @@ def _describe(
     if not columns:
         return stats, []
     matched = _Matched(inputs, plan, columns)
+    top_n = min(params.top_n, inputs.ctx.evidence_limit) if inputs.ctx.evidence_bytes else 0
+    consumers = 1 + sum(
+        bool(top_n)
+        if left[c].is_numeric() and right[c].is_numeric()
+        else (
+            c in params.categorical
+            if params.categorical is not None
+            else _categorical(left[c]) and _categorical(right[c])
+        )
+        for c in columns
+    )
+    if consumers > 1:
+        # One owned join is reused only when downstream descriptions read it repeatedly.
+        with inputs.observations["baseline"].derived(lambda _: matched.plan) as observation:
+            matched.plan = observation.scan()
+            return _describe_matched(inputs, plan, params, columns, stats, matched)
+    return _describe_matched(inputs, plan, params, columns, stats, matched)
+
+
+def _describe_matched(
+    inputs: LevelInputs,
+    plan: ComparisonPlan,
+    params: RecordsParams,
+    columns: list[str],
+    stats: dict[str, dict[str, Any]],
+    matched: _Matched,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    left, right = plan.baseline_schema, plan.candidate_schema
     reductions: list[pl.Expr] = []
     numeric = [c for c in columns if left[c].is_numeric() and right[c].is_numeric()]
     for index, column in enumerate(columns):
@@ -228,6 +266,7 @@ def _describe(
     ]
     if selected is not None and (unknown := sorted(set(selected) - set(columns))):
         raise ValueError(f"categorical names column(s) not compared: {', '.join(unknown)}")
+    transition_bytes = inputs.ctx.evidence_bytes
     for column in categorical:
         b, c = matched.pair(column)
         names = matched.names[column]
@@ -240,17 +279,23 @@ def _describe(
         stats[column]["distinct_transitions"] = int(
             inputs.collect(transitions.select(pl.len())).item()
         )
+        transition_limit = min(params.max_transitions, inputs.ctx.evidence_limit)
+        if not transition_limit or not transition_bytes:
+            stats[column]["transitions"] = []
+            continue
         top = inputs.collect(
             transitions.sort(
                 [count, *names], descending=[True, False, False], nulls_last=True
-            ).head(params.max_transitions)
+            ).head(transition_limit)
         )
         top = encode_temporal(top)
-        stats[column]["transitions"] = [
-            Transition(baseline=x, candidate=y, count=n) for x, y, n in top.iter_rows()
-        ]
+        evidence = BoundedEvidence(transition_limit, byte_limit=transition_bytes)
+        evidence.extend({"baseline": x, "candidate": y, "count": n} for x, y, n in top.iter_rows())
+        transition_bytes -= evidence.bytes_used
+        stats[column]["transitions"] = [Transition(**record) for record in evidence.records]
     changes: list[dict[str, Any]] = []
-    if params.top_n:
+    top_n = min(params.top_n, inputs.ctx.evidence_limit) if inputs.ctx.evidence_bytes else 0
+    if top_n:
         for column in numeric:
             b, c = matched.pair(column)
             rtol, atol = plan.tolerance(column)
@@ -262,7 +307,7 @@ def _describe(
                 matched.plan.filter(pending.fill_null(True) & finite)
                 .with_columns(gap.alias(magnitude))
                 .sort([magnitude, *matched.keys], descending=[True, *[False] * len(matched.keys)])
-                .head(4 * params.top_n + 16)
+                .head(4 * top_n + 16)
                 .select([*matched.keys, *matched.names[column]])
             )
             kept = 0
@@ -285,7 +330,7 @@ def _describe(
                     }
                 )
                 kept += 1
-                if kept == params.top_n:
+                if kept == top_n:
                     break
     return stats, changes
 
@@ -299,7 +344,11 @@ class _Shift:
 
 
 def _shift(
-    inputs: LevelInputs, plan: ComparisonPlan, params: RecordsParams, inference: Inference
+    inputs: LevelInputs,
+    plan: ComparisonPlan,
+    params: RecordsParams,
+    inference: Inference,
+    rows: int,
 ) -> _Shift | None:
     """Paired tests of each numeric column's shift over matched rows (per ``shift_by``)."""
     left, right = plan.baseline_schema, plan.candidate_schema
@@ -308,7 +357,7 @@ def _shift(
         for c in plan.values
         if left[c].is_numeric() and right[c].is_numeric() and c not in params.shift_by
     ]
-    if not numeric:
+    if not numeric or rows == 0:
         return None
     test = params.test.create()
     tested = MeasureTest("none", None, False, "the level declares no test (test: none)")
@@ -318,21 +367,42 @@ def _shift(
     if unknown := sorted(set(groups) - set(plan.keys) - set(plan.values)):
         raise ValueError(f"shift_by names column(s) not compared: {', '.join(unknown)}")
     matched = _Matched(inputs, plan, [*numeric, *(g for g in groups if g not in plan.keys)])
-    rows = int(inputs.collect(matched.plan.select(pl.len())).item())
+    if len(numeric) > 1:
+        # Reuse the join across column tests under the observation's memory/spill
+        # policy. One-column tests keep their narrow direct plan.
+        with inputs.observations["baseline"].derived(lambda _: matched.plan) as observation:
+            matched.plan = observation.scan()
+            return _shift_matched(inputs, plan, inference, numeric, tested, groups, matched, rows)
+    return _shift_matched(inputs, plan, inference, numeric, tested, groups, matched, rows)
+
+
+def _shift_matched(
+    inputs: LevelInputs,
+    plan: ComparisonPlan,
+    inference: Inference,
+    numeric: list[str],
+    tested: MeasureTest,
+    groups: list[str],
+    matched: _Matched,
+    rows: int,
+) -> _Shift:
     members: list[Member] = []
     described: list[dict[str, Any]] = []
     for column in numeric:
         b, c = matched.pair(column)
-        finite = _finite(b, c, left[column], right[column])
         keys = [pl.col(g) if g in plan.keys else matched.pair(g)[1] for g in groups]
         names = [fresh_internal(f"group_{i}", matched.names[column]) for i in range(len(groups))]
         rtol, atol = plan.tolerance(column)
         judged = Materiality(rtol, atol)
         for group, pairs, means, problem in _paired_values(
-            inputs, matched.plan.filter(finite), keys, names, groups, (b, c), rows, inference
+            inputs, matched.plan, keys, names, groups, (b, c), rows, inference
         ):
             usable = means[0] is not None and means[1] is not None
-            material = usable and judged.material(*means)
+            # An unknown mean is not proof of immateriality. Force the policy to
+            # inspect the missing input and report it as unassessed.
+            material = judged.material(*means) if usable else True
+            if not usable and problem is None:
+                problem = "no finite matched pairs to measure the shift"
             margin = judged.margin(*means) if usable else None
             data = None
             if pairs is not None:
@@ -348,7 +418,8 @@ def _shift(
             count = len(pairs[0]) if pairs is not None else None
             described.append(
                 {"column": column, **group, "pairs": count,
-                 "baseline_mean": means[0], "candidate_mean": means[1]}
+                 "baseline_mean": None if means[0] is None else float(means[0]),
+                 "candidate_mean": None if means[1] is None else float(means[1])}
             )  # fmt: skip
     judgement = judge(tested, inference, members, inputs.ctx.evidence_limit)
     return _shift_check(inputs, numeric, tested, inference, judgement, described)
@@ -372,41 +443,49 @@ def _paired_values(
 ) -> list[_Paired]:
     """Per group: the matched values (when within ``max_work``), their means and any problem.
 
-    Beyond the budget only the means are reduced natively, so materiality is still
-    judged and a material shift is not assessed rather than untested.
+    Beyond the budget only group identities are collected. A rounded native mean
+    cannot establish exact materiality, so those groups remain unassessed.
     """
     b, c = pair
     grouping = [k.alias(n) for k, n in zip(keys, names, strict=True)]
     if rows * 2 > inference.max_work:
-        means = [b.cast(pl.Float64).mean().alias("b"), c.cast(pl.Float64).mean().alias("c")]
-        reduced = plan.with_columns(grouping).group_by(names) if names else None
-        frame = inputs.collect(
-            reduced.agg(means).sort(names, nulls_last=True)
-            if reduced is not None
-            else plan.select(means)
-        )
         problem = f"{rows:,} matched rows exceed max_work {inference.max_work:,}"
+        group_rows = (
+            precise_frame(
+                inputs.collect(plan.select(grouping).unique().sort(names, nulls_last=True))
+            ).iter_rows()
+            if names
+            else [()]
+        )
         return [
-            (dict(zip(groups, row[: len(names)], strict=True)), None, row[len(names) :], problem)
-            for row in frame.iter_rows()
+            (dict(zip(groups, row, strict=True)), None, (None, None), problem) for row in group_rows
         ]
     frame = inputs.collect(plan.select(*grouping, b.alias("b"), c.alias("c")))
-    parts = (
-        frame.sort(names, nulls_last=True).partition_by(names, maintain_order=True, as_dict=True)
-        if names
-        else {(): frame}
-    )
+    ordered = frame.sort(names, nulls_last=True) if names else frame
     found: list[_Paired] = []
-    for key, part in parts.items():
+    for key, part in group_partitions(ordered, names):
         group = dict(zip(groups, key, strict=True))
+        part = part.filter(pl.all_horizontal(pl.col("b", "c").cast(pl.Float64).is_finite()))
+        average = tuple(_exact_mean(part[column]) for column in ("b", "c"))
         try:
             values = float_values(part["b"]), float_values(part["c"])
         except ValueError as exc:
-            found.append((group, None, (None, None), str(exc)))
+            found.append((group, None, (average[0], average[1]), str(exc)))
             continue
-        average = [float(v.mean()) if len(v) else None for v in values]
         found.append((group, values, (average[0], average[1]), None))
     return found
+
+
+def _exact_mean(values: pl.Series) -> Fraction | None:
+    """Materiality of bounded paired samples must not depend on rounded sums."""
+    if not len(values):
+        return None
+    if values.dtype.is_float():
+        accumulator = ExactFloatAccumulator()
+        accumulator.update(values)
+        return accumulator.mean()
+    total = sum(values) if values.dtype.is_integer() else sum(map(Fraction, values), Fraction())
+    return Fraction(total) / len(values)
 
 
 def _shift_check(
@@ -578,8 +657,15 @@ class RecordsLevel(ComparisonLevel):
                 },
             ),
         ]
+        if not_compared and not plan.values:
+            checks[1] = not_assessed(
+                "values",
+                "no value column can be compared; incompatible types: " + ", ".join(not_compared),
+            ).model_copy(
+                update={"metrics": {"not_compared": not_compared}, "total": 0, "unit": "values"}
+            )
         inference = Inference.of(spec, params)
-        shift = _shift(inputs, plan, params, inference) if inference.tests else None
+        shift = _shift(inputs, plan, params, inference, matched) if inference.tests else None
         if shift is not None:
             checks.append(shift.check)
             columns = [

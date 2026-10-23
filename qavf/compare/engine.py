@@ -16,12 +16,13 @@ from typing import Any
 import polars as pl
 
 from qavf.compare.align import AlignmentContext, AlignmentError, align, build_pipeline
-from qavf.compare.levels import LEVELS, SIDES, LevelInputs, not_assessed
+from qavf.compare.levels import LEVELS, SIDES, ComparisonLevel, LevelInputs, not_assessed
 from qavf.compare.results import DatasetComparison, LevelResult
 from qavf.compare.spec import ComparisonSpec, Side
 from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation
 from qavf.redaction import redact_text
+from qavf.regression._plan import mapped_schema
 from qavf.rules._execution import normalized_plan
 
 
@@ -51,6 +52,45 @@ def _reason(exc: Exception) -> str:
     )
 
 
+def _requirements(spec: ComparisonSpec, levels: list[ComparisonLevel]) -> set[str] | None:
+    selected = [level.required_columns() for level in levels]
+    if any(columns is None for columns in selected):
+        return None
+    return set(spec.keys).union(*(columns or () for columns in selected))
+
+
+def _source_columns(spec: ComparisonSpec, needed: set[str] | None, side: Side) -> list[str] | None:
+    """Conservative dependency closure; undeclared plugin steps preserve every column."""
+    if needed is None or spec.steps:
+        return None
+    columns = set(needed)
+    for condition in (
+        spec.where,
+        spec.baseline_where if side == "baseline" else spec.candidate_where,
+    ):
+        if condition:
+            columns.update(pl.sql_expr(condition).meta.root_names())
+    for name, expression in reversed(list(spec.derive.items())):
+        columns.discard(name)
+        columns.update(pl.sql_expr(expression).meta.root_names())
+    columns.update(spec.cast)
+    columns.update(spec.units)
+    columns.update(spec.recode)
+    if side == "baseline":
+        reverse = {new: old for old, new in spec.columns.items()}
+        columns = {reverse.get(column, column) for column in columns} | set(spec.columns)
+    return sorted(columns) or None  # An empty projection would erase the row count.
+
+
+def _normalizes(ctx: DataContext, dataset: str, columns: dict[str, pl.DataType]) -> bool:
+    spec = ctx.specs.get(dataset)
+    contracts = spec.schema_spec.columns if spec is not None and spec.schema_spec else {}
+    return any(
+        name in contracts and (contracts[name].missing_values or contracts[name].blank_as_missing)
+        for name in columns
+    )
+
+
 def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetComparison:
     """Compare ``spec.baseline`` with ``spec.candidate``, two datasets of ``ctx``."""
     configured = [
@@ -58,6 +98,7 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
     ]
     datasets: dict[Side, str] = {"baseline": spec.baseline, "candidate": spec.candidate}
     steps = build_pipeline(spec)
+    needed = _requirements(spec, [level for _, level in configured])
     outcome: dict[str, Any] = {
         "name": spec.label,
         "baseline": spec.baseline,
@@ -83,14 +124,31 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
             )
     with ExitStack() as stack:
         try:
-            observed = stack.enter_context(
-                ctx.projected_observations(
-                    {name: None for name in dict.fromkeys(datasets.values())}
+            requests: dict[str, list[str] | None] = {}
+            for side in SIDES:
+                dataset = datasets[side]
+                columns = _source_columns(spec, needed, side)
+                schema = ctx.schema(dataset)
+                aligned_schema = (
+                    mapped_schema(schema, spec.columns, "columns")[0]
+                    if side == "baseline"
+                    else schema
                 )
-            )
+                if clash := sorted(set(spec.derive) & set(aligned_schema)):
+                    raise AlignmentError(f"derived column(s) {', '.join(clash)} already exist")
+                if columns is not None:
+                    columns = [column for column in columns if column in schema] or None
+                if dataset not in requests:
+                    requests[dataset] = columns
+                elif columns is None or requests[dataset] is None:
+                    requests[dataset] = None
+                else:
+                    requests[dataset] = sorted(set(requests[dataset] or ()) | set(columns))
+            observed = stack.enter_context(ctx.projected_observations(requests))
             units: dict[Side, dict[str, str | None]] = {}
             nullable: dict[Side, dict[str, bool]] = {}
             aligned: dict[Side, pl.LazyFrame] = {}
+            identities: dict[Side, bool] = {}
             for side in SIDES:
                 observation = observed[datasets[side]]
                 context = AlignmentContext(
@@ -102,12 +160,26 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
                     collect=observation.collect,
                     data=ctx,
                 )
-                plan = normalized_plan(ctx, datasets[side], observation.scan(), declared_only=True)
+                original = observation.scan()
+                plan = (
+                    normalized_plan(ctx, datasets[side], original, declared_only=True)
+                    if _normalizes(ctx, datasets[side], observation.schema())
+                    else original
+                )
                 aligned[side] = align(plan, steps, context)
+                identities[side] = aligned[side] is original
+                if needed:
+                    selected = [
+                        column for column in aligned[side].collect_schema() if column in needed
+                    ]
+                    if selected:
+                        aligned[side] = aligned[side].select(selected)
                 units[side], nullable[side] = context.units, context.nullable
                 outcome["alignment"].extend(context.notes)
             sides: dict[Side, Observation] = {
-                side: stack.enter_context(observed[datasets[side]].derived(_fixed(aligned[side])))
+                side: observed[datasets[side]]
+                if identities[side]
+                else stack.enter_context(observed[datasets[side]].derived(_fixed(aligned[side])))
                 for side in SIDES
             }
             rows = {
@@ -128,7 +200,14 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
         results: list[LevelResult] = []
         for config, level in configured:
             try:
-                results.append(level.evaluate(inputs, config.label))
+                result = level.evaluate(inputs, config.label)
+                if not result.checks:
+                    result = result.model_copy(
+                        update={
+                            "checks": [not_assessed("assessment", "the level returned no checks")]
+                        }
+                    )
+                results.append(result)
             except Exception as exc:
                 results.append(
                     level.Result(

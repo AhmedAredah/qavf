@@ -22,6 +22,7 @@ def compare_datasets(
     name: str | None = None,
     resources: ResourceLimits | None = None,
     entry_points: bool = True,
+    configuration: ComparisonSpec | Mapping[str, Any] | None = None,
     **options: Any,
 ) -> DatasetComparison:
     """Compare a candidate dataset with its baseline at several levels.
@@ -38,6 +39,11 @@ def compare_datasets(
     ``candidate_where``, ``where``, ``ignore_columns``, ``rtol``, ``atol``,
     ``tolerances``, ``min_rows``).
 
+    ``configuration`` optionally accepts an existing typed ``ComparisonSpec`` or
+    settings mapping. Its dataset names are rebound to these two inputs. It may
+    not be mixed with comparison keywords (keys, columns, levels, name, or other
+    options), so no requested check is silently overwritten.
+
     ``resources`` applies the same :class:`~qavf.ResourceLimits` as validation,
     including isolated execution for transportable file and query inputs.
     ``entry_points`` resolves levels, measures, comparators and alignment steps
@@ -52,12 +58,18 @@ def compare_datasets(
     from qavf.compare.registry import entry_point_scope
 
     with entry_point_scope(entry_points):
-        return _compare(
-            baseline,
-            candidate,
-            resources,
-            entry_points,
-            {
+        if configuration is not None:
+            if keys or columns is not None or levels is not None or name is not None or options:
+                raise ValueError("configuration cannot be combined with comparison keywords")
+            configured = (
+                configuration.model_dump()
+                if isinstance(configuration, ComparisonSpec)
+                else dict(configuration)
+            )
+            configured.update(baseline="baseline", candidate="candidate")
+            configured.setdefault("name", "comparison")
+        else:
+            configured = {
                 **options,
                 "name": name or "comparison",
                 "baseline": "baseline",
@@ -65,8 +77,8 @@ def compare_datasets(
                 "keys": [keys] if isinstance(keys, str) else list(keys),
                 "columns": dict(columns or {}),
                 "levels": None if levels is None else list(levels),
-            },
-        )
+            }
+        return _compare(baseline, candidate, resources, entry_points, configured)
 
 
 def _compare(

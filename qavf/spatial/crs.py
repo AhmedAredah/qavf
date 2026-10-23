@@ -9,8 +9,10 @@ authority's latitude-first axis order.
 
 Distance follows the CRS: great-circle (haversine) metres for geographic CRSs,
 Euclidean CRS units for projected ones (:mod:`qavf.spatial.distance`). The
-geographic CRSs are those listed in :data:`GEOGRAPHIC`; any other CRS is
-treated as projected.
+common degree-based geographic and WGS 84 projected CRSs need no additional
+dependency. Other identifiers are resolved through the optional PROJ database
+(``qavf[spatial]``), or rejected when their type cannot be established. Unknown
+identifiers never silently select a distance formula.
 
 A zone layer read from a file that declares its own CRS (GeoParquet ``geo``
 metadata, a shapefile's ``.prj``, a GeoJSON ``crs``) must agree with the
@@ -20,7 +22,9 @@ configured one; a mismatch is reported, never silently transformed.
 from __future__ import annotations
 
 import json
+import math
 import re
+from functools import lru_cache
 from typing import Annotated, Any
 
 from pydantic import BeforeValidator
@@ -57,8 +61,49 @@ Crs = Annotated[str, BeforeValidator(normalize_crs)]
 
 
 def is_geographic(crs: str) -> bool:
-    """Whether coordinates in ``crs`` are degrees (distances are then great-circle)."""
-    return normalize_crs(crs) in GEOGRAPHIC
+    """Resolve degree-based geographic or projected coordinates, failing closed.
+
+    Other angular units, geocentric/vertical CRSs, and unresolvable identifiers
+    are rejected rather than interpreted as planar coordinates. Resolution is
+    cached and does not occur in coordinate loops.
+    """
+    return _is_geographic(normalize_crs(crs))
+
+
+@lru_cache(maxsize=256)
+def _is_geographic(crs: str) -> bool:
+    if crs in GEOGRAPHIC:
+        return True
+    # Authoritative WGS 84 projected definitions used by the dependency-free
+    # grid API: Web/World Mercator and UTM zones 1-60 in both hemispheres.
+    authority, code = crs.split(":", 1)
+    if authority == "EPSG" and code.isdecimal():
+        number = int(code)
+        if number in (3857, 3395) or 32601 <= number <= 32660 or 32701 <= number <= 32760:
+            return False
+    try:
+        from pyproj import CRS
+        from pyproj.exceptions import CRSError
+    except ImportError:
+        raise ValueError(
+            f"cannot establish the coordinate type of {crs}; install qavf[spatial] "
+            "for authoritative CRS resolution"
+        ) from None
+    try:
+        resolved = CRS.from_user_input(crs)
+    except CRSError as exc:
+        raise ValueError(f"cannot resolve CRS {crs}") from exc
+    if resolved.is_projected:
+        return False
+    if resolved.is_geographic:
+        axes = resolved.axis_info[:2]
+        if len(axes) == 2 and all(
+            math.isclose(axis.unit_conversion_factor, math.pi / 180, rel_tol=1e-12)
+            for axis in axes
+        ):
+            return True
+        raise ValueError(f"geographic CRS {crs} must use degrees for haversine distances")
+    raise ValueError(f"CRS {crs} is neither a degree-based geographic nor projected CRS")
 
 
 def same_crs(a: str, b: str) -> bool:

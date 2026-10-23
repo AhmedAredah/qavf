@@ -13,11 +13,11 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
-from qavf.engine.connections import Connection, merge_connection_binding
+from qavf.engine.connections import Connection, merge_connection_binding, merge_secret_bindings
 from qavf.engine.projection import repeatable_file_source
 from qavf.engine.relations import bind_scan
 from qavf.engine.sql import check_sql_columns
-from qavf.settings import ConnectionSpec, check_sql_names
+from qavf.settings import ConnectionSpec, SecretSpec, check_sql_names
 from qavf.sources.base import DataSource, SourceError, SourceRegistry
 from qavf.sources.sql import normalize_single_query, quote_identifier, resolve_sql_paths
 
@@ -170,6 +170,7 @@ def consume_native[T](
         plans = {}
         attachments: set[str] = set()
         bindings: dict[str, ConnectionSpec] = {}
+        secrets: dict[str, SecretSpec] = {}
         for name, source in bindings_sources.items():
             source.prepare_identity(hash_contents=ctx._hash_inputs or name not in names)
             if source.snapshot_connection() is not None or source.scan_polars() is not None:
@@ -178,10 +179,11 @@ def consume_native[T](
             if plan is None:
                 raise NativeReadUnavailable(f"source {name!r} has no native SQL reader")
             plans[name] = plan
+            merge_secret_bindings(secrets, source.env)
             attachments.update(plan.connections)
             for attachment in plan.connections:
                 merge_connection_binding(bindings, attachment, source.env)
-        with ctx._sql_connections.temporary(attachments, bindings) as connection:
+        with ctx._sql_connections.temporary(attachments, bindings, secrets) as connection:
             for name, plan in plans.items():
                 binding_started = time.perf_counter()
                 relation = bind_scan(connection, bindings_sources[name], plan)

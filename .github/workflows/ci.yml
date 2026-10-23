@@ -1,63 +1,85 @@
 name: CI
-on:
+
+"on":
   push:
-    branches: [main]
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   workflow_dispatch:
+
 permissions:
   contents: read
+
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  UV_VERSION: "0.12.23"
+  POLARS_MAX_THREADS: "2"
+  OPENBLAS_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  test:
-    name: Lint, types and tests (Linux)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: ${{ env.UV_VERSION }}
-          python-version: "3.12"
-          enable-cache: true
-      - run: uv sync --all-extras --locked
-      # Spatial tests need DuckDB's spatial extension; install it (and the others) once.
-      - run: uv run --no-sync python scripts/verify_release.py extensions
-      - run: uv run --no-sync ruff check .
-      - run: uv run --no-sync mypy qavf scripts
-      - run: uv run --no-sync python scripts/generate_docs.py --check
-      - run: uv run --no-sync python -m pytest -q -p no:cacheprovider --ignore=tests/integration
-
-  platforms:
-    name: Platform-specific tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+  checks:
+    name: ${{ matrix.platform }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+            python: "3.12"
+          - platform: linux
+            runner: ubuntu-latest
+            python: "3.13"
+          - platform: linux
+            runner: ubuntu-latest
+            python: "3.14"
+          - platform: windows
+            runner: windows-latest
+            python: "3.12"
+          - platform: macos
+            runner: macos-latest
+            python: "3.12"
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: ${{ env.UV_VERSION }}
-          python-version: "3.12"
+          persist-credentials: false
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5"
+          python-version: ${{ matrix.python }}
           enable-cache: true
-      - run: uv sync --all-extras --locked
-      # Code paths that differ by operating system: isolation, locking, numerics,
-      # file identity and benchmark measurement. The full matrix runs on release tags.
-      - run: >-
-          uv run --no-sync python -m pytest -q -p no:cacheprovider
-          tests/test_isolated_supervisor.py tests/test_execution_isolation.py
-          tests/test_execution_policy.py tests/test_isolation_transport.py
-          tests/test_regression_exactness.py tests/test_statistical_rules.py
-          tests/test_scan_identity.py tests/test_loading_native_binding.py
-          tests/test_performance_metrics.py tests/test_performance_runner.py
-          tests/test_performance_process_tree.py
+      - name: Install locked development and optional dependencies
+        run: uv sync --locked --all-extras --group dev
+      - name: Check lint, types and generated documentation
+        if: matrix.platform == 'linux' && matrix.python == '3.12'
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync mypy qavf scripts
+          uv run --no-sync python scripts/generate_docs.py --check
+      - name: Verify full source and installed wheel on this platform
+        run: >-
+          uv run --no-sync python scripts/verify_platform.py
+          --output-dir release-evidence/platform
+      - name: Check installed core wheel in normal and optimized Python
+        if: matrix.platform == 'linux' && matrix.python == '3.12'
+        run: >-
+          uv run --no-sync python scripts/verify_release.py installed
+          --mode core --id core --output-dir release-evidence/core
+      - name: Preserve execution evidence and built distributions
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-${{ matrix.platform }}-${{ matrix.python }}
+          path: |
+            release-evidence/
+            dist/
+          if-no-files-found: warn
+          retention-days: 14

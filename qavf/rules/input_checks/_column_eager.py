@@ -156,7 +156,17 @@ def evaluate_eager(
                     )
                 )
             else:
-                _units(dataset, column, spec, frame, rows, failures, passed, ctx, prepared)
+                try:
+                    _units(dataset, column, spec, frame, rows, failures, passed, ctx, prepared)
+                except Exception as exc:
+                    failures.append(
+                        Finding.unassessed(
+                            f"Not assessed: units on {dataset}.{column}: "
+                            f"{type(exc).__name__}: {exc}.",
+                            check=f"{dataset}.{column}: units",
+                            datasets=(dataset,),
+                        )
+                    )
 
         for check in spec.all_checks():
             label = values._check_name(check)

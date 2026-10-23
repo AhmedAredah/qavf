@@ -476,6 +476,7 @@ Latitude/longitude columns of a dataset (WGS 84 degrees).
 | `null_island` | `bool` | `True` | Flag (0, 0), the usual sign of a missing value written as zero. |
 | `within` | `ZoneLayer \| None` | `None` | Points must fall inside these polygons (a zone layer or study area, in EPSG:4326 or transformed from its ``crs``); valid points outside are violations of a separate ``within`` check. Needs DuckDB's spatial extension. |
 | `boundary` | `Literal['intersects', 'contains']` | `intersects` | Whether a point on the boundary of ``within`` is inside (``intersects``). |
+| `assignment_limits` | `AssignmentLimits` | `{'batch_size': 16384, 'max_points': 1000000, 'max_matches': 2000000, 'max_work': 20000000}` | Point, match and work admission for ``within``; ordinary checks use the defaults. |
 
 #### `BoundingBox`
 
@@ -501,6 +502,17 @@ Zone polygons: ``{dataset: name}`` or ``{path: file}``, with an ``id`` column.
 | `crs` | `str` | `EPSG:4326` | CRS of the polygons; a file declaring another one is refused. |
 | `layer` | `str \| None` | `None` | Layer of a multi-layer file (``ST_Read``'s ``layer``). |
 | `repair` | `bool` | `False` | Replace invalid geometries with ``ST_MakeValid`` (recorded) instead of refusing them. |
+
+#### `AssignmentLimits`
+
+Finite row/work admission for point assignment, rather than an RSS ceiling.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `batch_size` | `int` | `16384` | Maximum distinct points transformed together and selected rows per Arrow batch. |
+| `max_points` | `int` | `1000000` | Maximum distinct point keys retained; excess points refuse the whole assignment. |
+| `max_matches` | `int` | `2000000` | Maximum selected point-zone mappings retained, including ``overlap: all`` expansion. |
+| `max_work` | `int` | `20000000` | Maximum bounding-box candidate pairs admitted across batches, before exact tests. |
 
 *When it fails:* Out-of-range latitudes usually mean latitude and longitude were swapped, or a projected coordinate (metres) was stored as degrees; (0, 0) is almost always a missing location written as zero.
 

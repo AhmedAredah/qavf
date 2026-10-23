@@ -325,9 +325,13 @@ def normalize_sql_paths(
     locations: dict[int, tuple[dict[str, Any], str]] = {}
     replacements_at: dict[int, str] = {}
     ambiguous_at: set[int] = set()
+    parameter_counts: dict[str, int] = {}
 
     def walk(node: Any, ctes: frozenset[str] = frozenset()) -> None:
         if isinstance(node, dict):
+            if node.get("class") == "PARAMETER":
+                identifier = str(node["identifier"]).casefold()
+                parameter_counts[identifier] = parameter_counts.get(identifier, 0) + 1
             entries = node.get("cte_map", {}).get("map", ())
             visible = ctes | frozenset(str(item["key"]).casefold() for item in entries)
             if node.get("type") == "RECURSIVE_CTE_NODE":
@@ -378,6 +382,7 @@ def normalize_sql_paths(
         byte_locations[token.start] = offset
         previous = token.start
     replacements: dict[int, tuple[int, str]] = {}
+    path_parameters: dict[str, list[tuple[int, int, Any]]] = {}
     for index, token in enumerate(tokens):
         location = byte_locations[token.start]
         if location in replacements_at and token.kind in ("string", "dollar"):
@@ -410,10 +415,34 @@ def normalize_sql_paths(
                 key = parameter_names.get(name.casefold())
                 if key is None:
                     raise SourceError(f"SQL file parameter {name!r} has no bound value")
-                bound[key] = resolve(bound[key])
+                path_parameters.setdefault(key, []).append(
+                    (tokens[argument].start, tokens[end - 1].end, resolve(bound[key]))
+                )
             else:
                 value = resolve(_literal_paths(expression))
                 replacements[tokens[argument].start] = (tokens[end - 1].end, sql_literal(value))
+    internal_index = 0
+    reserved = set(parameter_names) | set(parameter_counts)
+    positional_index = max((int(name) for name in reserved if name.isdecimal()), default=0) + 1
+    for key, occurrences in path_parameters.items():
+        other_uses = parameter_counts.get(key.casefold(), 0) > len(occurrences)
+        same_resolution = all(value == occurrences[0][2] for _, _, value in occurrences)
+        if not other_uses and same_resolution:
+            bound[key] = occurrences[0][2]
+            continue
+        for start, end, value in occurrences:
+            if key.isdecimal():
+                internal = str(positional_index)
+                positional_index += 1
+            else:
+                while (internal := f"__qavf_path_{internal_index}").casefold() in reserved:
+                    internal_index += 1
+                internal_index += 1
+            reserved.add(internal.casefold())
+            bound[internal] = value
+            replacements[start] = end, f"${internal}"
+        if not other_uses:
+            bound.pop(key)
     fragments: list[str] = []
     previous = 0
     for start, (end, value) in sorted(replacements.items()):

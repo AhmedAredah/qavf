@@ -25,6 +25,9 @@ registered components (:data:`TESTS`, :func:`register_test`, the
 ``qavf.inference.tests`` entry-point group).
 """
 
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
+
 from qavf.inference.categorical import (
     chi_square,
     contingency,
@@ -62,7 +65,6 @@ from qavf.inference.paired import (
     sign_test,
     wilcoxon_signed_rank,
 )
-from qavf.inference.registry import TESTS, InferenceTest, TestInput, register_test
 from qavf.inference.results import (
     Alternative,
     Correction,
@@ -143,3 +145,21 @@ __all__ = [
     "welch_t_from_moments",
     "wilcoxon_signed_rank",
 ]
+
+
+if TYPE_CHECKING:
+    from qavf.inference.registry import TESTS, InferenceTest, TestInput, register_test
+
+_REGISTRY_EXPORTS = frozenset({"TESTS", "InferenceTest", "TestInput", "register_test"})
+
+
+def __getattr__(name: str) -> Any:
+    if name not in _REGISTRY_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module("qavf.inference.registry"), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

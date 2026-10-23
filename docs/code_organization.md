@@ -45,6 +45,13 @@ the unreleased package does not retain aliases for former private locations.
 | Statistical inference | `inference/results.py`, `paired.py`, `independent.py`, `equivalence.py`, `categorical.py`, `counts.py`, `trend.py`, `spatial.py`, `multiple.py`, `intervals.py`, `resampling.py`, `pvalues.py`, `effects.py`, `decision.py`, `registry.py`, `components.py` | Arrays in, typed results out, independent of comparisons: one module per test family; corrections; intervals, seeded resampling and the work budget; effect sizes; decision policies; test components and their registry. SciPy supplies every distribution function. |
 | Component registries | `plugins/registry.py` | One registry implementation, discovery transaction and `plugins.entry_points` scope for comparison components and statistical tests. |
 | Typed values | `typed_values.py` | Lossless temporal normalization, checked casts with per-row loss flags, exact numeric scaling. |
+| Configuration | `configuration.py` | One duplicate-rejecting YAML/JSON parser and environment expansion policy for validation and comparisons. |
+| Neutral snapshots | `snapshots.py` | Detached immutable model snapshots shared by inference, regression and reports without importing presentation code. |
+| Shared value policy | `value_policy.py`, `missingness.py` | Typed membership, exact temporal literals and missing-value normalization shared by SQL admission and rules. |
+| Retained memory | `engine/retention.py` | Shared cache/observation byte admission and leases lasting until the final consumer closes. |
+| Sparse graphs | `_adjacency.py`, `spatial/_neighbours.py`, `spatial/weights.py` | Compact mapping-compatible graph storage, induced polygon graphs and work/edge admission for every builder. |
+| Spatial transfer | `spatial/assign.py`, `spatial/outlines.py` | Batched selected point mappings, scoped native temporary objects and outline admission before coordinate construction. |
+| Plugin transactions | `plugins/transactions.py` | Context-local cross-registry rollback, provenance and discovery visibility. |
 
 Concrete SQL source classes share their loading, budget, snapshot and connection
 ownership behavior through `SQLSource`; each supplies its own query construction.
@@ -117,6 +124,18 @@ explicit and independently tested.
 
 Smaller modules improve ownership and maintenance; a larger module count alone
 does not establish lower runtime or disk usage.
+
+Views borrow their owner's
+retention lease, first eager observations reuse admitted storage, and reductions
+execute callbacks outside the frame-cache lock. Reserved coverage metrics and
+each plugin finding are validated before a verdict is recorded. Configuration
+expansion preserves shared aliases and refuses cycles. Exact integer/Decimal
+tolerance inputs follow one decimal-spelling convention across comparison paths;
+the documented float `math.isclose` path remains separate.
+
+Further abstraction should replace a
+real duplicated policy or ownership boundary, rather than add classes around
+already cohesive functions.
 
 ## Verification
 

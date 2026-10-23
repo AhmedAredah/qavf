@@ -81,6 +81,10 @@ class Measure(Component):
     def compute(self, data: MeasureInput) -> pl.DataFrame:
         """Reduce ``data.relation`` per group; values may be numbers or rational strings."""
 
+    def reduction(self, data: MeasureInput) -> pl.Expr | None:
+        """Composable native aggregate, or None for an independent exact/plugin executor."""
+        return None
+
     def columns(self, column: str | None) -> tuple[str, ...]:
         """Columns read, for availability checks (the weight of a weighted mean, ...)."""
         return (column,) if column is not None else ()
@@ -154,9 +158,12 @@ class Count(Measure):
     test: ClassVar[str | None] = "poisson"
     counts: ClassVar[bool] = True
 
-    def compute(self, data: MeasureInput) -> pl.DataFrame:
+    def reduction(self, data: MeasureInput) -> pl.Expr:
         value = pl.len() if data.column is None else _usable(data).count()
-        return grouped_reduce(data.relation, data.keys, {data.alias: value.cast(pl.UInt64)})
+        return value.cast(pl.UInt64)
+
+    def compute(self, data: MeasureInput) -> pl.DataFrame:
+        return grouped_reduce(data.relation, data.keys, {data.alias: self.reduction(data)})
 
 
 @register_measure
@@ -173,8 +180,11 @@ class NullCount(Measure):
         empty = pl.DataFrame(schema=data.relation.schema)
         return missing_expr(empty, data.column).sum().cast(pl.UInt64)
 
+    def reduction(self, data: MeasureInput) -> pl.Expr:
+        return self._missing(data)
+
     def compute(self, data: MeasureInput) -> pl.DataFrame:
-        return grouped_reduce(data.relation, data.keys, {data.alias: self._missing(data)})
+        return grouped_reduce(data.relation, data.keys, {data.alias: self.reduction(data)})
 
     def proportions(self, data: MeasureInput) -> tuple[pl.Expr, pl.Expr | None]:
         """Missing values out of the group's rows."""
@@ -188,9 +198,12 @@ class DistinctCount(Measure):
     name: ClassVar[str] = "distinct_count"
     numeric: ClassVar[bool] = False
 
-    def compute(self, data: MeasureInput) -> pl.DataFrame:
+    def reduction(self, data: MeasureInput) -> pl.Expr:
         distinct = _usable(data).drop_nulls().n_unique().cast(pl.UInt64)
-        return grouped_reduce(data.relation, data.keys, {data.alias: distinct})
+        return distinct
+
+    def compute(self, data: MeasureInput) -> pl.DataFrame:
+        return grouped_reduce(data.relation, data.keys, {data.alias: self.reduction(data)})
 
 
 @register_measure
@@ -200,8 +213,11 @@ class Minimum(Measure):
     name: ClassVar[str] = "min"
     numeric: ClassVar[bool] = False
 
+    def reduction(self, data: MeasureInput) -> pl.Expr:
+        return _usable(data).min()
+
     def compute(self, data: MeasureInput) -> pl.DataFrame:
-        return grouped_reduce(data.relation, data.keys, {data.alias: _usable(data).min()})
+        return grouped_reduce(data.relation, data.keys, {data.alias: self.reduction(data)})
 
 
 @register_measure
@@ -211,8 +227,11 @@ class Maximum(Measure):
     name: ClassVar[str] = "max"
     numeric: ClassVar[bool] = False
 
+    def reduction(self, data: MeasureInput) -> pl.Expr:
+        return _usable(data).max()
+
     def compute(self, data: MeasureInput) -> pl.DataFrame:
-        return grouped_reduce(data.relation, data.keys, {data.alias: _usable(data).max()})
+        return grouped_reduce(data.relation, data.keys, {data.alias: self.reduction(data)})
 
 
 @register_measure
@@ -288,9 +307,12 @@ class StandardDeviation(Measure):
     test: ClassVar[str | None] = "brown_forsythe"
     statistic: ClassVar[str | None] = "std"
 
-    def compute(self, data: MeasureInput) -> pl.DataFrame:
+    def reduction(self, data: MeasureInput) -> pl.Expr:
         value = _usable(data).cast(pl.Float64).std()
-        return grouped_reduce(data.relation, data.keys, {data.alias: value})
+        return value
+
+    def compute(self, data: MeasureInput) -> pl.DataFrame:
+        return grouped_reduce(data.relation, data.keys, {data.alias: self.reduction(data)})
 
 
 class WeightedMeanParams(RuleParams):

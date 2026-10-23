@@ -9,7 +9,7 @@ and none passes merely because nothing was there to violate it.
 
 from __future__ import annotations
 
-from math import prod
+from contextlib import nullcontext
 from typing import Any, ClassVar, Literal
 
 import polars as pl
@@ -17,6 +17,7 @@ from pydantic import Field, model_validator
 
 from qavf.aggregation import exact_sum_expr
 from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
@@ -29,18 +30,20 @@ from qavf.rules._execution import (
     KeyRelation,
     align_key_relations,
     key_relation,
+    normalized_plan,
     observed_keys,
     paired_key_backend,
     projected_frame,
 )
 from qavf.rules._grouped import (
+    ProjectedRelation,
     grouped_aggregate,
     normalized_relation,
     scoped_relation,
     supports_grouped,
 )
 from qavf.rules._key_summary import KeySelection
-from qavf.rules._temporal import physical_keys, temporal_evidence
+from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import (
     fresh_internal,
     missing_expr,
@@ -195,6 +198,7 @@ def _context_side_totals(
     on: list[str],
     alias: str,
     present_name: str,
+    observation: Observation | None = None,
 ) -> tuple[pl.DataFrame, int, int]:
     """Reduce exact typed totals at the source; retain exact projected float kernels."""
     schema = ctx.schema(side.dataset)
@@ -202,10 +206,25 @@ def _context_side_totals(
     contract = spec.schema_spec if spec is not None else None
     columns = list(dict.fromkeys([*keys, *([side.value] if side.value else [])]))
     dtype = schema[side.value] if side.value is not None else None
+    provided = None
+    if observation is not None:
+        plan = normalized_plan(ctx, side.dataset, observation.scan())
+        provided = ProjectedRelation(
+            ctx,
+            side.dataset,
+            dict(plan.collect_schema()),
+            lazy=plan,
+            observation=observation,
+            collector=observation.collect,
+        )
     if dtype is not None and not dtype.is_numeric() and dtype != pl.Null:
         raise ValueError(f"{side.dataset}.{side.value} requires numeric values, found {dtype}")
     if dtype is not None and dtype.is_float() and side.value is not None:
-        with scoped_relation(ctx, side.dataset, columns) as scoped:
+        with (
+            nullcontext(provided)
+            if provided is not None
+            else scoped_relation(ctx, side.dataset, columns)
+        ) as scoped:
             assert scoped.lazy is not None and scoped.observation is not None
             missing = (
                 pl.any_horizontal(pl.col(key).is_null() for key in keys) if keys else pl.lit(False)
@@ -225,7 +244,7 @@ def _context_side_totals(
                 presence_alias=present_name,
             )
             return exact_totals.rename(dict(zip(keys, on, strict=True))), int(nulls), int(rows)
-    relation = normalized_relation(ctx, side.dataset, columns)
+    relation = provided or normalized_relation(ctx, side.dataset, columns)
     how: Literal["count", "sum"] = "count" if side.value is None else "sum"
     if relation is not None and supports_grouped(relation, side.value, how):
         missing = (
@@ -340,8 +359,33 @@ class TotalsReconcileRule(Rule):
             taken.append(fresh)
         left_name, right_name, lp, rp, problem = names
         (ls, lk, _), (rs, rk, _) = sides
-        left, left_null, left_rows = _context_side_totals(ctx, ls, lk, on, left_name, lp)
-        right, right_null, right_rows = _context_side_totals(ctx, rs, rk, on, right_name, rp)
+        if (
+            ls.dataset == rs.dataset
+            and not ctx.is_materialized(ls.dataset)
+            and not ctx.repeatable_scan(ls.dataset)
+        ):
+            projection = list(
+                dict.fromkeys(
+                    [
+                        *lk,
+                        *rk,
+                        *([ls.value] if ls.value else []),
+                        *([rs.value] if rs.value else []),
+                    ]
+                )
+            )
+            if not projection:
+                projection = list(ctx.schema(ls.dataset))[:1]
+            with ctx.observe(ls.dataset, projection) as observed:
+                left, left_null, left_rows = _context_side_totals(
+                    ctx, ls, lk, on, left_name, lp, observed
+                )
+                right, right_null, right_rows = _context_side_totals(
+                    ctx, rs, rk, on, right_name, rp, observed
+                )
+        else:
+            left, left_null, left_rows = _context_side_totals(ctx, ls, lk, on, left_name, lp)
+            right, right_null, right_rows = _context_side_totals(ctx, rs, rk, on, right_name, rp)
         datasets = (ls.dataset, rs.dataset)
         null_rows = left_null + right_null
         if null_rows and rec.null_keys == "fail":
@@ -693,56 +737,6 @@ class KeyGridRule(Rule):
         from qavf.rules._grid import evaluate_grid
 
         return evaluate_grid(ctx, grid)
-
-
-def _missing_grid_sample(
-    present: pl.DataFrame, domains: dict[str, pl.Series], limit: int
-) -> pl.DataFrame:
-    """Find lexicographic gaps by rank, without materializing the Cartesian grid.
-
-    At most the actual unique key rows are sorted/visited. Expected cardinality
-    and ranks are Python integers, so even grids beyond 64-bit counts are safe.
-    """
-    if any(domain.dtype.is_temporal() for domain in domains.values()):
-        return _missing_grid_sample(
-            physical_keys(present),
-            {
-                column: physical_keys(domain.to_frame())[column]
-                for column, domain in domains.items()
-            },
-            limit,
-        ).cast({column: domain.dtype for column, domain in domains.items()})
-    columns = list(domains)
-    if limit <= 0:
-        return pl.DataFrame(schema={column: domain.dtype for column, domain in domains.items()})
-    values = [domain.to_list() for domain in domains.values()]
-    sizes = [len(v) for v in values]
-    rank = [{value: index for index, value in enumerate(v)} for v in values]
-    total = prod(sizes)
-    rows: list[tuple[Any, ...]] = []
-
-    def decode(index: int) -> tuple[Any, ...]:
-        result = []
-        for domain, size in zip(reversed(values), reversed(sizes), strict=True):
-            index, remainder = divmod(index, size)
-            result.append(domain[remainder])
-        return tuple(reversed(result))
-
-    cursor = 0
-    for record in present.sort(columns).iter_rows():
-        index = 0
-        for value, lookup, size in zip(record, rank, sizes, strict=True):
-            index = index * size + lookup[value]
-        while cursor < index and len(rows) < limit:
-            rows.append(decode(cursor))
-            cursor += 1
-        if len(rows) >= limit:
-            break
-        cursor = index + 1
-    while cursor < total and len(rows) < limit:
-        rows.append(decode(cursor))
-        cursor += 1
-    return pl.DataFrame(rows, schema={c: d.dtype for c, d in domains.items()}, orient="row")
 
 
 # ======================================================================= REC-004

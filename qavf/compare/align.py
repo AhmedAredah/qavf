@@ -80,11 +80,12 @@ class AlignmentContext:
 
     def rename(self, mapping: Mapping[str, str]) -> None:
         """Carry declared metadata over a column rename."""
-        for old, new in mapping.items():
-            if old in self.units:
-                self.units[new] = self.units.pop(old)
-            if old in self.nullable:
-                self.nullable[new] = self.nullable.pop(old)
+        units = {mapping.get(name, name): value for name, value in self.units.items()}
+        nullable = {mapping.get(name, name): value for name, value in self.nullable.items()}
+        if len(units) != len(self.units) or len(nullable) != len(self.nullable):
+            raise self.refuse("column rename merges declared metadata")
+        self.units = units
+        self.nullable = nullable
 
 
 class AlignmentStep(Component):
@@ -147,7 +148,7 @@ class ColumnMapStep(AlignmentStep):
         except ValueError as exc:
             raise context.refuse(str(exc).removeprefix("columns: ")) from None
         context.rename(mapping)
-        return plan.rename(mapping)
+        return plan.rename(mapping) if mapping else plan
 
 
 class CastParams(RuleParams):
@@ -223,7 +224,24 @@ class RecodeParams(RuleParams):
 
 def _typed(values: Sequence[Any], dtype: pl.DataType, what: str) -> pl.Series:
     try:
-        return pl.Series(list(values)).cast(dtype, strict=True)
+        originals = pl.Series(list(values))
+        converted = originals.cast(dtype, strict=True)
+        # Mapping keys written in an object are text by construction. Preserve
+        # that documented parsing shorthand, but typed keys must not truncate
+        # (e.g. 1.9 must never recode integer category 1).
+        if originals.dtype != pl.String:
+            value, lost = checked_cast(pl.col("value"), originals.dtype, dtype)
+            checked = (
+                originals.alias("value")
+                .to_frame()
+                .select(value.alias("converted"), lost.alias("lost"))
+            )
+            if checked["lost"].any():
+                raise ValueError("lossy recode key")
+            converted = checked["converted"]
+        if converted.n_unique() != len(converted):
+            raise ValueError("recode keys collide after conversion")
+        return converted
     except Exception:
         raise ValueError(f"{what} cannot all be represented as {dtype}") from None
 

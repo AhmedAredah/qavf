@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable, Iterator
-from contextlib import nullcontext
+from collections.abc import Callable, Generator, Iterator
+from contextlib import closing, nullcontext
 from dataclasses import asdict, dataclass, field
+from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
 from qavf.key_codec import canonical_key
+from qavf.numeric import finite_float
 from qavf.rules.helpers import LargestEvidence, annotate, fresh_internal
 from qavf.statistics.ordered import OutlierModel, fit_outliers, scaled
 from qavf.stats import DEFAULT_THRESHOLDS, OutlierMethod, checked_float_series, minimum_samples
@@ -37,7 +39,7 @@ class TargetScan:
     untested_records: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _rows(store: Store, key: bytes, *, log: bool = False) -> Iterator[tuple[float, int]]:
+def _rows(store: Store, key: bytes, *, log: bool = False) -> Generator[tuple[float, int]]:
     where = " AND value > 0" if log else ""
     cursor = store.execute(
         "SELECT value, frequency FROM values_by_group WHERE identity=?" + where + " ORDER BY value",
@@ -67,7 +69,7 @@ def _median(rows: Iterator[tuple[float, int]], size: int) -> float:
         raise ValueError("group observation counts changed during median evaluation")
     if a == b:
         return a
-    return a / 2 + b / 2 if a < 0 < b else a + (b - a) / 2
+    return finite_float((Fraction(a) + Fraction(b)) / 2)
 
 
 def _fit_groups(
@@ -104,7 +106,12 @@ def _fit_groups(
     )
     for key, raw_size, size, lo, hi in groups:
         store.resources.session.check()
-        original_median = _median(_rows(store, key), raw_size)
+        # Raw-unit materiality needs one correctly rounded median. Statistical
+        # scoring uses the scaled model and does not need this extra reduction.
+        original_median = 0.0
+        if target.min_relative_deviation > 0:
+            with closing(_rows(store, key)) as values:
+                original_median = _median(values, raw_size)
         if log:
             lo, hi = math.log(lo), math.log(hi)
 

@@ -111,6 +111,33 @@ def float_values(series: pl.Series) -> np.ndarray:
     return values.cast(pl.Float64).to_numpy()
 
 
+def centered_values(values: Sequence[Fraction]) -> np.ndarray:
+    """Translate exact values for location-invariant tests, without losing variation."""
+    if not values:
+        return np.empty(0, dtype=float)
+    try:
+        direct = [float(value) for value in values]
+    except OverflowError:
+        direct = []
+    if direct and all(
+        math.isfinite(number) and Fraction(number) == value
+        for number, value in zip(direct, values, strict=True)
+    ):
+        return np.asarray(direct, dtype=float)
+    origin = values[0]
+    converted = []
+    for value in values:
+        shifted = value - origin
+        try:
+            number = float(shifted)
+        except OverflowError:
+            raise ValueError("centred values cannot be represented exactly as Float64") from None
+        if not math.isfinite(number) or Fraction(number) != shifted:
+            raise ValueError("centred values cannot be represented exactly as Float64")
+        converted.append(number)
+    return np.asarray(converted, dtype=float)
+
+
 def _values(relation: ProjectedRelation, column: str) -> pl.Expr:
     return numeric_expr(column, relation.schema[column]).cast(pl.Float64)
 

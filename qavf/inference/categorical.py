@@ -59,6 +59,17 @@ def _counts(table: npt.ArrayLike, square: bool = False) -> np.ndarray:
         raise ValueError("a contingency table is a 2-D array of non-negative counts")
     if not np.array_equal(counts, np.round(counts)):
         raise ValueError("contingency counts must be whole numbers")
+    if not counts.size or not np.isfinite(counts).all():
+        raise Unassessable("a contingency table needs nonempty finite counts")
+    # Exact tests and all marginal sums below use signed Int64. Check before
+    # conversion: a UInt64 value or infinity must never wrap into a negative
+    # count and then be mistaken for an empty category.
+    maximum = np.iinfo(np.int64).max
+    largest = int(counts.max())
+    if largest > maximum:
+        raise Unassessable("contingency counts exceed the supported Int64 range")
+    if largest * counts.size > maximum and sum(int(value) for value in counts.flat) > maximum:
+        raise Unassessable("contingency total exceeds the supported Int64 range")
     if square and counts.shape[0] != counts.shape[1]:
         raise ValueError("a paired table must be square (k x k)")
     return counts.astype(np.int64)
@@ -223,7 +234,14 @@ def stuart_maxwell(table: npt.ArrayLike) -> TestResult:
     s = -(kept + kept.T)
     np.fill_diagonal(s, kept.sum(axis=1) + kept.sum(axis=0) - 2 * np.diag(kept))
     s = s[:-1, :-1]
-    statistic = float(d @ np.linalg.solve(s, d))
+    try:
+        statistic = float(d @ np.linalg.solve(s, d))
+    except np.linalg.LinAlgError:
+        raise Unassessable(
+            "paired category changes have a singular covariance; "
+            "a rank-aware marginal-homogeneity test is required",
+            n=n,
+        ) from None
     notes = [f"{int((~keep).sum())} unchanged categories left out"] if not keep.all() else []
     return TestResult(
         statistic=statistic,

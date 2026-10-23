@@ -26,7 +26,7 @@ from qavf.rules._row_summary import row_aliases, summarize_rows
 from qavf.rules.helpers import fresh_internal, missing_expr, outcome, plural, present, usable
 from qavf.settings import NumericBound, QAVFSettings
 from qavf.sources.sql import quote_identifier
-from qavf.spatial.assign import AssignmentPolicy, assign
+from qavf.spatial.assign import AssignmentLimits, AssignmentPolicy, assign
 from qavf.spatial.crs import DEFAULT_CRS
 from qavf.spatial.extension import spatial_connection
 from qavf.spatial.layers import ZoneLayer, load_zones
@@ -68,6 +68,8 @@ class PointSet(RuleParams):
     ``within`` check. Needs DuckDB's spatial extension."""
     boundary: Literal["intersects", "contains"] = "intersects"
     """Whether a point on the boundary of ``within`` is inside (``intersects``)."""
+    assignment_limits: AssignmentLimits = Field(default_factory=AssignmentLimits)
+    """Point, match and work admission for ``within``; ordinary checks use the defaults."""
 
     def label(self) -> str:
         return self.name or f"{self.dataset}({self.latitude}, {self.longitude})"
@@ -148,7 +150,11 @@ class CoordinateRule(Rule):
             valid = lat.is_finite() & lon.is_finite() & lat.is_between(-90, 90)
             plan = plan.filter((valid & lon.is_between(-180, 180)).fill_null(False))
             zone = fresh_internal("zone", columns)
-            policy = AssignmentPolicy(predicate=points.boundary, overlap="first")
+            policy = AssignmentPolicy(
+                predicate=points.boundary,
+                overlap="first",
+                **points.assignment_limits.model_dump(),
+            )
             with spatial_connection(ctx) as con:
                 layer = load_zones(con, ctx, points.within)
                 assigned = assign(

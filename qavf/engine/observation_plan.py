@@ -34,6 +34,16 @@ class ObservationView(Observation):
         super()._check()
         self._parent._check()
 
+    def borrow(self, columns: Iterable[str] | None = None) -> Observation:
+        """Borrow the owner's lease while preserving this view's projection."""
+        self._check()
+        selected = self._columns if columns is None else selected_columns(columns)
+        if selected is not None:
+            missing = set(selected) - self.schema().keys()
+            if missing:
+                raise ValueError(f"observation does not contain columns {sorted(missing)!r}")
+        return self._parent.borrow(selected)
+
     def close(self) -> None:
         self._closed = True
         self._frame = None

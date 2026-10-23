@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from fractions import Fraction
 
 import polars as pl
 
+from qavf.numeric import tolerance_fraction
 from qavf.regression._cells import _cell_change
 from qavf.regression._evidence import _capture_cells, _capture_native, _Changes
-from qavf.regression._numeric import _difference_size, _settled
+from qavf.regression._numeric import _difference_size, _integer_difference_maxima, _settled
 from qavf.regression._plan import ComparisonPlan
 from qavf.regression._schema import _encode_temporal, _nested, _structure_changed, _type_changed
 from qavf.regression.models import ComparisonExecution, ComparisonResult
@@ -155,14 +157,16 @@ def _compare_batch(
         if not pending.any():
             continue
         positions = pending.arg_true()
-        # Equal-dtype scalar values are settled by the exact/native kernel.
-        # Integer and decimal unequal pairs still require exact tolerance arithmetic.
+        # Zero-tolerance integer equality is already decided exactly by the
+        # native prefilter. Nonzero tolerance and Decimal pairs keep the exact
+        # scalar fallback; neither branch casts exact inputs to floats.
+        exact_integer = da.is_integer() and tolerance(column) == (0, 0)
         native = (
             _TOLERANCE_PREFILTER
             and scalar
             and same_kind
             and da == db
-            and (da.is_float() or not da.is_numeric())
+            and (da.is_float() or not da.is_numeric() or exact_integer)
         )
         if native:
             count = len(positions)
@@ -192,6 +196,8 @@ def _compare_batch(
                 )
                 state.nonfinite += metrics["nf"] or 0
                 state.maxima(metrics["abs"], metrics["rel"])
+            elif exact_integer:
+                state.maxima(*_integer_difference_maxima(cells.filter(pending)))
             for position in positions.head(state.remaining):
                 key = state.key(left, position, keys)
                 if key is None:
@@ -210,10 +216,17 @@ def _compare_batch(
                 )
             continue
         flags = [False] * batch.height
+        exact_pair = tuple(tolerance_fraction(value) for value in tolerance(column))
+
+        def exact_tolerance(
+            _: str, pair: tuple[Fraction, ...] = exact_pair
+        ) -> tuple[Fraction, ...]:
+            return pair
+
         for position in positions:
             before, after = a[position], b[position]
             different, path, changed_nonfinite = _cell_change(
-                before, after, column, tolerance, original_da, original_db
+                before, after, column, exact_tolerance, original_da, original_db
             )
             if not different:
                 continue

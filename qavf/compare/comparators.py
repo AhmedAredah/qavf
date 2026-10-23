@@ -104,6 +104,11 @@ class LogRatio(Comparator):
     def compare(self, baseline: Fraction, candidate: Fraction, context: ComparatorContext) -> Value:
         if baseline <= 0 or candidate <= 0:
             return None
+        relative = (candidate - baseline) / baseline
+        if abs(relative) <= Fraction(1, 2):
+            # Subtracting logarithms loses every bit of a small relative change
+            # around a large value; form that change exactly before log1p.
+            return math.log1p(float(relative))
         # Logarithms of numerator and denominator separately avoid float overflow.
         return (
             math.log(candidate.numerator)

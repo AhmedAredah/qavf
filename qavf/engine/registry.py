@@ -40,11 +40,9 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
 from pathlib import Path
-from threading import RLock
 from types import ModuleType
 from typing import Any, ClassVar, cast
 
@@ -54,15 +52,21 @@ from pydantic import BaseModel, ConfigDict
 from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.severity import Severity
+from qavf.plugins.transactions import (
+    LOCK as _registration_lock,
+)
+from qavf.plugins.transactions import (
+    installed_origin,
+    installed_visible,
+    mapping,
+    transaction,
+)
 from qavf.redaction import exception_details, redact_text
 from qavf.settings import QAVFSettings
 
 logger = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "qavf.rules"
-
-_registration_lock = RLock()
-_pending_default: ContextVar[RuleRegistry | None] = ContextVar("qavf_pending_rules", default=None)
 
 
 def _import_plugin(module_name: str) -> ModuleType:
@@ -233,6 +237,9 @@ class RuleRegistry:
 
     def __init__(self) -> None:
         self._rules: dict[str, type[Rule]] = {}
+        self._origins: dict[str, bool] = {}
+        self._visibility: dict[str, bool] = {}
+        self._entry_points_enabled = False
         self.plugins: dict[str, str] = {}
         """Entry points tried by :meth:`discover_entry_points`: ``"loaded"`` or the error."""
 
@@ -245,9 +252,7 @@ class RuleRegistry:
             ValueError: if a *different* class already uses the same ``rule_id``.
         """
         with _registration_lock:
-            pending = _pending_default.get()
-            if self is default_registry and pending is not None:
-                return pending.register(rule_cls)
+            rules = mapping(self, "_rules")
             if inspect.isabstract(rule_cls):
                 raise TypeError(f"{rule_cls.__name__} is abstract and cannot be registered")
             missing = [attr for attr in _REQUIRED_METADATA if not getattr(rule_cls, attr, None)]
@@ -255,31 +260,45 @@ class RuleRegistry:
                 raise TypeError(
                     f"{rule_cls.__name__} is missing rule metadata: {', '.join(missing)}"
                 )
-            existing = self._rules.get(rule_cls.rule_id)
+            existing = rules.get(rule_cls.rule_id)
             if existing is not None and not _same_class(existing, rule_cls):
                 raise ValueError(
                     f"duplicate rule id {rule_cls.rule_id!r}: "
                     f"{existing.__module__}.{existing.__qualname__} and "
                     f"{rule_cls.__module__}.{rule_cls.__qualname__}"
                 )
-            self._rules[rule_cls.rule_id] = rule_cls
+            rules[rule_cls.rule_id] = rule_cls
+            origins = mapping(self, "_origins")
+            origins[rule_cls.rule_id] = origins.get(rule_cls.rule_id, True) and installed_origin()
             return rule_cls
+
+    @property
+    def _entry_points_enabled(self) -> bool:
+        with _registration_lock:
+            return bool(mapping(self, "_visibility").get("entry_points", False))
+
+    @_entry_points_enabled.setter
+    def _entry_points_enabled(self, value: bool) -> None:
+        with _registration_lock:
+            mapping(self, "_visibility")["entry_points"] = value
+
+    def _plugin_status(self, name: str, status: str) -> None:
+        with _registration_lock:
+            mapping(self, "plugins")[name] = status
 
     def register_module(self, module: ModuleType) -> list[type[Rule]]:
         """Atomically register concrete rule classes *defined in* ``module``."""
         found = []
-        staged = RuleRegistry()
-        staged._rules = dict(self._rules)
-        for obj in vars(module).values():
-            if (
-                inspect.isclass(obj)
-                and issubclass(obj, Rule)
-                and obj.__module__ == module.__name__
-                and not inspect.isabstract(obj)
-                and getattr(obj, "rule_id", None)
-            ):
-                found.append(staged.register(obj))
-        self._rules = staged._rules
+        with transaction():
+            for obj in vars(module).values():
+                if (
+                    inspect.isclass(obj)
+                    and issubclass(obj, Rule)
+                    and obj.__module__ == module.__name__
+                    and not inspect.isabstract(obj)
+                    and getattr(obj, "rule_id", None)
+                ):
+                    found.append(self.register(obj))
         if found:
             logger.debug("Registered %d rule(s) from %s", len(found), module.__name__)
         return found
@@ -358,16 +377,17 @@ class RuleRegistry:
         broken third-party plugin is logged and skipped rather than aborting
         the run.
         """
+        self._entry_points_enabled = True
         found = []
         entries = list(entry_points(group=group))
         counts = Counter(entry.name for entry in entries)
         for entry in entries:
             if counts[entry.name] > 1:
-                self.plugins[entry.name] = "error: duplicate entry-point name in rules group"
+                self._plugin_status(entry.name, "error: duplicate entry-point name in rules group")
                 logger.error("Duplicate rule entry point %r", redact_text(entry.name))
                 continue
             try:
-                with self._transaction():
+                with transaction(installed=True):
                     loaded = entry.load()
                     if inspect.ismodule(loaded):
                         registered = self.register_module(loaded)
@@ -382,9 +402,9 @@ class RuleRegistry:
                 logger.error(
                     "Failed to load rule entry point %r: %s", redact_text(entry.name), message
                 )
-                self.plugins[entry.name] = f"error: {message}"
+                self._plugin_status(entry.name, f"error: {message}")
                 continue
-            self.plugins[entry.name] = "loaded"
+            self._plugin_status(entry.name, "loaded")
         return found
 
     def discover(
@@ -395,6 +415,7 @@ class RuleRegistry:
         use_entry_points: bool = True,
     ) -> RuleRegistry:
         """Run every discovery mechanism and return ``self`` for chaining."""
+        self._entry_points_enabled = use_entry_points
         for package in packages:
             self.discover_package(package)
         for module_name in modules:
@@ -410,13 +431,16 @@ class RuleRegistry:
     @contextmanager
     def _transaction(self) -> Iterator[None]:
         """Publish module declarations and decorator side effects together."""
-        before = dict(self._rules)
-        try:
-            with registration_transaction():
-                yield
-        except BaseException:
-            self._rules = before
-            raise
+        with transaction():
+            yield
+
+    def _visible(self) -> dict[str, type[Rule]]:
+        with _registration_lock:
+            rules = mapping(self, "_rules")
+            if self._entry_points_enabled or installed_visible() or installed_origin():
+                return dict(rules)
+            origins = mapping(self, "_origins")
+            return {name: rule for name, rule in rules.items() if not origins.get(name, False)}
 
     # ------------------------------------------------------------------ lookup
     def get(self, rule_id: str) -> type[Rule]:
@@ -426,7 +450,7 @@ class RuleRegistry:
             KeyError: if no such rule exists.
         """
         try:
-            return self._rules[rule_id]
+            return self._visible()[rule_id]
         except KeyError:
             raise KeyError(f"unknown rule id {rule_id!r}") from None
 
@@ -441,16 +465,16 @@ class RuleRegistry:
 
     def categories(self) -> list[str]:
         """Distinct rule categories, sorted."""
-        return sorted({rule.category for rule in self._rules.values()})
+        return sorted({rule.category for rule in self._visible().values()})
 
     def __iter__(self) -> Iterator[type[Rule]]:
-        return iter(sorted(self._rules.values(), key=lambda rule: rule.rule_id))
+        return iter(sorted(self._visible().values(), key=lambda rule: rule.rule_id))
 
     def __contains__(self, rule_id: object) -> bool:
-        return rule_id in self._rules
+        return rule_id in self._visible()
 
     def __len__(self) -> int:
-        return len(self._rules)
+        return len(self._visible())
 
 
 def _same_class(a: type, b: type) -> bool:
@@ -473,21 +497,5 @@ def registration_transaction() -> Iterator[None]:
     Nested discovery commits to its parent's stage, never directly to globals.
     Arbitrary side effects performed by plugin code are outside this boundary.
     """
-    parent = _pending_default.get()
-    destination = parent if parent is not None else default_registry
-    staged = RuleRegistry()
-    with _registration_lock:
-        before = dict(destination._rules)
-    staged._rules = dict(before)
-    token = _pending_default.set(staged)
-    try:
+    with transaction():
         yield
-        with _registration_lock:
-            merged = RuleRegistry()
-            merged._rules = dict(destination._rules)
-            for name, rule in staged._rules.items():
-                if before.get(name) is not rule:
-                    merged.register(rule)
-            destination._rules = merged._rules
-    finally:
-        _pending_default.reset(token)

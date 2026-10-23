@@ -20,6 +20,7 @@ import yaml
 from pydantic import ValidationError
 
 from qavf._version import __version__
+from qavf.configuration import read_config_mapping
 from qavf.engine.resources import ResourceLimitError
 from qavf.engine.runner import ConfigurationError, QARunner, build_registry, build_source_registry
 from qavf.engine.severity import Severity
@@ -50,6 +51,16 @@ def _margin(text: str) -> float:
         return validate_margin(float(text))
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
+
+
+def _nonnegative_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer >= 0") from exc
+    if value < 0:
+        raise argparse.ArgumentTypeError("must be an integer >= 0")
+    return value
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -121,7 +132,7 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("--rtol", type=float, default=1e-6)
     compare.add_argument("--atol", type=float, default=1e-9)
     compare.add_argument("--ignore", nargs="*", default=[], help="columns to ignore")
-    compare.add_argument("--show", type=int, default=20, help="differences to print")
+    compare.add_argument("--show", type=_nonnegative_int, default=20, help="differences to print")
     compare.add_argument(
         "--map",
         action="append",
@@ -175,6 +186,18 @@ def _settings(path: Path | None) -> QAVFSettings:
     return load_settings(path) if path else QAVFSettings()
 
 
+def _check_report_destinations(html: Path | None, json_path: Path | None) -> None:
+    if html is None or json_path is None:
+        return
+    try:
+        same = os.path.normcase(str(html.resolve())) == os.path.normcase(str(json_path.resolve()))
+    except RuntimeError as exc:
+        # Python 3.12 reports symlink loops as RuntimeError rather than OSError.
+        raise ValueError("cannot resolve report output path") from exc
+    if same:
+        raise ValueError("HTML and JSON reports must use different output paths")
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     from qavf.reports.presentation import HtmlLimits
 
@@ -184,15 +207,22 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.fail_on:
         settings.engine.fail_on = args.fail_on
 
+    output_dir = settings.resolve(settings.report.output_dir)
+    html_path = args.html
+    if html_path is None and settings.report.html:
+        html_path = output_dir / "qa_report.html"
+    json_path = args.json
+    if json_path is None and settings.report.json_:
+        json_path = output_dir / "qa_report.json"
+    _check_report_destinations(html_path, json_path)
     report = QARunner(settings).run()
     fail_on = settings.engine.fail_on
-    output_dir = settings.resolve(settings.report.output_dir)
     written = []
-    if settings.report.html or args.html:
+    if html_path is not None:
         written.append(
             write_html(
                 report,
-                args.html or output_dir / "qa_report.html",
+                html_path,
                 settings.report.title,
                 fail_on,
                 limits=HtmlLimits(
@@ -202,8 +232,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 ),
             )
         )
-    if settings.report.json_ or args.json:
-        written.append(report.write_json(args.json or output_dir / "qa_report.json"))
+    if json_path is not None:
+        written.append(report.write_json(json_path))
 
     summary = report.summary
     print(
@@ -375,6 +405,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
         atol=args.atol,
         ignore_columns=args.ignore,
         column_map=_column_map(args.map) or None,
+        max_differences=args.show,
     )
     print(result.summary())
     for difference in result.differences[: args.show]:
@@ -391,22 +422,20 @@ def _comparison_spec(path: Path | None) -> dict[str, Any]:
     """The comparison options of a YAML or JSON spec file (empty without one)."""
     if path is None:
         return {}
-    text = path.read_text(encoding="utf-8")
-    loaded = json.loads(text) if path.suffix.lower() == ".json" else yaml.safe_load(text)
-    if loaded is None:
-        return {}
-    if not isinstance(loaded, dict):
-        raise ValueError(f"{path} must hold a mapping of comparison options")
+    loaded, _ = read_config_mapping(path)
     if clash := sorted({"baseline", "candidate"} & set(loaded)):
         raise ValueError(
             f"{path} sets {', '.join(clash)}; the datasets are the command's arguments"
         )
+    if "entry_points" in loaded:
+        raise ValueError(f"{path} sets entry_points; use the --no-plugins command option instead")
     return loaded
 
 
 def _cmd_compare_datasets(args: argparse.Namespace) -> int:
     from qavf.compare.api import compare_datasets
 
+    _check_report_destinations(args.html, args.json)
     options = _comparison_spec(args.config)
     for argument in (args.baseline, args.candidate):
         local = "://" not in argument and not any(c in argument for c in "*?[")

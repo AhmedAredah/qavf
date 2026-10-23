@@ -63,11 +63,23 @@ def _findings(result: DatasetComparison, spec: ComparisonSpec) -> list[Finding]:
     for level in result.levels:
         for check in level.checks:
             label = f"{result.name}: {level.name}: {check.check}"
+            metrics = dict(check.metrics)
+            identity: dict[str, Any] = {
+                "name": result.name,
+                "level": level.name,
+                "check": check.check,
+            }
+            # Labels remain human-readable; structured identity survives names
+            # containing the separator and preserves any same-key plugin metric.
+            marker = "_qavf_comparison_identity"
+            if marker in metrics:
+                identity["metric"] = metrics[marker]
+            metrics[marker] = identity
             common = {
                 "check": label,
                 "datasets": datasets,
                 "severity": severities.get(level.name),
-                "metrics": dict(check.metrics),
+                "metrics": metrics,
             }
             if not check.assessed:
                 findings.append(Finding.unassessed(f"{label}: {check.message}", **common))
@@ -152,8 +164,6 @@ class DatasetComparisonRule(Rule):
         findings: list[Finding] = []
         with entry_point_scope(self._installed_plugins):
             for spec in self.params.comparisons:
-                found = comparison_findings(
-                    compare_in_context(ctx, spec), spec, ctx.evidence_bytes
-                )
+                found = comparison_findings(compare_in_context(ctx, spec), spec, ctx.evidence_bytes)
                 findings.extend(found)
         return findings

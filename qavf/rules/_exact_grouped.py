@@ -135,7 +135,7 @@ def exact_grouped(
         # These new primitive columns own their buffers; cumulative admission
         # avoids collecting every group before checking the configured target.
         retained_output_bytes += retained_size(frame)
-        ctx._check_retained_bytes("exact aggregate output", retained_output_bytes)
+        ctx.check_retained_bytes("exact aggregate output", retained_output_bytes)
         frames.append(frame)
         rows.clear()
 
@@ -192,5 +192,5 @@ def exact_grouped(
                 .drop(group_id)
             )
         result = result.drop(group_id)
-        ctx._check_materialization("exact grouped result", result)
+        ctx.check_materialization("exact grouped result", result)
         return result

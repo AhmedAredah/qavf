@@ -23,6 +23,8 @@ from qavf.engine.context import DataContext, stable_order
 from qavf.engine.registry import Finding, RuleParams
 from qavf.keys import KeyTypeError as KeyTypeError
 from qavf.keys import align_keys as align_keys
+from qavf.missingness import missing_expr as missing_expr
+from qavf.missingness import normalize_frame
 from qavf.numeric import (
     checked_float,
     stable_mean_scalar,
@@ -409,25 +411,6 @@ def fresh_internal(name: str, columns: Iterable[str]) -> str:
     return candidate
 
 
-def missing_expr(frame: pl.DataFrame, column: str, spec: Any = None) -> pl.Expr:
-    """Null or NaN, without asking unsupported dtypes to evaluate is_nan."""
-    expr = pl.col(column).is_null()
-    if frame.schema[column].is_float():
-        expr = expr | pl.col(column).is_nan()
-    if spec is not None:
-        from qavf.rules._predicates import is_text, members, membership
-
-        if spec.missing_values:
-            values, foreign = members(spec.missing_values, frame.schema[column])
-            if foreign:
-                raise ValueError(f"missing markers for {column!r} have incompatible types")
-            if values:
-                expr = expr | membership(values, frame.schema[column])(column).fill_null(False)
-        if spec.blank_as_missing and is_text(frame.schema[column]):
-            expr = expr | (pl.col(column).cast(pl.String).str.strip_chars() == "").fill_null(False)
-    return expr
-
-
 def normalize_missing(
     ctx: DataContext,
     dataset: str,
@@ -438,13 +421,7 @@ def normalize_missing(
     dataset_spec = ctx.specs.get(dataset)
     schema = dataset_spec.schema_spec if dataset_spec is not None else None
     specs = schema.columns if schema is not None else {}
-    return frame.with_columns(
-        pl.when(missing_expr(frame, column, specs.get(column)))
-        .then(None)
-        .otherwise(pl.col(column))
-        .alias(column)
-        for column in (frame.columns if columns is None else columns)
-    )
+    return normalize_frame(frame, specs, columns)
 
 
 @dataclass(slots=True)

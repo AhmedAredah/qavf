@@ -9,7 +9,7 @@ import re
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 from markupsafe import Markup
@@ -28,6 +28,9 @@ from qavf.reports.models import (
 from qavf.reports.presentation import HtmlLimits, bounded_cell, evidence_table
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from qavf.reports.comparison import ChartBudget
 
 _STATUS_ORDER = (Status.PASS, Status.FAIL, Status.ERROR, Status.SKIPPED)
 _SEVERITY_ORDER = (Severity.CRITICAL, Severity.ERROR, Severity.WARNING, Severity.INFO)
@@ -76,13 +79,19 @@ def _anchors(results: list[RuleResult]) -> dict[int, str]:
         texts[base[id(result)]].add(result.check or "")
     anchors: dict[int, str] = {}
     seen: Counter[str] = Counter()
+    emitted: set[str] = set()
     for result in results:
         anchor = base[id(result)]
         if len(texts[anchor]) > 1:
             digest = hashlib.sha256((result.check or "").encode("utf-8")).hexdigest()[:8]
             anchor = f"{anchor}-{digest}"
         seen[anchor] += 1
-        anchors[id(result)] = anchor if seen[anchor] == 1 else f"{anchor}-{seen[anchor]}"
+        candidate = anchor if seen[anchor] == 1 else f"{anchor}-{seen[anchor]}"
+        while candidate in emitted:
+            seen[anchor] += 1
+            candidate = f"{anchor}-{seen[anchor]}"
+        emitted.add(candidate)
+        anchors[id(result)] = candidate
     return anchors
 
 
@@ -212,7 +221,9 @@ def _audit_chunks(value: Any) -> Iterator[str]:
         yield chunk.decode("utf-8")
 
 
-def _presentation(report: QAReport, title: str, fail_on: Severity | None) -> dict[str, Any]:
+def _presentation(
+    report: QAReport, title: str, fail_on: Severity | None, budget: ChartBudget
+) -> dict[str, Any]:
     """Compute summary/order/acceptance once for both output APIs."""
     effective = report.metadata.fail_on if fail_on is None else fail_on
     summary = report.summary
@@ -250,9 +261,23 @@ def _presentation(report: QAReport, title: str, fail_on: Severity | None) -> dic
         fail_on=effective,
         failures=failures,
         recommendations=recommendations,
-        status_chart=_status_chart(summary),
-        severity_chart=_severity_chart(summary),
-        timing_chart=_timing_chart(report.results),
+        status_chart=budget.chart(
+            "Results by category",
+            sum(count > 0 for counts in summary.by_category.values() for count in counts.values()),
+            lambda: _status_chart(summary),
+        ),
+        severity_chart=budget.chart(
+            "Failed rules by severity",
+            sum(count > 0 for count in summary.failures_by_severity.values()),
+            lambda: _severity_chart(summary),
+        ),
+        timing_chart=budget.chart(
+            "Slowest rules",
+            min(
+                sum(result.execution_time_s > 0 for result in report.results), _SLOWEST_RULES_SHOWN
+            ),
+            lambda: _timing_chart(report.results),
+        ),
         statuses=_STATUS_ORDER,
         severities=_SEVERITY_ORDER,
     )
@@ -266,15 +291,16 @@ def iter_html(
     limits: HtmlLimits | None = None,
 ) -> Iterator[bytes]:
     """Yield bounded HTML fragments; no evidence-table macro buffers the table."""
-    from qavf.reports.comparison import report_views
+    from qavf.reports.comparison import ChartBudget, report_views
 
     limits = limits or HtmlLimits()
     env = _environment(limits)
     anchors = _anchors(report.results)
     env.filters["anchor"] = lambda result: anchors[id(result)]
     reset_ids()
-    context = _presentation(report, title, fail_on)
-    context["comparisons"] = report_views(report, limits)
+    budget = ChartBudget(limits)
+    context = _presentation(report, title, fail_on, budget)
+    context["comparisons"] = report_views(report, limits, budget=budget)
     yield from iter_template("report.html.j2", context, limits, env)
 
 

@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import Field, ValidationInfo, field_serializer, model_validator
 
-from qavf.reports.models import SnapshotModel, decode_non_finite, encode_non_finite
+from qavf.audit_codec import decode_audit as decode_non_finite
+from qavf.audit_codec import encode_audit as encode_non_finite
+from qavf.snapshots import SnapshotModel
+
+Tolerance = int | float | Decimal
+
+
+def _format_tolerance(value: Tolerance) -> str:
+    return str(value) if isinstance(value, int) else format(value, "g")
+
 
 DifferenceKind = Literal[
     "value_changed", "row_added", "row_removed", "column_added", "column_removed", "dtype_changed"
@@ -37,13 +47,21 @@ class Difference(SnapshotModel):
     """Bounded values at ``path`` when the displayed cells are previews."""
     abs_diff: float | None = None
     rel_diff: float | None = None
-    rtol: float | None = None
+    rtol: Tolerance | None = None
     """Relative tolerance applied to this value (its column's own, or the table's)."""
-    atol: float | None = None
+    atol: Tolerance | None = None
     """Absolute tolerance applied to this value."""
 
     @field_serializer(
-        "key", "baseline", "candidate", "leaf", "abs_diff", "rel_diff", when_used="json"
+        "key",
+        "baseline",
+        "candidate",
+        "leaf",
+        "abs_diff",
+        "rel_diff",
+        "rtol",
+        "atol",
+        when_used="json",
     )
     def _encode(self, value: Any) -> Any:
         return encode_non_finite(value)
@@ -53,7 +71,16 @@ class Difference(SnapshotModel):
     def _decode(cls, data: Any, info: ValidationInfo) -> Any:
         if info.mode == "json" and isinstance(data, dict):
             data = dict(data)
-            for key in ("key", "baseline", "candidate", "leaf", "abs_diff", "rel_diff"):
+            for key in (
+                "key",
+                "baseline",
+                "candidate",
+                "leaf",
+                "abs_diff",
+                "rel_diff",
+                "rtol",
+                "atol",
+            ):
                 if key in data:
                     data[key] = decode_non_finite(data[key])
         return data
@@ -70,9 +97,9 @@ class ComparisonResult(SnapshotModel):
     fallback_reason: str | None = None
     """Why an input could not use the native streamed comparison, when applicable."""
     keys: list[str]
-    rtol: float
-    atol: float
-    column_tolerances: dict[str, tuple[float, float]] = Field(default_factory=dict)
+    rtol: Tolerance
+    atol: Tolerance
+    column_tolerances: dict[str, tuple[Tolerance, Tolerance]] = Field(default_factory=dict)
     """Columns compared with their own ``(rtol, atol)`` instead of the table's."""
     column_map: dict[str, str] = Field(default_factory=dict)
     """Baseline columns compared under candidate names (``baseline: candidate``)."""
@@ -101,7 +128,9 @@ class ComparisonResult(SnapshotModel):
     """Individual differences, capped at ``max_differences``."""
     truncated: bool = False
 
-    @field_serializer("max_abs_diff", "max_rel_diff", when_used="json")
+    @field_serializer(
+        "max_abs_diff", "max_rel_diff", "rtol", "atol", "column_tolerances", when_used="json"
+    )
     def _encode(self, value: Any) -> Any:
         return encode_non_finite(value)
 
@@ -110,7 +139,7 @@ class ComparisonResult(SnapshotModel):
     def _decode(cls, data: Any, info: ValidationInfo) -> Any:
         if info.mode == "json" and isinstance(data, dict):
             data = dict(data)
-            for key in ("max_abs_diff", "max_rel_diff"):
+            for key in ("max_abs_diff", "max_rel_diff", "rtol", "atol", "column_tolerances"):
                 if key in data:
                     data[key] = decode_non_finite(data[key])
         return data
@@ -144,7 +173,7 @@ class ComparisonResult(SnapshotModel):
         if self.equal:
             return (
                 f"{self.name}: matches baseline ({self.baseline_rows:,} rows, "
-                f"rtol={self.rtol:g}, atol={self.atol:g})"
+                f"rtol={_format_tolerance(self.rtol)}, atol={_format_tolerance(self.atol)})"
             )
         parts = []
         if self.values_changed:

@@ -27,17 +27,20 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from qavf._adjacency import CompactAdjacency, normalized_weights
 from qavf.inference._support import Unassessable, assessed, at_least, observations
 from qavf.inference.resampling import (
     DEFAULT_MAX_WORK,
     DEFAULT_SEED,
     batches,
+    check_resamples,
     check_work,
     generator,
+    permutation_p_from_counts,
     permutation_p_value,
 )
 from qavf.inference.results import Alternative, TestResult, not_assessed
-from qavf.stats import center_scale_observations
+from qavf.stats import center_scale_observations, scale_observations
 
 DEFAULT_PERMUTATIONS = 999
 
@@ -49,7 +52,11 @@ def edges(weights: Any, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         ValueError: for a malformed matrix or mapping, an index outside
             ``0..n-1``, or a negative or non-finite weight.
     """
-    if isinstance(weights, Mapping) or (
+    if isinstance(weights, CompactAdjacency):
+        if len(weights) != n:
+            raise ValueError(f"weights must have {n} locations, got {len(weights)}")
+        r, c, w = weights.edge_arrays()
+    elif isinstance(weights, Mapping) or (
         isinstance(weights, Sequence) and weights and not np.ndim(weights[0])
     ):
         items = weights.items() if isinstance(weights, Mapping) else enumerate(weights)
@@ -58,10 +65,17 @@ def edges(weights: Any, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             pairs = neighbours.items() if isinstance(neighbours, Mapping) else (
                 (j, 1.0) for j in neighbours
             )  # fmt: skip
-            for j, w in pairs:
+            for j, weight in pairs:
+                if any(
+                    isinstance(index, bool) or not isinstance(index, int | np.integer)
+                    for index in (i, j)
+                ):
+                    raise ValueError("neighbour indices must be integers")
+                if not (0 <= i < n and 0 <= j < n):
+                    raise ValueError(f"neighbour indices must lie in 0..{n - 1}")
                 rows.append(int(i))
                 cols.append(int(j))
-                values.append(float(w))
+                values.append(float(weight))
         r, c, w = np.array(rows, dtype=np.int64), np.array(cols, dtype=np.int64), np.array(values)
     elif hasattr(weights, "tocoo"):
         coo = weights.tocoo()
@@ -79,7 +93,37 @@ def edges(weights: Any, n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if not np.isfinite(w).all() or (w < 0).any():
         raise ValueError("weights must be finite and non-negative")
     keep = (r != c) & (w != 0)
-    return r[keep], c[keep], w[keep]
+    if not keep.all():
+        r, c, w = r[keep], c[keep], w[keep]
+    if len(r) and not isinstance(weights, CompactAdjacency):
+        # COO matrices and neighbour lists can repeat one neighbour. Conditional
+        # randomization draws distinct locations, so combine repeated weights.
+        order = np.lexsort((c, r))
+        if np.any((r[order][1:] == r[order][:-1]) & (c[order][1:] == c[order][:-1])):
+            return CompactAdjacency.from_edges(n, r, c, w).edge_arrays()
+    return r, c, w
+
+
+def _row_normalized(rows: np.ndarray, weights: np.ndarray, n: int) -> np.ndarray:
+    """Normalize without overflowing totals or losing a long row's small weights."""
+    counts = np.bincount(rows, minlength=n)
+    if np.all(weights == 1):
+        return 1.0 / counts[rows]
+    if np.all(rows[1:] >= rows[:-1]) and np.all(
+        (rows[1:] != rows[:-1]) | (weights[1:] == weights[:-1])
+    ):
+        # Already-standardized binary CSR graphs have one equal weight per row;
+        # keep their common comparison path vectorized, with no Python row loop.
+        return 1.0 / counts[rows]
+    order = np.argsort(rows, kind="stable")
+    starts = np.concatenate(([0], np.cumsum(counts)))
+    result = np.empty_like(weights, dtype=float)
+    for row in np.flatnonzero(counts):
+        selected = order[starts[row] : starts[row + 1]]
+        normalized = normalized_weights(weights[selected])
+        assert normalized is not None  # edges excludes zero and negative weights
+        result[selected] = normalized
+    return result
 
 
 def _prepared(
@@ -97,8 +141,7 @@ def _prepared(
     if not len(w):
         raise Unassessable("no location has a neighbour", n=n)
     if row_standardize:
-        totals = np.bincount(rows, weights=w, minlength=len(x))
-        w = w / totals[rows]
+        w = _row_normalized(rows, w, len(x))
     try:
         z = center_scale_observations(x)[0]
     except ValueError as exc:
@@ -119,10 +162,11 @@ def morans_statistic(
             constant values), with the reason.
     """
     try:
-        prepared = _prepared(values, weights, row_standardize)
+        x, rows, cols, w, z = _prepared(values, weights, row_standardize)
+        w = _global_weights(w)
     except Unassessable as exc:
         raise ValueError(str(exc)) from None
-    return _observed(*prepared)[1]
+    return _observed(x, rows, cols, w, z)[1]
 
 
 def _observed(
@@ -131,6 +175,14 @@ def _observed(
     """``(n / (S0 * sum z^2), I)``: the scale of every permuted statistic, and I itself."""
     scale = len(x) / float(w.sum()) / float(z @ z)
     return scale, scale * float((w * z[rows] * z[cols]).sum())
+
+
+def _global_weights(weights: np.ndarray) -> np.ndarray:
+    """Global I is invariant to one common weight unit, including subnormal units."""
+    try:
+        return scale_observations(weights)[0]
+    except ValueError as exc:
+        raise Unassessable(f"weights: {exc}") from None
 
 
 @assessed("morans_i")
@@ -152,10 +204,12 @@ def morans_i(
     total first. At least 3 values; constant values or no neighbour pairs are
     not assessed; locations without neighbours are noted.
     """
+    check_resamples(permutations)
     x, rows, cols, w, z = _prepared(values, weights, row_standardize)
+    w = _global_weights(w)
     n = {"locations": len(x)}
     scale, observed = _observed(x, rows, cols, w, z)
-    check_work(permutations * len(w), max_work, "Moran's I permutations")
+    check_work(permutations * (len(x) + len(w)), max_work, "Moran's I permutations")
     rng = generator(seed)
     distribution = np.empty(permutations)
     done = 0
@@ -233,24 +287,56 @@ def local_morans_i(
     work budget), gives not-assessed results with the reason. The p-values are
     raw; correct the family before judging it.
     """
+    check_resamples(permutations)
     try:
         x, rows, cols, w, z = _prepared(values, weights, row_standardize)
         counts = np.bincount(rows, minlength=len(x))
-        check_work(permutations * int(counts.sum()), max_work, "local Moran's I permutations")
+        check_work(
+            permutations * (len(x) - 1 + int(counts.sum())),
+            max_work,
+            "local Moran's I permutations",
+        )
     except Unassessable as exc:
         size = len(np.atleast_1d(np.asarray(values, dtype=object)))
         result = not_assessed("local_morans_i", str(exc), **exc.fields)
         return LocalMoran([result] * size, [None] * size)
     n = len(x)
     m2 = float(z @ z) / n
-    lag = np.bincount(rows, weights=w * z[cols], minlength=n)
-    local = z * lag / m2
+    with np.errstate(over="ignore", invalid="ignore"):
+        lag = np.bincount(rows, weights=w * z[cols], minlength=n)
+        local = z * lag / m2
+    if not np.isfinite(local).all():
+        result = not_assessed("local_morans_i", "local statistics exceed the finite float range")
+        return LocalMoran([result] * n, [None] * n)
     order = np.argsort(rows, kind="stable")
     starts = np.concatenate([[0], np.cumsum(counts)])
     rng = generator(seed)
     widest = int(counts.max())
-    # One draw of neighbour positions per permutation, shared by every location.
-    draws = np.stack([rng.permutation(n - 1)[:widest] for _ in range(permutations)])
+    # Preserve the seeded full-permutation sequence, but release each permutation
+    # immediately and retain only one bounded batch of its selected positions.
+    active = np.flatnonzero(counts)
+    above = np.zeros(n, dtype=np.int64)
+    below = np.zeros(n, dtype=np.int64)
+    tolerance = 1e-12 * np.abs(local)
+    for step in batches(permutations, max(n - 1, widest)):
+        draws = np.empty((step, widest), dtype=np.int64)
+        for j in range(step):
+            draws[j] = rng.permutation(n - 1)[:widest]
+        for location in active:
+            i = int(location)
+            k = int(counts[i])
+            own = w[order[starts[i] : starts[i + 1]]]
+            positions = draws[:, :k]
+            positions = positions + (positions >= i)
+            with np.errstate(over="ignore", invalid="ignore"):
+                distribution = z[i] * (z[positions] * own).sum(axis=1) / m2
+            if not np.isfinite(distribution).all():
+                result = not_assessed(
+                    "local_morans_i", "conditional statistics exceed the finite float range"
+                )
+                return LocalMoran([result] * n, [None] * n)
+            above[i] += np.count_nonzero(distribution >= local[i] - tolerance[i])
+            below[i] += np.count_nonzero(distribution <= local[i] + tolerance[i])
     results: list[TestResult] = []
     quadrants: list[str | None] = []
     for i in range(n):
@@ -261,11 +347,7 @@ def local_morans_i(
             results.append(not_assessed("local_morans_i", reason, n=sizes))
             quadrants.append(None)
             continue
-        own = w[order[starts[i] : starts[i + 1]]]
-        positions = draws[:, :k]
-        positions = positions + (positions >= i)
-        distribution = z[i] * (z[positions] * own).sum(axis=1) / m2
-        p = permutation_p_value(distribution, float(local[i]), alternative)
+        p = permutation_p_from_counts(int(above[i]), int(below[i]), permutations, alternative)
         quadrant = None if z[i] == 0 or lag[i] == 0 else QUADRANTS[(z[i] > 0, lag[i] > 0)]
         quadrants.append(quadrant)
         results.append(

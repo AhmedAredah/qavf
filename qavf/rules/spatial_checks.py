@@ -22,11 +22,13 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
+from qavf.numeric import finite_float
 from qavf.rules._contracts import unassessed_contract
 from qavf.rules._spatial_aggregation import spatial_aggregate
 from qavf.rules.helpers import (
     Aggregate,
     AggregatedMetric,
+    BoundedEvidence,
     OrderBy,
     above,
     align_keys,
@@ -676,16 +678,20 @@ class GroupComparisonRule(Rule):
                     frame.filter(pl.col(METRIC).is_not_null())
                     .with_columns(group.alias(GROUP))
                     .filter(pl.col(GROUP).is_not_null())
-                    .with_columns(
-                        pl.col(METRIC).median().over(partition).alias(GROUP_MEDIAN),
-                        pl.len().over(partition).alias(GROUP_ENTITIES),
-                    )
+                )
+                low = fresh_internal("median_low", grouped.columns)
+                high = fresh_internal("median_high", [*grouped.columns, low])
+                summaries = grouped.group_by(partition, maintain_order=True).agg(
+                    pl.col(METRIC).cast(pl.Float64).quantile(0.5, interpolation="lower").alias(low),
+                    pl.col(METRIC)
+                    .cast(pl.Float64)
+                    .quantile(0.5, interpolation="higher")
+                    .alias(high),
+                    pl.len().alias(GROUP_ENTITIES),
                 )
                 # Every configured partition must remain visible, including implicit
                 # ALL groups split by group_by columns.
-                sizes = grouped.group_by(partition, maintain_order=True).agg(
-                    pl.len().alias(GROUP_ENTITIES)
-                )
+                sizes = summaries.select(*partition, GROUP_ENTITIES)
                 absent = sorted(set(p.groups) - set(sizes[GROUP].to_list())) if p.groups else []
                 if p.require_all_groups_per_partition and p.groups and spec.group_by:
                     # Assign native partition identities once; Python never compares
@@ -739,12 +745,60 @@ class GroupComparisonRule(Rule):
                             datasets=(spec.dataset,),
                         )
                     )
-                compared = grouped.filter(pl.col(GROUP_ENTITIES) >= p.min_entities).with_columns(
+                # Only eligible groups need a median. Native selection retains
+                # two endpoints; exact midpoint validation is isolated per group
+                # so an unrepresentable result cannot hide a sibling's violation.
+                summaries = summaries.filter(pl.col(GROUP_ENTITIES) >= p.min_entities)
+                medians: list[float | None] = []
+                invalid = BoundedEvidence(ctx.evidence_limit)
+                for index, (a, b) in enumerate(summaries.select(low, high).iter_rows()):
+                    try:
+                        medians.append(finite_float((Fraction(a) + Fraction(b)) / 2))
+                    except ValueError as exc:
+                        medians.append(None)
+                        row = summaries.row(index, named=True)
+                        invalid.append(
+                            annotate(
+                                {key: row[key] for key in spec.group_by},
+                                group=row[GROUP],
+                                problem=str(exc),
+                            )
+                        )
+                if invalid.count:
+                    blocked.append(
+                        Finding.unassessed(
+                            f"Not assessed: {invalid.count} groups of {spec.metric_label} "
+                            "have a median that cannot be represented safely.",
+                            check=f"{spec.metric_label}: group medians",
+                            affected=invalid.records,
+                            affected_count=invalid.count,
+                            unit="groups",
+                            datasets=(spec.dataset,),
+                        )
+                    )
+                summaries = (
+                    summaries.with_columns(pl.Series(GROUP_MEDIAN, medians, dtype=pl.Float64))
+                    .filter(pl.col(GROUP_MEDIAN).is_not_null())
+                    .drop(low, high)
+                )
+                compared = grouped.join(
+                    summaries, on=partition, how="inner", nulls_equal=True, maintain_order="left"
+                ).with_columns(
                     # A zero median makes every non-zero value infinitely far from it;
                     # a sign opposite to the median gives a negative ratio, which the
                     # lower bound flags. Nothing is left undefined and silently passed.
                     pl.when(pl.col(GROUP_MEDIAN) != 0)
-                    .then(pl.col(METRIC) / pl.col(GROUP_MEDIAN))
+                    .then(
+                        pl.when(pl.col(GROUP_MEDIAN).abs() < math.ldexp(1.0, -1022))
+                        # A joined constant subnormal may use a reciprocal in
+                        # Polars division. Scale both sides by an exact power of
+                        # two so its reciprocal cannot overflow.
+                        .then(
+                            (pl.col(METRIC) * math.ldexp(1.0, 52))
+                            / (pl.col(GROUP_MEDIAN) * math.ldexp(1.0, 52))
+                        )
+                        .otherwise(pl.col(METRIC) / pl.col(GROUP_MEDIAN))
+                    )
                     .when(pl.col(METRIC) == 0)
                     .then(1.0)
                     .otherwise(float("inf"))
@@ -780,8 +834,7 @@ class GroupComparisonRule(Rule):
             else "observed combinations",
         }
         if not examined:
-            return [
-                *blocked,
+            return blocked or [
                 Finding.unassessed(
                     f"Not assessed: no group has at least {p.min_entities} entities with a "
                     f"usable metric value.",

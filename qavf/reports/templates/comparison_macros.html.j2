@@ -1,0 +1,4 @@
+{% macro verdict_chip(verdict) -%}
+  {%- set icons = {"passed": "✓", "failed": "✕", "not assessed": "!", "incomplete": "!"} -%}
+  <span class="chip"><span class="dot v-{{ verdict | replace(' ', '-') }}"></span>{{ icons.get(verdict, "–") }} {{ verdict }}</span>
+{%- endmacro %}

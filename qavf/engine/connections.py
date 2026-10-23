@@ -19,10 +19,9 @@ import pyarrow as pa
 
 from qavf.engine.resources import retained_size
 from qavf.engine.session import RunSession
-from qavf.settings import ConnectionSpec
+from qavf.settings import ConnectionSpec, SecretSpec
 from qavf.sources.base import SourceEnvironment, SourceError
-from qavf.sources.native import OwnedConnection, connect
-from qavf.sources.sql import quote_identifier
+from qavf.sources.native import OwnedConnection, connect, drop_temporary_relation
 
 Connection = duckdb.DuckDBPyConnection | OwnedConnection
 
@@ -40,6 +39,19 @@ def merge_connection_binding(
     if prior is not None and prior != spec:
         raise SourceError(f"conflicting connection bindings for {name!r} in one operation")
     bindings[name] = spec
+
+
+def merge_secret_bindings(bindings: dict[str, SecretSpec], env: SourceEnvironment) -> None:
+    """Keep source credentials coherent; reject ambiguous operation-wide selection."""
+    for name, spec in env.secrets.items():
+        for prior_name, prior in bindings.items():
+            if prior_name.casefold() == name.casefold() and prior != spec:
+                raise SourceError(f"conflicting storage secret bindings for {name!r}")
+            if prior.type != spec.type or prior == spec:
+                continue
+            if set(prior.scope or [""]) & set(spec.scope or [""]):
+                raise SourceError("conflicting storage secret scopes in one operation")
+        bindings[name] = spec
 
 
 class SqlConnections:
@@ -60,6 +72,7 @@ class SqlConnections:
         self,
         attach: Iterable[str],
         bindings: Mapping[str, ConnectionSpec] | None = None,
+        secrets: Mapping[str, SecretSpec] | None = None,
     ) -> Connection:
         """Reuse this worker's connection only for identical normalized attachments."""
         cache: dict[tuple, Connection] | None = getattr(self._local, "connections", None)
@@ -70,11 +83,17 @@ class SqlConnections:
         if bindings is None:
             for name in aliases:
                 merge_connection_binding(effective, name, self.env)
+        effective_secrets = dict(self.env.secrets if secrets is None else secrets)
         # Hash specifications rather than retaining credential-bearing JSON keys.
-        key = tuple(
+        attachment_key = tuple(
             (name, hashlib.sha256(effective[name].model_dump_json().encode()).hexdigest())
             for name in aliases
         )
+        secret_key = tuple(
+            (name, hashlib.sha256(spec.model_dump_json().encode()).hexdigest())
+            for name, spec in sorted(effective_secrets.items())
+        )
+        key = attachment_key, secret_key
         self.session.check()
         con = cache.get(key)
         if con is None:
@@ -90,7 +109,9 @@ class SqlConnections:
                         owners.remove(old)
             cache.clear()
             self._local.registered = set()
-            con = cache[key] = connect(replace(self.env, connections=effective), aliases)
+            con = cache[key] = connect(
+                replace(self.env, connections=effective, secrets=effective_secrets), aliases
+            )
             with self._lock:
                 self._open.append(con)
                 self._owners.setdefault(threading.get_ident(), []).append(con)
@@ -98,10 +119,20 @@ class SqlConnections:
 
     @contextlib.contextmanager
     def temporary(
-        self, attach: Iterable[str], bindings: Mapping[str, ConnectionSpec]
+        self,
+        attach: Iterable[str],
+        bindings: Mapping[str, ConnectionSpec],
+        secrets: Mapping[str, SecretSpec] | None = None,
     ) -> Iterator[Connection]:
         """Keep transaction connections owned until their attempt has actually ended."""
-        con = connect(replace(self.env, connections=bindings), attach)
+        con = connect(
+            replace(
+                self.env,
+                connections=bindings,
+                secrets=self.env.secrets if secrets is None else secrets,
+            ),
+            attach,
+        )
         owner = threading.get_ident()
         with self._lock:
             self._owners.setdefault(owner, []).append(con)
@@ -120,10 +151,12 @@ class SqlConnections:
         try:
             yield
         finally:
-            self.discard(getattr(self._local, "registered", set()).copy())
-            self._local.registered = set()
-            with self._lock:
-                self._registration_bytes.pop(threading.get_ident(), None)
+            try:
+                self.discard(getattr(self._local, "registered", set()).copy())
+            finally:
+                self._local.registered = set()
+                with self._lock:
+                    self._registration_bytes.pop(threading.get_ident(), None)
 
     def remember(self, name: str) -> None:
         """Track a bound relation immediately after its registration succeeds."""
@@ -137,14 +170,16 @@ class SqlConnections:
         discarded = registered.intersection(names)
         connections = getattr(self._local, "connections", {})
         con = next(iter(connections.values()), None)
-        if con is not None:
-            for name in discarded:
-                with contextlib.suppress(duckdb.Error):
-                    con.unregister(name)
-                with contextlib.suppress(duckdb.Error):
-                    con.execute(f"DROP VIEW IF EXISTS {quote_identifier(name)}")
-        registered.difference_update(discarded)
-        self._local.registered = registered
+        try:
+            if con is not None:
+                for name in discarded:
+                    with contextlib.suppress(duckdb.Error):
+                        con.unregister(name)
+                    with contextlib.suppress(duckdb.Error):
+                        drop_temporary_relation(con, name, kind="VIEW")
+        finally:
+            registered.difference_update(discarded)
+            self._local.registered = registered
 
     def register_frame(self, con: Connection, name: str, frame: pl.DataFrame) -> None:
         """Export Arrow columns before DuckDB binding, avoiding parallel export deadlocks."""
@@ -174,6 +209,8 @@ class SqlConnections:
             with contextlib.suppress(Exception):
                 connection.close()
         self.session.close_worker_connections(owner)
+        with self._lock:
+            self._registration_bytes.pop(owner, None)
 
     def close(self) -> None:
         """Close reusable connections after active invocations have completed."""

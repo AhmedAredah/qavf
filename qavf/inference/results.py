@@ -16,11 +16,13 @@ constant samples) survive JSON transport with their values intact.
 
 from __future__ import annotations
 
+import math
 from typing import Any, ClassVar, Literal
 
-from pydantic import Field, field_serializer
+from pydantic import Field, field_serializer, model_validator
 
-from qavf.reports.models import SnapshotModel, encode_non_finite
+from qavf.audit_codec import encode_audit as encode_non_finite
+from qavf.snapshots import SnapshotModel
 
 Alternative = Literal["two-sided", "less", "greater"]
 """Direction of the alternative: ``less`` means the candidate is smaller."""
@@ -78,6 +80,25 @@ class TestResult(SnapshotModel):
     """Seed of a resampling test; the same seed reproduces the result exactly."""
     resamples: int | None = None
     notes: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _probability_state(self) -> TestResult:
+        if self.alpha is not None and not 0 < self.alpha < 1:
+            raise ValueError("alpha must lie in (0, 1)")
+        probabilities = (self.p_value, self.adjusted_p)
+        invalid = any(
+            p is not None and (not math.isfinite(p) or not 0 <= p <= 1) for p in probabilities
+        )
+        if self.assessed and (self.p_value is None or invalid):
+            object.__setattr__(self, "assessed", False)
+            object.__setattr__(self, "reason", "test has no finite p-value in [0, 1]")
+        judged = (
+            bool(self.p < self.alpha)
+            if self.assessed and self.p is not None and self.alpha is not None
+            else None
+        )
+        object.__setattr__(self, "significant", judged)
+        return self
 
     @field_serializer(*_FLOATS, when_used="json")
     def _encode(self, value: Any) -> Any:

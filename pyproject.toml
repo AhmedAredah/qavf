@@ -34,8 +34,8 @@ classifiers = [
     "Topic :: Software Development :: Testing",
     "Typing :: Typed",
 ]
-# Version floors are verified in the implementation validation report.
-# CI tests the committed lockfile and the installed distribution.
+# The installed floor gate exercises the declared direct dependency minima.
+# Routine CI tests the committed lockfile and a core-only installed distribution.
 dependencies = [
     "duckdb>=1.2",
     "jinja2>=3.1",
@@ -57,7 +57,8 @@ Changelog = "https://github.com/AhmedAredah/qavf/blob/main/CHANGELOG.md"
 # Optional p-values and distribution tests (Kendall, studentized residuals, KS).
 stats = ["scipy>=1.11.3"]
 pandas = ["pandas>=2.2"]
-all = ["qavf[stats,pandas]"]
+spatial = ["pyproj>=3.6.1", "scipy>=1.11.3"]
+all = ["qavf[stats,pandas,spatial]"]
 
 [project.scripts]
 qavf = "qavf.cli:main"
@@ -89,7 +90,8 @@ path = "qavf/_version.py"
 packages = ["qavf"]
 
 [tool.hatch.build.targets.sdist]
-include = ["qavf", "tests", "config", "docs", "scripts", ".github", ".gitattributes", "pyproject.toml", "uv.lock", "README.md", "CHANGELOG.md", "LICENSE"]
+# Root anchors prevent historical files with matching names entering the sdist.
+include = ["/qavf", "/tests", "/config", "/docs", "/scripts", "/.github", "/.gitattributes", "/.gitignore", "/pyproject.toml", "/uv.lock", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 exclude = ["**/__pycache__", "**/*.pyc", "**/.pytest_cache"]
 
 [tool.uv]

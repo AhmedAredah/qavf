@@ -45,6 +45,7 @@ from qavf.compare.levels.groups import (
     MeasureSpec,
     materiality,
     one_sided_check,
+    precise_frame,
     reduce_groups,
 )
 from qavf.compare.levels.temporal import KeyedSides, TimeMembers, keyed_sides
@@ -78,6 +79,7 @@ from qavf.inference.effects import (
 from qavf.inference.registry import TESTS, TestInput
 from qavf.inference.results import TestResult
 from qavf.inference.results import not_assessed as untested
+from qavf.key_codec import canonical_key
 from qavf.rules._grouped import ProjectedRelation
 from qavf.rules.helpers import plural
 from qavf.statistics.ordered import bin_index, power_of_two, quantile_cutpoints
@@ -193,7 +195,7 @@ def _bin_labels(cutpoints: np.ndarray, unit: float) -> list[str]:
 
 
 def numeric_bins(
-    baseline: np.ndarray, candidate: np.ndarray, bins: int
+    baseline: np.ndarray, candidate: np.ndarray, bins: int, *, display_limit: int | None = None
 ) -> tuple[list[str], np.ndarray, np.ndarray]:
     """Shared bins of two samples and each side's counts, as STA-002 bins them.
 
@@ -208,7 +210,7 @@ def numeric_bins(
         c = np.searchsorted(values, candidate)
         size = len(values)
         return (
-            [f"{v:.6g}" for v in values],
+            [f"{v:.6g}" for v in values[:display_limit]],
             np.bincount(b, minlength=size),
             np.bincount(c, minlength=size),
         )
@@ -236,6 +238,13 @@ class DistributionLevel(ComparisonLevel):
     )
     Params: ClassVar[type[RuleParams]] = DistributionParams
     Result: ClassVar[type[LevelResult]] = DistributionResult
+
+    def required_columns(self) -> frozenset[str]:
+        params: DistributionParams = self.params  # type: ignore[assignment]
+        columns = {*params.group_by, *(c.column for c in params.columns)}
+        if params.time is not None:
+            columns.add(params.time.time_column)
+        return frozenset(columns)
 
     def evaluate(self, inputs: LevelInputs, name: str) -> DistributionResult:
         params: DistributionParams = self.params  # type: ignore[assignment]
@@ -320,7 +329,8 @@ class DistributionLevel(ComparisonLevel):
         keys = aligned.keys
         lossy = [aligned.columns[side][roles["lossy"]] for side in SIDES]
         values = [aligned.columns[side][roles["values"]] for side in SIDES]
-        for position, row in enumerate(aligned.both.select([*keys, *lossy, *values]).iter_rows()):
+        selected = precise_frame(aligned.both.select([*keys, *lossy, *values]), keys)
+        for position, row in enumerate(selected.iter_rows()):
             group = dict(zip(keys, row[: len(keys)], strict=True))
             if any(row[len(keys) : len(keys) + 2]):
                 reason = "values cannot be represented exactly as Float64"
@@ -350,7 +360,7 @@ class DistributionLevel(ComparisonLevel):
         position: int,
     ) -> _Measured:
         thresholds = params.thresholds
-        labels, b_counts, c_counts = numeric_bins(b, c, params.bins)
+        labels, b_counts, c_counts = numeric_bins(b, c, params.bins, display_limit=params.bins * 2)
         psi = population_stability(zip(b_counts, c_counts, strict=True), (len(b), len(c)))
         js = jensen_shannon(b_counts, c_counts)
         ks = ks_distance(b, c)
@@ -424,7 +434,8 @@ class DistributionLevel(ComparisonLevel):
         }
         keys = sides.keys
         counted = reduce_groups(inputs, [*keys, column], (MeasureSpec(measure="count"),), kept)
-        members = reduce_groups(inputs, keys, (MeasureSpec(measure="count"),), kept)
+        # Membership is established before removing missing category values.
+        members = reduce_groups(inputs, keys, (MeasureSpec(measure="count"),), relations)
         both = members.both.select(keys) if keys else None
         left, right = (counted.columns[side][counted.presence] for side in SIDES)
         rows = counted.joined
@@ -432,9 +443,13 @@ class DistributionLevel(ComparisonLevel):
             rows = rows.join(both, on=keys, how="semi", nulls_equal=True)
         elif not members.both.height:
             rows = rows.clear()
-        tables: dict[tuple[Any, ...], list[tuple[Any, int, int]]] = {}
-        for row in rows.select([*keys, column, left, right]).iter_rows():
-            tables.setdefault(tuple(row[: len(keys)]), []).append(
+        tables: dict[bytes, tuple[tuple[Any, ...], list[tuple[Any, int, int]]]] = {}
+        member_keys = precise_frame(members.both.select(keys)).iter_rows() if keys else [()]
+        for key in member_keys:
+            tables[canonical_key(key)] = (key, [])
+        for row in precise_frame(rows.select([*keys, column, left, right])).iter_rows():
+            key = tuple(row[: len(keys)])
+            tables.setdefault(canonical_key(key), (key, []))[1].append(
                 (row[len(keys)], int(row[-2] or 0), int(row[-1] or 0))
             )
         measured: list[_Measured] = []
@@ -442,7 +457,7 @@ class DistributionLevel(ComparisonLevel):
         evidence = inputs.evidence()
         changed = {"appeared": 0, "disappeared": 0}
         limit = inputs.ctx.evidence_limit
-        for position, (key, table) in enumerate(tables.items()):
+        for position, (key, table) in enumerate(tables.values()):
             group = dict(zip(keys, key, strict=True))
             b_counts = np.array([t[1] for t in table])
             c_counts = np.array([t[2] for t in table])
@@ -588,10 +603,20 @@ class DistributionLevel(ComparisonLevel):
 
 def _shares(labels: list[str], b: np.ndarray, c: np.ndarray) -> list[BinShare]:
     totals = (float(np.sum(b)) or 1.0, float(np.sum(c)) or 1.0)
-    return [
+    shown = min(len(labels), len(b), len(c))
+    result = [
         BinShare(label=label, baseline=float(x) / totals[0], candidate=float(y) / totals[1])
-        for label, x, y in zip(labels, b, c, strict=False)
+        for label, x, y in zip(labels[:shown], b[:shown], c[:shown], strict=True)
     ]
+    if shown < len(b):
+        result.append(
+            BinShare(
+                label=f"Other ({len(b) - shown:,} bins)",
+                baseline=float(np.sum(b[shown:])) / totals[0],
+                candidate=float(np.sum(c[shown:])) / totals[1],
+            )
+        )
+    return result
 
 
 def _categories(count: int) -> str:

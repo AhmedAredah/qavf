@@ -4,7 +4,8 @@ Tables are compared *by key*, not by row position, so a reordered output is not
 a regression. Numeric values are compared with relative and absolute
 tolerances, so floating-point noise from a library upgrade is not one either.
 Integers and decimals are compared exactly (with rational arithmetic) against
-that tolerance; floats with ``math.isclose``. Temporal values are always exact.
+the tolerance's decimal spelling; floats with ``math.isclose``. Temporal values
+are always exact.
 Rows are aligned by key, and bounded columnar batches compute scalar counts
 and evidence. Native file comparisons keep the join inside the SQL engine.
 A short-circuit traversal compares nested residual cells;
@@ -217,10 +218,17 @@ def compare_outputs(
         "schema": schema,
         "column_map": dict(column_map) if isinstance(column_map, Mapping) else column_map,
     }
-    # Only eager tables bypass the common input boundary. Maintaining another
-    # descriptor whitelist here made Query/Loader support depend on whether an
-    # unrelated ResourceLimits object or Dataset wrapper happened to be supplied.
-    if resources is not None or not all(
+    # Evidence policy is already applied above; an empty/evidence-only policy
+    # does not require copying caller-owned eager tables into a disk index.
+    # Actual allocation, source, threading and isolation policies still use
+    # the managed context and its execution planner.
+    managed_policy = {
+        key: value
+        for key, value in overrides.items()
+        if key not in {"max_affected_records", "max_evidence_bytes"}
+        and not (key == "execution_mode" and value == "in_process")
+    }
+    if managed_policy or not all(
         supports_frame(value) and not isinstance(value, pl.LazyFrame)
         for value in (baseline, candidate)
     ):

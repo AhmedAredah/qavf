@@ -3,8 +3,8 @@
 Datasets can be read directly from object storage by URL: `s3://bucket/key`,
 `az://container/blob`, `abfss://…`, or `https://…`. Configure credentials once under
 `secrets`. QAVF creates each secret as a DuckDB secret on every connection it owns
-and passes the equivalent options to Polars, which reads remote Parquet. Both
-readers choose the same secret for a URL.
+and translates static credential options to Polars, which reads remote Parquet.
+Both use configured URL scopes to select the applicable secret.
 
 ```yaml
 secrets:
@@ -32,15 +32,42 @@ connection strings; regions, endpoints, account names and scopes stay visible.
 | Location | `region`, `endpoint` (`host[:port]`), `url_style`, `use_ssl` | `account_name` (`credential_chain`) |
 | `chain` | Credential sources to try, e.g. `env;config` | e.g. `cli;managed_identity` |
 
-`credential_chain` uses the platform's own credentials: AWS environment variables,
+`credential_chain` uses the reader's platform credential discovery: AWS environment variables,
 profiles, instance roles and web identity; Azure CLI login, managed identity and
 environment variables. In GitHub Actions, sign in with
 `aws-actions/configure-aws-credentials` or `azure/login` before running QAVF, and no
 stored key is needed.
 
+An explicit `chain` value is supported by native DuckDB reads. Typed Parquet reads
+reject it before scanning because QAVF does not implement an equivalent Polars
+provider sequence. Use static credentials or omit `chain` to allow the selected
+backend's default discovery. Default discovery order and supported identity
+providers can differ between readers; QAVF does not claim account-selection parity.
+If native secret creation fails for an explicit chain, the source fails with a
+redacted error; it does not continue without that requested provider sequence.
+
+Typed Azure Parquet reads preserve `BlobEndpoint`, or construct the endpoint from
+`AccountName`, `EndpointSuffix` and `DefaultEndpointsProtocol`. Unsupported
+connection-string modes, including `UseDevelopmentStorage=true`, are rejected.
+For an emulator supply its explicit account, key and `BlobEndpoint` instead.
+For typed Parquet reads, include `AccountName` even in a SAS connection string
+that supplies `BlobEndpoint`; QAVF does not infer the account from a custom endpoint.
+These translations have offline contract tests; live sovereign-cloud and ADLS
+Gen2 routing remain outside the verified integration scope below.
+
 A URL uses the secret with the longest matching `scope`, otherwise the single
 unscoped secret of its type. Two unscoped secrets of one type are rejected, so every
-URL resolves to exactly one credential. Names must be plain SQL identifiers.
+URL resolves to exactly one credential. Conflicting equal scoped prefixes of one
+type are also rejected before selecting a reader. Names must be plain SQL identifiers.
+Generated native identifiers encode both the configured name and scope index, so
+names that resemble internal suffixes cannot overwrite another configured secret.
+
+A directly supplied `DataSource` retains its own locations, connections and
+secrets when bound to a run, including an explicitly empty secret mapping. The
+run supplies execution limits and handles. Change the source definition to change
+its credentials; run settings do not silently substitute them. Operations that
+combine sources reject conflicting secret names or equal scopes, and connections
+are reused only when their attachment and credential definitions match.
 
 ## Providers and S3-compatible services
 

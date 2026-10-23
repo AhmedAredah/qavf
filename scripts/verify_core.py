@@ -23,7 +23,7 @@ def require(condition: bool, message: str) -> None:
 
 
 def check_dependencies() -> None:
-    for name in ("pandas", "scipy"):
+    for name in ("pandas", "scipy", "pyproj"):
         require(importlib.util.find_spec(name) is None, f"core environment includes {name}")
 
 
@@ -66,14 +66,30 @@ def check_unavailable_statistics() -> None:
     require(report.exit_code() != 0, "missing SciPy left the run acceptable")
 
 
+def check_core_coordinate_systems() -> None:
+    from qavf.spatial.crs import is_geographic
+
+    for crs in ("EPSG:4326", "OGC:CRS84"):
+        require(is_geographic(crs), f"core CRS classification failed for {crs}")
+    for crs in ("EPSG:3857", "EPSG:32614", "EPSG:32760"):
+        require(not is_geographic(crs), f"core CRS classification failed for {crs}")
+    try:
+        is_geographic("EPSG:26915")
+    except ValueError as exc:
+        require("qavf[spatial]" in str(exc), "missing pyproj error lacks actionable guidance")
+    else:
+        raise RuntimeError("unsupported core CRS silently received a coordinate type")
+
+
 def main() -> None:
     check_dependencies()
     check_input_verdicts()
     check_temporal_roundtrip()
     check_unavailable_statistics()
+    check_core_coordinate_systems()
     require("pandas" not in sys.modules, "ordinary core validation initialized pandas")
     print("Core-only installed-wheel checks passed: valid/invalid inputs, temporal ticks, "
-          "and explicit unavailable-statistics errors.")
+          "core CRS resolution, and explicit unavailable-dependency errors.")
 
 
 if __name__ == "__main__":

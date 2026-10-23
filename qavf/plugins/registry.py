@@ -25,7 +25,6 @@ from abc import ABC
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar
 from importlib.metadata import EntryPoint, entry_points
 from threading import RLock
 from types import ModuleType
@@ -33,12 +32,23 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ValidationError
 
-from qavf.engine.registry import RuleParams, registration_transaction
+from qavf.engine.registry import RuleParams
+from qavf.plugins.transactions import (
+    LOCK,
+    installed_origin,
+    installed_visible,
+    mapping,
+    transaction,
+    visibility,
+)
 from qavf.redaction import exception_details, redact_text
 
 logger = logging.getLogger(__name__)
 
-_INSTALLED: ContextVar[bool] = ContextVar("qavf_component_entry_points", default=False)
+# Plugin imports may discover another registry. Serialize discovery across
+# families before acquiring a family's lock, preventing A->B / B->A inversion.
+# This is separate from the short publication lock: plugin code never holds LOCK.
+_DISCOVERY_LOCK = RLock()
 
 FAMILIES = ("qavf.compare.registry", "qavf.inference.registry")
 """Modules whose ``registries()`` provide the built-in component registries."""
@@ -87,9 +97,33 @@ class ComponentRegistry[C: Component]:
         self.plugins: dict[str, str] = {}
         """Entry points tried: ``"loaded"`` or the error."""
         self._lock = RLock()
+        self._discovery: dict[str, bool] = {}
         self._builtins_loaded = False
         self._entry_points_loaded = False
-        self._loading_entry_point = False
+
+    @property
+    def _builtins_loaded(self) -> bool:
+        with LOCK:
+            return bool(mapping(self, "_discovery").get("builtins", False))
+
+    @_builtins_loaded.setter
+    def _builtins_loaded(self, value: bool) -> None:
+        with LOCK:
+            mapping(self, "_discovery")["builtins"] = value
+
+    @property
+    def _entry_points_loaded(self) -> bool:
+        with LOCK:
+            return bool(mapping(self, "_discovery").get("entry_points", False))
+
+    @_entry_points_loaded.setter
+    def _entry_points_loaded(self, value: bool) -> None:
+        with LOCK:
+            mapping(self, "_discovery")["entry_points"] = value
+
+    def _plugin_status(self, name: str, status: str) -> None:
+        with LOCK:
+            mapping(self, "plugins")[name] = status
 
     # ------------------------------------------------------------ registration
     def register[T: type](self, component: T) -> T:
@@ -110,15 +144,17 @@ class ComponentRegistry[C: Component]:
         params = getattr(component, "Params", None)
         if not (isinstance(params, type) and issubclass(params, BaseModel)):
             raise TypeError(f"{component.__name__}.Params must be a pydantic model")
-        with self._lock:
-            existing = self._components.get(name) or self._installed.get(name)
+        with LOCK:
+            components = mapping(self, "_components")
+            installed = mapping(self, "_installed")
+            existing = components.get(name) or installed.get(name)
             if existing is not None and not _same_class(existing, component):
                 raise ValueError(
                     f"duplicate {self.kind} {name!r}: "
                     f"{existing.__module__}.{existing.__qualname__} and "
                     f"{component.__module__}.{component.__qualname__}"
                 )
-            target = self._installed if self._loading_entry_point else self._components
+            target = installed if installed_origin() else components
             target[name] = component  # type: ignore[assignment]
         return component
 
@@ -142,11 +178,12 @@ class ComponentRegistry[C: Component]:
     # --------------------------------------------------------------- discovery
     def discover(self, *, use_entry_points: bool = False) -> ComponentRegistry[C]:
         """Load the built-ins and, when asked, (once) the entry-point group."""
-        with self._lock:
+        with _DISCOVERY_LOCK, self._lock:
             if not self._builtins_loaded:
-                with self._transaction():
+                with transaction(installed=False):
                     for module in self.builtins:
-                        importlib.import_module(module)
+                        # Recover definitions cached by an enclosing failed import.
+                        self.register_module(importlib.import_module(module))
                 self._builtins_loaded = True
             if use_entry_points and not self._entry_points_loaded:
                 self._entry_points_loaded = True
@@ -168,21 +205,19 @@ class ComponentRegistry[C: Component]:
         counts = Counter(entry.name for entry in entries)
         for entry in entries:
             if counts[entry.name] > 1:
-                self.plugins[entry.name] = f"error: duplicate entry-point name in {self.group}"
+                self._plugin_status(
+                    entry.name, f"error: duplicate entry-point name in {self.group}"
+                )
                 logger.error("Duplicate %s entry point %r", self.kind, redact_text(entry.name))
                 continue
             try:
-                with self._transaction():
-                    self._loading_entry_point = True
-                    try:
-                        loaded = entry.load()
-                        if inspect.ismodule(loaded):
-                            if not self.register_module(loaded):
-                                raise TypeError(f"the module defines no {self.kind}")
-                        else:
-                            self.register(loaded)
-                    finally:
-                        self._loading_entry_point = False
+                with transaction(installed=True):
+                    loaded = entry.load()
+                    if inspect.ismodule(loaded):
+                        if not self.register_module(loaded):
+                            raise TypeError(f"the module defines no {self.kind}")
+                    else:
+                        self.register(loaded)
             except Exception as exc:
                 message = exception_details(exc)
                 logger.error(
@@ -191,27 +226,23 @@ class ComponentRegistry[C: Component]:
                     redact_text(entry.name),
                     message,
                 )
-                self.plugins[entry.name] = f"error: {message}"
+                self._plugin_status(entry.name, f"error: {message}")
                 continue
-            self.plugins[entry.name] = "loaded"
+            self._plugin_status(entry.name, "loaded")
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
         """Undo every registration a failed import made, including by decorators."""
-        with self._lock:
-            before, installed = dict(self._components), dict(self._installed)
-            try:
-                with registration_transaction():
-                    yield
-            except BaseException:
-                self._components, self._installed = before, installed
-                raise
+        with transaction():
+            yield
 
     def _visible(self) -> dict[str, type[C]]:
         self.discover()
-        if _INSTALLED.get():
-            return {**self._installed, **self._components}
-        return self._components
+        with LOCK:
+            components = mapping(self, "_components")
+            if installed_visible():
+                return {**mapping(self, "_installed"), **components}
+            return dict(components)
 
     # ------------------------------------------------------------------ lookup
     def get(self, name: str) -> type[C]:
@@ -227,7 +258,7 @@ class ComponentRegistry[C: Component]:
             available = ", ".join(sorted(visible)) or "none"
             hint = (
                 "; installed plugins are disabled (plugins.entry_points: false)"
-                if name in self._installed and not _INSTALLED.get()
+                if name in self._installed and not installed_visible()
                 else ""
             )
             raise KeyError(f"unknown {self.kind} {name!r}; available: {available}{hint}") from None
@@ -277,7 +308,10 @@ def registries() -> dict[str, ComponentRegistry[Any]]:
 
 def load_entry_points() -> None:
     """Load every component entry-point group (once per process)."""
-    for registry in registries().values():
+    families = tuple(registries().values())
+    for registry in families:
+        registry.discover()
+    for registry in families:
         registry.discover(use_entry_points=True)
 
 
@@ -292,16 +326,13 @@ def entry_point_scope(enabled: bool) -> Iterator[None]:
     """
     if enabled:
         load_entry_points()
-    token = _INSTALLED.set(enabled)
-    try:
+    with visibility(enabled):
         yield
-    finally:
-        _INSTALLED.reset(token)
 
 
 def entry_points_enabled() -> bool:
     """Whether the current context resolves components from installed plugins."""
-    return _INSTALLED.get()
+    return installed_visible()
 
 
 def plugin_status(*, enabled: bool = True) -> dict[str, str]:

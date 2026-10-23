@@ -15,6 +15,7 @@ difference: ``p = 1``.
 from __future__ import annotations
 
 import math
+from fractions import Fraction
 
 from qavf.inference._support import Unassessable, assessed, check_confidence, require_scipy
 from qavf.inference.effects import rate_ratio
@@ -50,12 +51,15 @@ def two_proportion(
     if xb > nb or xc > nc:
         raise Unassessable("successes exceed trials", n=n)
     pb, pc = xb / nb, xc / nc
+    qb, qc = (nb - xb) / nb, (nc - xc) / nc
+    difference = float(Fraction(xc, nc) - Fraction(xb, nb))
     pooled = (xb + xc) / (nb + nc)
+    complement = (nb - xb + nc - xc) / (nb + nc)
     common = {
         "method": "two_proportion",
         "statistic_name": "z",
         "alternative": alternative,
-        "effect": pc - pb,
+        "effect": difference,
         "effect_name": "share_difference",
         "n": n,
         "assumptions": [
@@ -63,14 +67,23 @@ def two_proportion(
             "normal approximation (enough successes and failures)",
         ],
     }
-    se_unpooled = math.sqrt(pb * (1 - pb) / nb + pc * (1 - pc) / nc)
-    low, high = normal_interval(pc - pb, se_unpooled, confidence)
-    if pooled in (0.0, 1.0):
+    se_unpooled = math.hypot(
+        math.sqrt(pb) * math.sqrt(qb) / math.sqrt(nb),
+        math.sqrt(pc) * math.sqrt(qc) / math.sqrt(nc),
+    )
+    low, high = normal_interval(difference, se_unpooled, confidence)
+    if xb + xc in (0, nb + nc):
         return TestResult(
             statistic=0.0, p_value=1.0, ci_low=low, ci_high=high, confidence=confidence,
             notes=["every trial has the same outcome"], **common,
         )  # fmt: skip
-    z = (pc - pb) / math.sqrt(pooled * (1 - pooled) * (1 / nb + 1 / nc))
+    # Preserve the rare outcome even when its complementary share rounds to 1.
+    se = math.sqrt(pooled) * math.sqrt(complement) * math.hypot(
+        1 / math.sqrt(nb), 1 / math.sqrt(nc)
+    )
+    if se == 0:
+        raise Unassessable("the proportion standard error is below the supported float range", n=n)
+    z = difference / se
     p = normal_p_value(z, alternative)
     return TestResult(
         statistic=z, p_value=p, ci_low=low, ci_high=high, confidence=confidence, **common
@@ -99,6 +112,10 @@ def poisson_rate(
     n = {"baseline": kb, "candidate": kc}
     if not (eb > 0 and ec > 0 and math.isfinite(eb) and math.isfinite(ec)):
         raise Unassessable("exposures must be positive and finite", n=n)
+    exposure_unit = max(eb, ec)
+    eb, ec = eb / exposure_unit, ec / exposure_unit
+    if not eb or not ec:
+        raise Unassessable("exposure ratio cannot be represented without underflow", n=n)
     common = {
         "method": "poisson",
         "statistic_name": "candidate_count",
@@ -115,10 +132,12 @@ def poisson_rate(
     share = ec / (eb + ec)
     result = stats.binomtest(kc, total, share, alternative=alternative)
     interval = result.proportion_ci(confidence_level=confidence, method="exact")
-    scale = eb / ec
 
-    def ratio(p: float) -> float | None:
-        return math.inf if p >= 1 else p / (1 - p) * scale
+    def ratio(p: float) -> float:
+        if p >= 1:
+            return math.inf
+        value = rate_ratio(1 - p, eb, p, ec)
+        return math.inf if value is None else value
 
     return TestResult(
         statistic=float(kc),

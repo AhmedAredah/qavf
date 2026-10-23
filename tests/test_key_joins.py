@@ -83,7 +83,7 @@ def test_key_join_transfers_only_summary_and_bounded_sample(kind, rule):
         patch.object(Observation, "collect", observed_collect),
         patch.object(Observations, "collect", combined_collect),
         patch(
-            "qavf.rules.input_checks.references.key_frequencies",
+            "qavf.rules._execution.key_frequencies",
             side_effect=AssertionError("eager keys"),
         ),
         patch.object(DataContext, "project", side_effect=AssertionError("eager keys")),

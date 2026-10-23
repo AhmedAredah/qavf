@@ -21,10 +21,15 @@ def _bytes(value: int | str, name: str, *, positive: bool = False) -> int:
     elif isinstance(value, str) and (match := _SIZE.fullmatch(value)):
         unit = (match[2] or "b").lower()
         power = "kmgtp".find(unit[0]) + 1 if unit != "b" else 0
-        amount = Decimal(match[1]) * (1024 if "i" in unit else 1000) ** power
-        if amount != amount.to_integral_value():
+        # Decimal arithmetic obeys the caller's thread-local precision. Parse
+        # exactly, then scale integer ratios so a resource cap cannot round up
+        # (or change between construction and execution in another context).
+        numerator, denominator = Decimal(match[1]).as_integer_ratio()
+        result, remainder = divmod(
+            numerator * (1024 if "i" in unit else 1000) ** power, denominator
+        )
+        if remainder:
             raise ValueError(f"{name} must resolve to a whole number of bytes")
-        result = int(amount)
     else:
         raise ValueError(f"{name} must be a byte count or size such as '2GiB'")
     if result < (1 if positive else 0):

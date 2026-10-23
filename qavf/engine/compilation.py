@@ -13,6 +13,7 @@ from types import MappingProxyType
 from pydantic import ValidationError
 
 from qavf.engine.registry import Rule, RuleRegistry, default_registry
+from qavf.plugins.registry import entry_point_scope
 from qavf.redaction import exception_details, redact_text
 from qavf.settings import QAVFSettings, validate_config_mapping_keys
 from qavf.sources.base import SourceRegistry
@@ -28,14 +29,17 @@ def build_registry(settings: QAVFSettings) -> RuleRegistry:
     Rules registered on the process-wide default registry via ``@register``
     are included as well.
     """
-    registry = RuleRegistry().discover(
-        packages=settings.plugins.packages,
-        modules=settings.plugins.modules,
-        paths=[settings.resolve(path) for path in settings.plugins.paths],
-        use_entry_points=settings.plugins.entry_points,
-    )
-    for rule_cls in default_registry:
-        registry.register(rule_cls)
+    # Component plugins may register rules through the public decorator. Load
+    # them before copying defaults, using the same visibility policy as the run.
+    with entry_point_scope(settings.plugins.entry_points):
+        registry = RuleRegistry().discover(
+            packages=settings.plugins.packages,
+            modules=settings.plugins.modules,
+            paths=[settings.resolve(path) for path in settings.plugins.paths],
+            use_entry_points=settings.plugins.entry_points,
+        )
+        for rule_cls in default_registry:
+            registry.register(rule_cls)
     return registry
 
 
@@ -82,8 +86,6 @@ def compile_rules(
     Raises:
         ConfigurationError: for unknown rule ids or invalid rule parameters.
     """
-    from qavf.plugins.registry import entry_point_scope
-
     with entry_point_scope(settings.plugins.entry_points):
         return _compile_rules(settings, registry, sources)
 

@@ -188,6 +188,19 @@ class ContributionLevel(ComparisonLevel):
     Params: ClassVar[type[RuleParams]] = ContributionParams
     Result: ClassVar[type[LevelResult]] = ContributionResult
 
+    def required_columns(self) -> frozenset[str]:
+        from qavf.compare.levels.groups import measure_columns
+
+        params: ContributionParams = self.params  # type: ignore[assignment]
+        columns = measure_columns((params.measure,))
+        for dimension in params.dimensions:
+            columns.update(dimension.columns)
+            if dimension.time is not None:
+                columns.add(dimension.time.time_column)
+        for rate in params.rates:
+            columns.update((rate.numerator, rate.denominator))
+        return frozenset(columns)
+
     def evaluate(self, inputs: LevelInputs, name: str) -> ContributionResult:
         params: ContributionParams = self.params  # type: ignore[assignment]
         inference = Inference.of(inputs.spec, params)
@@ -199,7 +212,7 @@ class ContributionLevel(ComparisonLevel):
         _, total = compare_measure(inputs, whole, 0, judged, "total", plans[0], inference)
         checks: list[CheckResult] = [total.model_copy(update={"check": "total"})]
         alias = whole.aliases[0]
-        totals = [_exact(whole.frames[side][alias][0]) for side in SIDES]
+        before, after = (exact_rational(whole.frames[side][alias][0]) for side in SIDES)
         dimensions: list[DimensionContribution] = []
         strata: dict[str, AlignedGroups] = {}
         for dimension in params.dimensions:
@@ -214,12 +227,14 @@ class ContributionLevel(ComparisonLevel):
                 checks.append(not_assessed(f"contribution: {dimension.label}", str(exc)))
                 continue
             comparison, check = compare_measure(
-                inputs, aligned, 0, judged, "member", plans[0], inference
+                inputs, aligned, 0, judged, "member", plans[0], inference, include_missing=True
             )
             checks.append(check.model_copy(update={"check": f"contribution: {dimension.label}"}))
-            dimensions.append(
-                self._dimension(inputs, params, dimension.label, aligned, comparison.significance)
+            decomposed_dimension = self._dimension(
+                inputs, params, dimension.label, aligned, comparison.significance
             )
+            if decomposed_dimension is not None:
+                dimensions.append(decomposed_dimension)
             if params.rates:
                 strata[dimension.label] = self._strata(inputs, params, sides.keys, relations)
         rates: list[RateDecompositionResult] = []
@@ -240,9 +255,11 @@ class ContributionLevel(ComparisonLevel):
             checks=checks,
             measure=spec.label,
             share=params.share,
-            baseline_total=report_number(totals[0]),
-            candidate_total=report_number(totals[1]),
-            total_change=report_number(totals[1] - totals[0]),
+            baseline_total=report_number(before),
+            candidate_total=report_number(after),
+            total_change=(
+                report_number(after - before) if before is not None and after is not None else None
+            ),
             dimensions=dimensions,
             rates=rates,
         )
@@ -254,7 +271,7 @@ class ContributionLevel(ComparisonLevel):
         label: str,
         aligned: AlignedGroups,
         significance: Any,
-    ) -> DimensionContribution:
+    ) -> DimensionContribution | None:
         """Every member's contribution, sorted, and the minimal set explaining ``share``."""
         alias = aligned.aliases[0]
         left, right = (aligned.columns[side][alias] for side in SIDES)
@@ -264,6 +281,12 @@ class ContributionLevel(ComparisonLevel):
         for row in aligned.joined.select([*keys, left, right, *presence]).iter_rows():
             key = tuple(row[: len(keys)])
             b, c, on_b, on_c = row[len(keys) :]
+            if (on_b is not None and exact_rational(b) is None) or (
+                on_c is not None and exact_rational(c) is None
+            ):
+                # Unknown measurements cannot explain a known change. Only a
+                # genuinely absent member contributes zero on that side.
+                return None
             members.append(
                 (
                     key,
@@ -337,9 +360,17 @@ class ContributionLevel(ComparisonLevel):
         ]
         keys = aligned.keys
         columns = [aligned.columns[side][alias] for alias in aliases for side in SIDES]
+        presence = [aligned.columns[side][aligned.presence] for side in SIDES]
         strata: list[tuple[Any, Fraction, Fraction, Fraction, Fraction]] = []
-        for row in aligned.joined.select([*keys, *columns]).iter_rows():
-            nb, nc, db, dc = (_exact(value) for value in row[len(keys) :])
+        for row in aligned.joined.select([*keys, *columns, *presence]).iter_rows():
+            values = row[len(keys) : len(keys) + 4]
+            nb_, nc_, db_, dc_ = values
+            on_b, on_c = row[-2:]
+            if (on_b is not None and (nb_ is None or db_ is None)) or (
+                on_c is not None and (nc_ is None or dc_ is None)
+            ):
+                raise ValueError("a present stratum has an undefined numerator or denominator")
+            nb, nc, db, dc = (_exact(value) for value in values)
             strata.append((tuple(row[: len(keys)]), nb, db, nc, dc))
         decomposed = rate_decomposition(strata, rate.method)
         inference = Inference.of(inputs.spec, params)

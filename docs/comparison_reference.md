@@ -530,7 +530,7 @@ Measures per zone, zones on one side or missing, rank, share and cluster changes
 | `allow_missing` | `bool` | `False` | Report missing expected zones without failing. |
 | `layer` | `ZoneLayer \| None` | `None` | The zones, when not from an ``assign_zones`` step. |
 | `grid` | `Grid \| None` | `None` | Grid cells as zones, when not from an ``assign_zones`` step. |
-| `weights` | `WeightsSpec` | `{'method': 'queen', 'k': 4, 'distance': None, 'row_standardize': True, 'table': None}` | Neighbours of the ``moran`` and ``lisa`` checks. |
+| `weights` | `WeightsSpec` | `{'method': 'queen', 'k': 4, 'distance': None, 'max_edges': 1000000, 'max_work': 20000000, 'row_standardize': True, 'table': None}` | Neighbours of the ``moran`` and ``lisa`` checks. |
 | `pattern_measure` | `str \| None` | `None` | The measure label the pattern checks read; the first measure by default. |
 | `difference` | `str` | `diff` | Comparator turning a zone's two values into the difference ``moran`` and ``lisa`` read (``diff``, ``rel_diff``, ``log_ratio``, ...). |
 | `permutations` | `int` | `999` | Permutations of the Moran and LISA tests. |
@@ -603,6 +603,8 @@ How zones' neighbours are found: contiguity, nearest neighbours, a band or a tab
 | `method` | `Literal['queen', 'rook', 'knn', 'distance_band', 'table']` | `queen` | ``queen``/``rook`` contiguity (zone polygons, or grid cells), ``knn`` and ``distance_band`` (zone centroids or cell centres), or a ``table`` of pairs. |
 | `k` | `int` | `4` | Neighbours per zone for ``knn``. |
 | `distance` | `float \| None` | `None` | Band for ``distance_band``: metres for a geographic CRS, else CRS units. |
+| `max_edges` | `int` | `1000000` | Maximum retained unique directed pairs for every graph builder. |
+| `max_work` | `int` | `20000000` | Maximum admitted work: locations plus distance candidates, polygon bbox pairs, grid offset probes, or explicit table rows, depending on the builder. Native operator/index instructions and geometry vertex complexity are not counted. |
 | `row_standardize` | `bool` | `True` | Divide each zone's weights by their total. |
 | `table` | `Crosswalk \| None` | `None` | For ``table``: ``from``/``to`` (``weight``) pairs of zone ids, as a crosswalk is written (``{dataset: name}``, ``{path: file}`` or ``{pairs: [[a, b], ...]}``); the weights need not sum to 1. |
 
@@ -868,6 +870,10 @@ Each row's zone id from a layer, a grid or an attribute column, plus a crosswalk
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `batch_size` | `int` | `16384` | Maximum distinct points transformed together and selected rows per Arrow batch. |
+| `max_points` | `int` | `1000000` | Maximum distinct point keys retained; excess points refuse the whole assignment. |
+| `max_matches` | `int` | `2000000` | Maximum selected point-zone mappings retained, including ``overlap: all`` expansion. |
+| `max_work` | `int` | `20000000` | Maximum bounding-box candidate pairs admitted across batches, before exact tests. |
 | `predicate` | `Literal['intersects', 'contains']` | `intersects` | ``intersects``: boundary points belong to the zone; ``contains``: interior only. |
 | `overlap` | `Literal['error', 'first', 'all']` | `error` | A point inside several zones: refuse, the lowest zone id, or every such zone. |
 | `max_unassigned` | `float` | `0.0` | Largest fraction of rows without a zone; more leaves the result not assessed. |

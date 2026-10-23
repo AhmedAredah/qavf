@@ -1,9 +1,13 @@
 # Enforceable execution limits
 
 Use `ResourceLimits` to run validation or output comparison in a fresh supervised
-Linux process. The parent can terminate a stalled worker, and the worker applies
-operating-system limits before importing QAVF or native dependencies. Ordinary
-calls keep the default `in_process` behavior.
+process on Linux, macOS or Windows. The parent can terminate a stalled worker,
+and the worker applies the supported operating-system limits before importing
+QAVF or native dependencies. Ordinary calls keep the default `in_process` behavior.
+
+The following example uses Linux controls. On macOS, omit `address_space`; on
+Windows, omit `file_size`. Unsupported controls are rejected before launching
+the worker. `wall_time` alone selects supervision on all three platforms.
 
 ```python
 from qavf import ResourceLimits, validate
@@ -26,8 +30,10 @@ print(report.metadata.resource_usage["effective_process_limits"])
 ```
 
 The example is a starting budget for a small file, not a capacity guarantee. The
-address-space allowance must fit the interpreter, libraries, thread stacks, mapped
-files and working data. A budget can fail during import before a dataset is read.
+Linux address-space allowance must fit the interpreter, libraries, thread stacks,
+mapped files and working data. On Windows the same option caps per-process
+committed memory, not all reserved virtual address space. Neither is an RSS limit.
+A budget can fail during import before a dataset is read.
 Use the returned verdict and assessment coverage to decide whether QA succeeded.
 
 `wall_time`, `address_space`, `cpu_time` or `file_size` automatically selects
@@ -43,27 +49,32 @@ Configuration fields use integer bytes. `None` keeps the configured value.
 
 | `ResourceLimits` argument | `engine` configuration field | Scope |
 |---|---|---|
-| `isolate=True` | `execution_mode: isolated` | Fresh Linux worker supervised by the caller |
+| `isolate=True` | `execution_mode: isolated` | Fresh worker supervised by the caller on Linux, macOS or Windows |
 | `wall_time=30` | `run_timeout_s: 30.0` | Positive finite seconds from process launch through successful worker exit |
-| `address_space="4GiB"` | `process_address_space_bytes: 4294967296` | Positive virtual address-space ceiling for each process (`RLIMIT_AS`); not RSS |
-| `cpu_time=30` | `process_cpu_time_s: 30` | Positive integer CPU seconds per process, summed over its threads (`RLIMIT_CPU`) |
-| `file_size="1GiB"` | `process_file_bytes: 1073741824` | Nonnegative maximum size of each file written by the worker (`RLIMIT_FSIZE`); not total disk use |
+| `address_space="4GiB"` | `process_address_space_bytes: 4294967296` | Positive per-process virtual address-space ceiling on Linux (`RLIMIT_AS`), committed-memory ceiling on Windows; rejected on macOS; not RSS |
+| `cpu_time=30` | `process_cpu_time_s: 30` | Positive integer CPU seconds per process: user and system time on Linux/macOS (`RLIMIT_CPU`), user-mode time on Windows |
+| `file_size="1GiB"` | `process_file_bytes: 1073741824` | Nonnegative maximum size of each file written on Linux/macOS (`RLIMIT_FSIZE`); rejected on Windows; not total disk use |
 | `native_threads=2` | `native_threads: 2` | Startup environment for supported native pools, plus backend settings |
 | `max_spill="1GiB"` | `spill_max_bytes: 1073741824` | Shared owned frame, observation and indexed-work partition, plus separately reserved DuckDB temporary storage |
 | `target_memory="512MiB"` | `memory_budget_bytes: 536870912` | Planning and tracked-allocation target; not an OS ceiling |
 | `report_bytes="16MiB"` | `max_report_bytes: 16777216` | Maximum encoded report/result accepted from the isolated worker |
 
-The process limits use Python's
+Linux and macOS process limits use Python's
 [`resource.setrlimit`](https://docs.python.org/3.12/library/resource.html#resource.setrlimit).
 QAVF lowers the soft and hard limits without relaxing a stricter inherited value
-and disables core dumps. The successful result records the effective values.
-An omitted control keeps its inherited OS limit; an effective value of `-1`
-means unlimited on Linux. Isolation alone does not create a memory or CPU ceiling.
-Child processes inherit OS limits, but their address space and CPU consumption
-are not summed into a shared process-tree budget. A per-file ceiling also permits
+and disables core dumps. Windows uses a parent-owned Job Object with per-process
+committed-memory and user-mode CPU limits; the worker joins it before importing
+QAVF. The parent also polls members' user-mode CPU time while waiting.
+
+The successful result records the effective controls. An omitted control adds no
+new limit, and existing OS restrictions still apply. A reported value of `-1`
+means that reported control is unlimited; it does not remove other OS restrictions.
+Isolation alone does not create a memory or CPU ceiling. Ordinary child processes
+inherit POSIX limits or join the Windows job, but their memory and CPU consumption
+are not summed into a shared process-tree budget. A per-file ceiling permits
 multiple smaller files; it is not a filesystem quota.
 
-The equivalent configuration can be used by `validate(config="qavf.yaml")`,
+The equivalent Linux configuration can be used by `validate(config="qavf.yaml")`,
 `QARunner(load_settings("qavf.yaml")).run()` or `qavf run -c qavf.yaml`:
 
 ```yaml
@@ -122,7 +133,7 @@ comparison = compare_outputs(
     "baseline.parquet",
     "candidate.parquet",
     keys=["site_id"],
-    resources=ResourceLimits(wall_time=30, address_space="4GiB", native_threads=2),
+    resources=ResourceLimits(wall_time=30, native_threads=2),
 )
 print(comparison.equal)
 print(comparison.execution_limits)
@@ -165,16 +176,16 @@ from such an execution. If a rule catches a resource failure and records it in a
 complete report, that report retains the error and incomplete assessment status.
 Neither mode samples data or silently removes checks to satisfy a budget.
 
-The parent kills the owned process group after success as well as failure, waits
-for its running members to stop, then removes its temporary directory. The group
-includes ordinary worker descendants. If stopping the group fails, QAVF raises
-an error and leaves its directory available for diagnosis. Parent termination or
-machine failure can also leave files; the configured `temp_dir` identifies their
-parent directory.
+The parent terminates the owned process group on Linux/macOS or Job Object on
+Windows after success as well as failure, waits for its running members to stop,
+then removes its temporary directory. These include ordinary worker descendants.
+If stopping the owned processes fails, QAVF raises an error and leaves its
+directory available for diagnosis. Parent termination or machine failure can
+also leave files; the configured `temp_dir` identifies their parent directory.
 
 Isolation is for trusted QA code. It is not a security sandbox: a plugin can access
-the worker's environment and filesystem, and a process that deliberately escapes
-the group with `setsid` is outside the cleanup guarantee. Use external process-tree
+the worker's environment and filesystem. On Linux/macOS, a process that deliberately
+escapes the group with `setsid` is outside the cleanup guarantee. Use external process-tree
 and filesystem controls when aggregate RSS, total disk use or hostile-code
 containment is required.
 
@@ -208,7 +219,7 @@ The implementation separates policy from supervision and QA execution:
 | `qavf.execution.inputs` | Reject live inputs before adapting them |
 | `qavf.execution.policy` | Revalidate mutable settings before choosing execution |
 | `qavf.execution.protocol` | Versioned bounded request/result encoding |
-| `qavf.execution.supervisor` | Launch, whole-worker deadline, process group and storage cleanup |
+| `qavf.execution.supervisor`, `qavf.execution._windows_job` | Launch, whole-worker deadline, process-group/job ownership and storage cleanup |
 | `qavf.execution.bootstrap`, `qavf.execution.os_limits` | Standard-library startup and OS limits before native imports |
 | `qavf.execution.worker`, `qavf.execution.dispatch` | Run existing QA/comparison paths and reconstruct complete typed results |
 

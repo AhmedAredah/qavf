@@ -32,22 +32,23 @@ def test_s3_secret_sql_escapes_values_and_creates_one_secret_per_scope():
         "REGION 'us-east-1', ENDPOINT 'minio:9000', URL_STYLE 'path', USE_SSL false"
     )
     assert create_secret_statements("lake", secret) == [
-        f"CREATE OR REPLACE SECRET \"lake__scope_0\" ({options}, SCOPE 's3://a')",
-        f"CREATE OR REPLACE SECRET \"lake__scope_1\" ({options}, SCOPE 's3://b/x')",
+        f"CREATE OR REPLACE SECRET \"__qavf_secret_6c616b65_0\" ({options}, SCOPE 's3://a')",
+        f"CREATE OR REPLACE SECRET \"__qavf_secret_6c616b65_1\" ({options}, SCOPE 's3://b/x')",
     ]
     single = create_secret_statements("lake", spec(**S3, scope=["s3://a"]))
-    assert single[0].startswith('CREATE OR REPLACE SECRET "lake" (')
+    assert single[0].startswith('CREATE OR REPLACE SECRET "__qavf_secret_6c616b65_0" (')
 
 
 def test_credential_chain_and_azure_secret_sql():
     chained = spec(type="s3", provider="credential_chain", chain="env")
     assert create_secret_statements("c", chained) == [
-        "CREATE OR REPLACE SECRET \"c\" (TYPE s3, PROVIDER credential_chain, CHAIN 'env')"
+        "CREATE OR REPLACE SECRET \"__qavf_secret_63_0\" "
+        "(TYPE s3, PROVIDER credential_chain, CHAIN 'env')"
     ]
     assert create_secret_statements(
         "b", spec(type="azure", provider="credential_chain", account_name="acct")
     ) == [
-        "CREATE OR REPLACE SECRET \"b\" (TYPE azure, PROVIDER credential_chain, "
+        "CREATE OR REPLACE SECRET \"__qavf_secret_62_0\" (TYPE azure, PROVIDER credential_chain, "
         "ACCOUNT_NAME 'acct')"
     ]
     assert "CONNECTION_STRING 'DefaultEndpointsProtocol=http;" in create_secret_statements(

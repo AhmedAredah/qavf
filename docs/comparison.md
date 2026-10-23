@@ -41,6 +41,28 @@ significant** ([significance](#significance)). Significance needs the `stats` ex
 (SciPy); a core install should set `decision="material"`, which judges materiality
 alone exactly as before and runs no test.
 
+## Reusable typed configuration
+
+Keep the simple keyword API for one-off comparisons. For a reusable contract,
+pass an existing `ComparisonSpec` or a configuration mapping:
+
+```python
+from qavf import compare_datasets
+from qavf.compare import ComparisonSpec
+
+contract = ComparisonSpec(
+    baseline="reference", candidate="release", keys=("site",),
+    decision="material", rtol=0, atol=0,
+)
+result = compare_datasets("before.parquet", "after.parquet", configuration=contract)
+```
+
+The convenience function binds the contract to its two supplied inputs; the
+contract's dataset names do not select external datasets. `configuration=` cannot
+be combined with `keys`, `columns`, `levels`, `name`, or other comparison options.
+Use one form so a requested check is never silently replaced. `resources` and
+`entry_points` remain independent run controls.
+
 ## Fail-closed results
 
 A `DatasetComparison` holds one typed result per level (`StructureResult`,
@@ -57,7 +79,10 @@ a mapped column the baseline lacks, a lossy cast, an unmapped category with
 `unmapped: error`, fewer aligned rows than `min_rows` (1 by default), duplicate keys
 for the record level or a non-numeric column for a numeric measure all leave the
 affected checks **not assessed**. `result.passed` is true only when every check was
-assessed and passed.
+assessed and passed. An empty `levels=[]` selection is invalid. A plugin level
+returning no checks, or a grouped measure with no shared members, is not assessed.
+Location movement/geometry checks need matched features with usable locations;
+`min_rows=0` permits empty input datasets but does not invent paired assessments.
 
 ## Alignment
 
@@ -168,6 +193,12 @@ day 25, and the two physical 01:00 hours of a fall-back are two hour buckets, la
 with their own instants. A bucket that merely contains a transition (`6 hours` from
 midnight) stays one bucket. Labels are exact (dates, instants on an integer grid,
 small integers, season names), never float time.
+
+Sparse sub-day sequence positions for naive, UTC and fixed-offset timestamps use
+exact integer tick differences, without allocating intermediate calendar buckets.
+Zones with daylight-saving transitions retain the validated explicit-grid path and
+its grid limit. Missing-period diagnostics retain exact counts while limiting
+displayed gap labels.
 
 `Date`, `Datetime` (any unit, naive or aware) and text columns (with
 `time_format`, a `strftime` pattern) can be bucketed; the two sides may differ (a
@@ -550,3 +581,48 @@ Keys, ignored columns and tolerances then use the new names.
 
 Alignment steps, measures, comparators, levels and statistical tests are registered
 components; see [writing plugins](plugins.md#comparison-components).
+
+### Dependency and reduction contracts
+
+`ComparisonLevel.required_columns()` may return a `frozenset` of every aligned
+column the level reads. The engine adds comparison keys and known alignment/filter
+dependencies before taking coherent source observations. The default `None`
+preserves all columns: retain it for schema-wide checks and plugins whose dependency
+set is not known. Plugins must not omit dependencies from a declared set. Unknown
+alignment steps also retain full input columns. Rename collisions and derived-column
+collisions are checked against the full source schema before projection. A proven
+identity transformation reuses its observation instead of writing another snapshot.
+
+`Measure.reduction(data)` optionally returns a native scalar aggregate expression.
+Compatible measures and their statistical extras are collected together per side;
+`compute(data)` remains the fallback for custom algorithms and exact reductions.
+Only advertise an expression when it preserves the measure's null, dtype, overflow,
+and exactness semantics. A count/min/max expression can be fused; replacing an exact
+sum with an unchecked native sum cannot.
+
+### Work and display limits
+
+Correlation admission counts values across all selected column pairs and methods
+before allocating pair plans. Raw pair samples are processed one pair at a time and
+only requested methods run. Agreement admission counts every requested column;
+integer/decimal OLS metrics use exact differences and sufficient statistics. A test
+or Deming fit requiring binary64 receives losslessly centred values or becomes not
+assessed. Display metrics round only after exact materiality decisions where the
+metric is rational; square-root metrics retain their stated numerical semantics.
+
+Numeric distribution distances retain every shared bin. Display detail is
+separately limited to `2 * bins` named categories plus an explicit `Other` bin whose
+shares include the remaining mass. Categorical displays use the same disclosure.
+Groups with no usable categorical values remain in assessment coverage.
+
+Location summaries collect aggregate counts and bounded evidence; point joins and
+geometry batches use owned observations. Record descriptions reuse a matched
+observation when several consumers need the same join. Spatial distance builders
+receive the weight configuration's `max_edges` and `max_work` limits.
+
+Comparison HTML streams repeated sections and builds charts only as the renderer
+reaches them. Exhausted chart budgets prevent later builders from running. A first
+oversized SVG still has to be built to determine its encoded size; point limits and
+output byte limits are different controls. JSON detail trimming visits nested
+significance families and discloses only details actually removed. Verdicts and
+complete counts remain present even when optional evidence is omitted.

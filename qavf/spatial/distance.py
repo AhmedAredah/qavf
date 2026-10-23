@@ -32,7 +32,7 @@ def haversine(lon1: Any, lat1: Any, lon2: Any, lat2: Any, radius: float = EARTH_
 def euclidean(x1: Any, y1: Any, x2: Any, y2: Any) -> Any:
     """Straight-line distance in the coordinates' own units."""
     dx, dy = x2 - x1, y2 - y1
-    return np.sqrt(dx * dx + dy * dy)
+    return np.hypot(dx, dy)
 
 
 def distance(x1: Any, y1: Any, x2: Any, y2: Any, *, geographic: bool) -> Any:

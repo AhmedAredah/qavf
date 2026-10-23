@@ -8,9 +8,11 @@ metrics, and the policies that combine **materiality** (is a difference large en
 to matter?) with **significance** (is it larger than chance explains?).
 
 Distribution functions come from SciPy, the `stats` extra (`pip install
-'qavf[stats]'`). Without SciPy every test is reported as **not assessed**, with that
-reason, and is never treated as a pass. Permutation-only methods (Moran's I, global and
-local) and the effect sizes need no SciPy.
+'qavf[stats]'`). Without SciPy, methods that need its distribution functions return
+**not assessed** with that reason. Permutation-only methods (including global and
+local Moran's I), percentile bootstraps and the effect sizes need no SciPy. Importing
+array-based inference does not initialize the engine or report renderers; plugin
+registry objects are loaded when requested.
 
 ## Calling the library
 
@@ -42,7 +44,12 @@ is corrected, `effect` and `effect_name` (always candidate relative to baseline)
 `assumptions`, `dependence` (`none`, `block`, `hac`, `effective_n`, `spatial`), `seed`
 and `resamples` for resampling tests, and `assessed`/`reason`/`notes`. It is an audit
 snapshot: non-finite statistics (an infinite t for two different constant samples)
-survive JSON transport intact.
+survive JSON transport intact. An assessed result requires a finite raw p-value in
+`[0, 1]` and, when present, a finite adjusted p-value in the same range. Missing or
+malformed probabilities make the result **not assessed**, with a reason; they remain
+in the audit record. This invariant is also checked when copying a result and when
+making a decision. `significant` is derived from the effective p-value and valid
+`alpha`, so a stale supplied flag cannot override the probability.
 
 `Significance` summarizes a family judged together (one measure across groups, one
 shape check across series): the test, the decision policy, alpha, the correction, the
@@ -79,9 +86,9 @@ reported in data units.
 | `chi_square`, `g_test` | | homogeneity of category shares (Pearson, likelihood ratio) | a nonempty row per side | empty categories dropped; one category: p = 1; expected counts below 5 noted |
 | `fisher_exact` | | exact 2x2 test, odds ratio with its interval | | |
 | `mcnemar` | | paired binary change (exact binomial, or chi-square with continuity) | 1 pair | no discordant pair: p = 1 |
-| `stuart_maxwell` | | marginal homogeneity of paired categories | 1 pair | unchanged categories dropped; none changing: p = 1 |
+| `stuart_maxwell` | | marginal homogeneity of paired categories | 1 pair | unchanged categories dropped; none changing: p = 1; singular covariance: not assessed |
 | `two_proportion` | `two_proportion` | two shares, pooled z | 1 trial each | every trial alike: p = 1 |
-| `poisson_rate` | `poisson` | two rates per exposure, exact conditional (binomial) | | no events: p = 1 |
+| `poisson_rate` | `poisson` | two rates per exposure, exact conditional (binomial) | | no events: p = 1; common exposure rescaling preserves the test; unrepresentable exposure ratio: not assessed |
 | `kendall_tau` | | rank correlation with time (TMP-002) | | undefined tau: not assessed |
 | `mann_kendall` | | monotone trend, tie-corrected, with Sen's slope and interval | 3 values | constant: p = 1 |
 | `seasonal_kendall` | | Mann-Kendall summed over seasons, seasonal Sen slope | a season with 2 values | |
@@ -101,13 +108,18 @@ their parameters.
 ## Multiple testing
 
 `adjust(p, method, family_size=None)` returns adjusted p-values for `bonferroni`,
-`holm`, `bh` (Benjamini-Hochberg) and `by` (Benjamini-Yekutieli), identical to
-`statsmodels.stats.multitest.multipletests`; `correct(results, method, alpha)`
+`holm`, `bh` (Benjamini-Hochberg) and `by` (Benjamini-Yekutieli), checked against
+[`statsmodels.stats.multitest.multipletests`][multipletests] to floating-point
+precision; `correct(results, method, alpha)`
 applies one to the assessed results of a family and records `adjusted_p`, the method,
 the family size and `significant` on each. Adjusted p-values are monotone in the raw
 ones, never below them and at most 1. A `family_size` larger than the p-values given
 counts the members that were not tested as `p = 1`, which keeps every correction valid
-when some members could not be assessed or did not need a test.
+when some members could not be assessed or did not need a test. Padding is implicit:
+only the supplied `k` probabilities are stored and sorted, even when the family size
+`m` is much larger. Holm/BH/BY therefore use `O(k log k)` time and `O(k)` memory;
+Bonferroni is linear in `k`. BY computes its harmonic factor without an `m`-element
+array. The returned array owns its storage.
 
 Bonferroni and Holm control the family-wise error rate; BH the false discovery rate
 under independence or positive dependence; BY under any dependence.
@@ -119,12 +131,28 @@ under independence or positive dependence; BY under any dependence.
   and accelerated; the jackknife acceleration uses SciPy's per-sample formula for
   several samples).
 * **Seeds**: every resampling test draws from `numpy.random.Generator(PCG64(seed))`
-  and records the seed and resample count. The same seed gives identical results on
-  every run and platform; comparisons offset the seed by each member's position. The
-  default seed is 0 and the default resample count 2,000.
+  and records the seed and resample count. Reproduce an audit with the same inputs,
+  options, seed and locked numerical environment; [NumPy's compatibility policy][random]
+  does not promise identical streams across every build, platform or changed call
+  sequence. The batching regressions check the supported seeded behavior. Comparisons
+  offset the seed by each member's position. The default seed is 0 and the default
+  resample count 2,000 (spatial tests default to 999 permutations). Exact enumeration
+  does not depend on a seed.
 * **Work budget**: a test needing more than `max_work` (20,000,000 by default)
-  resamples x values, or a comparison collecting more values than that, is not
-  assessed rather than slow.
+  estimated values processed is not assessed, with required and allowed work in its
+  reason. Bootstrap and permutation work counts draws times observations; BCa adds
+  leave-one-out work. Global Moran charges `B * (n + edges)` and local Moran charges
+  `B * (n - 1 + edges)`, including locations without neighbours. Effective sample size
+  admits the sum of its overlapping lag correlations before doing the quadratic
+  default-lag calculation. These are algorithmic work estimates, not wall-clock or
+  process-memory limits; arbitrary callback cost and external libraries can differ.
+* **Memory**: test callers process bootstrap samples, exact permutations and
+  leave-one-out samples in bounded batches. Exact enumeration remains exact when it
+  fits the work budget. One-dimensional distributions can still use `O(B)` storage
+  for intervals; local Moran retains tail counts and one result per location, and
+  releases full permutation buffers after each draw. Batch limits bound sample
+  matrices, not the entire process. The public `block_indices` allocation helper
+  returns the full shape explicitly requested by its caller.
 * **Block bootstrap**: `block_indices` draws circular (or moving) blocks. The default
   block length is `ceil(2 * n ** (1/3))`: the rate-optimal order `n^(1/3)`, with a
   constant chosen by simulation.
@@ -138,12 +166,45 @@ by default:
 | Where | Default | Alternatives |
 |---|---|---|
 | `slope_difference` (`series_shape` trend) | `block`: null-imposed circular block bootstrap standard error, blocks of `l` and `2l` extrapolated to remove the `O(1/l)` bias, Student t with `n - 2` df | `hac`, `none` |
-| `correlation_test` (`series_shape` correlation) | `effective_n`: Bartlett's effective sample size `n / (1 + 2 sum r_x(k) r_y(k))` over `n // 5` lags | `none` |
+| `series_shape` correlation | `effective_n`: Bartlett's effective sample size `n / (1 + 2 sum r_x(k) r_y(k))` over `n // 5` lags | `none` (the standalone `correlation_test` default) |
 | `lag_test` (`series_shape` lag) | circular block bootstrap of the correlation gain | |
 | `morans_i` | spatial permutation | |
 | `local_morans_i` | conditional permutation (each location's value fixed, one draw shared by all locations) | |
 
 Tests of groups and buckets treat the rows within one group as independent.
+
+### Custom resampling statistics
+
+A callback computes along the **last axis**: a one-dimensional sample must produce
+one scalar, and a `(batch, n)` array must produce exactly `(batch,)`. All observed,
+resampled and leave-one-out statistics must be finite. Wrong shapes and nonfinite
+outputs produce not-assessed results; they are never broadcast into plausible
+probabilities.
+
+`permutation` and `bootstrap_difference` evaluate the callback on baseline and
+candidate separately and compare `statistic(candidate) - statistic(baseline)`.
+`paired_bootstrap` evaluates the callback on `candidate - baseline`. Arbitrary
+callbacks receive those values in their **original measurement units**. For example,
+`lambda a: (a > 10).mean(axis=-1)` retains its threshold, and a variance statistic
+retains squared units. Only the known built-in mean uses internal numerical scaling.
+
+```python
+from qavf.inference import paired_bootstrap, permutation
+
+fraction_above_limit = lambda a: (a > 10).mean(axis=-1)
+test = permutation([1, 2, 3], [20, 21, 22], statistic=fraction_above_limit)
+# Exact difference of exceedance fractions: 1.0, with a two-sided p-value of 0.1.
+
+spread = paired_bootstrap(
+    [0, 0, 0, 0, 0], [1, 5, 2, 8, 4], statistic=lambda a: a.var(axis=-1), name="variance"
+)
+```
+
+Callbacks should be deterministic and independent of batch size. Use `interval="percentile"`
+or `interval="bca"`; any other name is a configuration error. Resample counts must be
+integers of at least two. Bootstrap p-values invert the percentile interval even when
+BCa is requested for the reported confidence interval. QAVF's exact/random permutation
+tail conventions are tested against [SciPy's permutation test][permutation].
 
 ### Calibration
 
@@ -318,5 +379,25 @@ They follow `plugins.entry_points` exactly like comparison components, are recor
   correlation with `rank_correlation_test`, treating zones as independent pairs.
 * Moran's I and LISA take explicit neighbour weights; `qavf.spatial.weights` builds
   them from polygons, grid cells, centroids or tables ([spatial data](spatial.md)).
+* A singular Stuart–Maxwell covariance, including some disconnected category-change
+  patterns, needs a rank-aware method with appropriate degrees of freedom. QAVF
+  reports it as not assessed instead of substituting an unsupported p-value.
+* Numerical scaling cannot represent every possible dynamic range. Poisson tests
+  normalize exposures before forming their null share; exposure-ratio underflow is
+  explicit not assessed. Effect ratios too large for a float are `None`, and
+  unbounded interval endpoints remain infinite.
 * LISA p-values are no smaller than `1 / (permutations + 1)`; a large family of zones
   needs more permutations for the correction to name any cluster.
+
+
+## Numerical and implementation references
+
+The regression oracles are `tests/test_review_inference_fixes.py`,
+`tests/test_inference_oracles.py`, and `tests/test_spatial_inference.py`. They cover
+explicit family padding, exact relabellings, arbitrary callback units, seeded batch
+invariance, invalid probabilities and bounded intermediate allocations. They complement
+the calibration tests; allocation bounds are not a proof of universal optimality.
+
+[multipletests]: https://www.statsmodels.org/stable/generated/statsmodels.stats.multitest.multipletests.html
+[permutation]: https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.permutation_test.html
+[random]: https://numpy.org/doc/stable/reference/random/compatibility.html

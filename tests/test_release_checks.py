@@ -378,3 +378,38 @@ def test_extension_bootstrap_preserves_download_failure(monkeypatch):
 def test_release_environment_forces_reproducible_hypothesis_profile(monkeypatch):
     monkeypatch.setenv("QAVF_HYPOTHESIS_PROFILE", "external-weak-profile")
     assert clean_environment()["QAVF_HYPOTHESIS_PROFILE"] == "ci"
+
+
+@pytest.mark.parametrize("child_result", [0, 1, "error"])
+def test_runner_owns_unique_temporary_base(tmp_path, monkeypatch, child_result):
+    from scripts.release_checks import runner
+
+    bases = []
+    sentinel = tmp_path / "unrelated.txt"
+    sentinel.write_text("preserve")
+
+    def child(command, **kwargs):
+        base = Path(command[command.index("--basetemp") + 1])
+        assert base.parent.is_dir()
+        assert not base.exists()
+        assert base.parent != tmp_path
+        bases.append(base)
+        base.mkdir()
+        (base / "fixture.txt").write_text("owned")
+        if child_result == "error":
+            raise OSError("simulated process start failure")
+        results = Path(command[command.index("--release-results") + 1])
+        results.write_text(json.dumps({"status": "passed"}))
+        return subprocess.CompletedProcess(command, child_result)
+
+    monkeypatch.setattr(runner.subprocess, "run", child)
+    monkeypatch.setattr(runner, "repository_identity", lambda root: copy.deepcopy(IDENTITY))
+    for attempt in range(2):
+        result = run_tests(
+            root=ROOT, workdir=ROOT, python=Path(sys.executable),
+            output=tmp_path / f"record-{attempt}.json", check_id="probe",
+        )
+        assert result == (0 if child_result == 0 else 1)
+        assert not bases[-1].parent.exists()
+    assert bases[0] != bases[1]
+    assert sentinel.read_text() == "preserve"

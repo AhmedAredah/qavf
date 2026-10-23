@@ -9,7 +9,11 @@ repeatable.
 scope. The source is read and checked before the observation is yielded. Existing
 owned frames use their immutable buffers; existing IPC spills use reference-counted
 leases without loading a complete projection or copying the spill. Other lazy and
-native inputs stage selected columns into owned IPC under the run's spill budget.
+native inputs retain selected chunks in available shared cache memory and spill to
+owned IPC when that admission ceiling is exhausted. The source is never replayed
+to switch storage. Incremental lazy reading uses `collect_batches` where provided
+by the installed Polars version; older supported versions keep exact IPC staging.
+Native SQL batches use memory-first admission on all supported versions.
 
 ```python
 with ctx.observe("events", ["id", "value"]) as observation:
@@ -31,7 +35,8 @@ its own failure independently. A `SourceReadView` inside `ctx.read_source()` off
 `observe(columns)` for the same bound ad-hoc source and provenance.
 
 A derived observation evaluates a sort, grouping or other transformation once and
-allows several consumers to reuse it:
+allows several consumers to reuse it. A transformation returning its input plan
+unchanged borrows the original observation without copying its payload:
 
 ```python
 with ctx.observe("events", ["id", "value"]) as source:
@@ -48,6 +53,13 @@ physical filesystem reads, native working allocations or process RSS.
 
 ## Resource and lifecycle contracts
 
+In-memory observations and caches share a retained-memory admission owner.
+`retained_total_bytes` includes both; `retained_observation_bytes` identifies the
+observation portion. Immutable frame and IPC leases remain charged until their last
+owner closes, even when a dataset is released while a scoped observation is active.
+An observation cannot expand beyond the available retention ceiling by adding more
+chunks: it switches to disk and releases the staged memory after writing it.
+
 Frame spills, observations and external indexes share `RunResources.spill_budget`.
 They use the existing owned-storage half of `spill_max_bytes`; native DuckDB
 connections retain the other half of that envelope. The allocator reserves bytes
@@ -63,7 +75,10 @@ claim an exact count of physical scans. Native observations currently retain one
 small file descriptor record per result batch, so their Python metadata grows with
 batch count. Their payloads and metadata files remain subject to the byte budget.
 
-The `batches()` size bounds decoded output rows per yielded frame. A single large
+Where incremental IPC collection is supported, `batches()` reads a stored plan once
+instead of starting a slice query for each batch. Older supported Polars versions
+retain projected slice replay. The `batches()` size bounds decoded output rows per
+yielded frame. A single large
 value can exceed a memory target; blocking sorts, groups, joins, Python callbacks
 and other upstream work can need more memory than the output batch. A row budget
 caps a returned LazyFrame to `row_budget + 1` before collection or staging, including

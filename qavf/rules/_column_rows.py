@@ -15,6 +15,7 @@ from qavf.rules._predicates import compatibility_error, row_tests
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import present
 from qavf.settings import ROW_CONSTRAINTS, ColumnCheck
+from qavf.sources.sql import quote_identifier
 
 
 def native_row_check(
@@ -29,6 +30,8 @@ def native_row_check(
     Row-only contracts and simple per-row scopes can be evaluated in batches.
     Aggregate-dependent scopes and mixed exact aggregate contracts retain their
     projected reference path; they must not change meaning at batch boundaries.
+    Evidence retains original dependency values, position and reasons from this
+    same scan. Unrelated payload columns are neither decoded nor replayed.
     """
     if check is None or check.regex is None:
         return NotImplemented
@@ -53,7 +56,11 @@ def native_row_check(
         separator="; ",
         ignore_nulls=True,
     )
-    saved = inputs.saved_for(dependencies)
+    evidence = inputs.ctx.evidence_limit > 0
+    saved = inputs.saved_for(dependencies) if evidence else {}
+    selected = [*dependencies, *saved.values(), *([inputs.row] if evidence else [])]
+    projection = ", ".join(map(quote_identifier, selected))
+    statement = f"SELECT {projection} FROM {inputs.native(dependencies)}"
 
     def consumer_factory() -> Callable[
         [SqlReadSession], tuple[int, int, int, list[dict[str, Any]]]
@@ -61,7 +68,7 @@ def native_row_check(
         def consume(session: SqlReadSession) -> tuple[int, int, int, list[dict[str, Any]]]:
             applicable = missing = count = kept = 0
             samples: list[dict[str, Any]] = []
-            for frame in session.batches(f"SELECT * FROM {inputs.native(dependencies)}"):
+            for frame in session.batches(statement):
                 scoped = frame.filter(scope)
                 applicable += scoped.height
                 missing += scoped[column].null_count()
@@ -79,7 +86,7 @@ def native_row_check(
                         samples.extend(
                             temporal_evidence(
                                 present(
-                                    original.select(*inputs.actual, inputs.row, inputs.reason),
+                                    original.select(*dependencies, inputs.row, inputs.reason),
                                     {inputs.row: "_row", inputs.reason: "violates"},
                                 )
                             ).to_dicts()

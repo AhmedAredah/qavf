@@ -1,45 +1,5 @@
-{#- The dataset comparison section: a summary card and a drill-down per level. -#}
-{% macro verdict_chip(verdict) -%}
-  {%- set icons = {"passed": "✓", "failed": "✕", "not assessed": "!", "incomplete": "!"} -%}
-  <span class="chip"><span class="dot v-{{ verdict | replace(' ', '-') }}"></span>{{ icons.get(verdict, "–") }} {{ verdict }}</span>
-{%- endmacro %}
+{% from "comparison_macros.html.j2" import verdict_chip %}
 
-{% macro check_detail(check) %}
-  <tr>
-    <td class="mono">{{ check.label }}</td>
-    <td>{{ verdict_chip(check.verdict) }}</td>
-    <td>{{ check.message }}{% if check.family %}<br><span class="muted">{{ check.family }}</span>{% endif %}</td>
-    <td class="num">{{ check.affected }}</td>
-  </tr>
-  {% if check.records or check.tests %}
-  <tr class="evidence"><td colspan="4">
-    <details>
-      <summary>Evidence and significance of {{ check.label }}{% if check.truncated %} (evidence bounded){% endif %}</summary>
-      {% if check.records %}{% with records = check.records %}{% include "records.html.j2" %}{% endwith %}{% endif %}
-      {% if check.tests %}
-      <div class="scroll"><table class="tests">
-        <thead><tr><th>Member</th><th>Test</th><th class="num">p</th><th class="num">Adjusted p</th><th>Effect</th><th class="num">Interval</th><th>Significant</th></tr></thead>
-        <tbody>
-        {% for test in check.tests %}
-          <tr>
-            <td>{{ test.label }}</td>
-            <td class="mono">{{ test.method }}</td>
-            <td class="num">{{ test.p_value | number }}</td>
-            <td class="num">{{ test.adjusted_p | number }}</td>
-            <td>{% if test.effect is not none %}{{ test.effect | number }} <span class="muted">{{ test.effect_name or "" }}</span>{% else %}{{ test.reason or "—" }}{% endif %}</td>
-            <td class="num">{% if test.ci_low is not none %}{{ test.ci_low | number }} to {{ test.ci_high | number }}{% else %}—{% endif %}</td>
-            <td>{{ {True: "yes", False: "no"}.get(test.significant, "—") }}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table></div>
-      {% endif %}
-    </details>
-  </td></tr>
-  {% endif %}
-{% endmacro %}
-
-{% macro comparison_section(comparisons) %}
 <section class="comparisons" aria-label="Dataset comparisons">
 {% for view in comparisons %}
   <article class="card comparison" id="{{ view.anchor }}">
@@ -84,7 +44,7 @@
         <table class="checks">
           <thead><tr><th>Check</th><th>Verdict</th><th>Message</th><th class="num">Affected</th></tr></thead>
           <tbody>
-          {% for check in level.checks %}{{ check_detail(check) }}{% endfor %}
+          {% for check in level.checks %}{% include "comparison_check.html.j2" %}{% endfor %}
           </tbody>
         </table>
       </div>
@@ -93,4 +53,3 @@
   </article>
 {% endfor %}
 </section>
-{% endmacro %}

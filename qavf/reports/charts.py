@@ -26,6 +26,9 @@ _ROW_HEIGHT = 30
 _BAR_HEIGHT = 14
 _SEGMENT_GAP = 2
 _MAX_LABEL_CHARS = 22
+_UNPLOTTABLE = Markup(
+    '<p class="empty">Chart omitted: values exceed the finite plotting range.</p>'
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +224,8 @@ def waterfall(steps: Sequence[WaterfallStep], aria: str) -> Markup:
     for step in steps:
         start = 0.0 if step.kind == "total" else running
         end = step.value if step.kind == "total" else running + step.value
+        if not math.isfinite(start) or not math.isfinite(end):
+            return _UNPLOTTABLE
         spans.append((min(start, end), max(start, end), start, end))
         running = end
     # The axis spans the running totals, not zero: changes small against the totals
@@ -231,6 +236,8 @@ def waterfall(steps: Sequence[WaterfallStep], aria: str) -> Markup:
     low = 0.0 if low >= 0 and low - margin <= 0 else low - margin
     high = high + margin if high > 0 or low < 0 else 0.0
     span = (high - low) or 1.0
+    if not all(math.isfinite(value) for value in (low, high, span)):
+        return _UNPLOTTABLE
     left, area = 170.0, _PLOT_WIDTH - 170.0 - 70.0
     height = len(steps) * 24 + 26
     svg, hatch = _open(_PLOT_WIDTH, height, aria)
@@ -342,7 +349,14 @@ def series_lines(
         return left + (i / (len(labels) - 1) * area if len(labels) > 1 else area / 2)
 
     def y_of(v: float) -> float:
-        return top + plot_h - (v - low) / span * plot_h
+        # Opposite finite extrema can have an infinite Float64 difference.
+        # Scale only that exceptional range; ordinary plotting stays unchanged.
+        if math.isinf(span):
+            scale = max(abs(low), abs(high))
+            position = (v / scale - low / scale) / (high / scale - low / scale)
+        else:
+            position = (v - low) / span
+        return top + plot_h - position * plot_h
 
     parts.append(f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_h}"/>')
     parts.append(_text(left - 6, top, plain(high), "tick", "end"))
@@ -354,14 +368,20 @@ def series_lines(
         (baseline, "line-base", "circle"),
         (candidate, "line-cand", "rect"),
     ):
-        points = [(x_of(i), y_of(v)) for i, v in enumerate(series) if v is not None]
+        points = [
+            (x_of(i), y_of(v))
+            for i, v in enumerate(series)
+            if v is not None and math.isfinite(v)
+        ]
         if not points:
             continue
         path = "M" + " L".join(f"{x:.1f} {y:.1f}" for x, y in points)
         parts.append(f'<path class="{css}" d="{path}"/>')
         name = "baseline" if css == "line-base" else "candidate"
         if len(points) <= 120:
-            present = [(i, v) for i, v in enumerate(series) if v is not None]
+            present = [
+                (i, v) for i, v in enumerate(series) if v is not None and math.isfinite(v)
+            ]
             for (x, y), (i, v) in zip(points, present, strict=True):
                 title = f"{labels[i]} · {name}: {plain(v)}"
                 shape = (

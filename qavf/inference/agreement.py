@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Literal
 
 import numpy as np
@@ -27,11 +28,13 @@ from qavf.inference._support import (
     assessed,
     at_least,
     check_confidence,
+    common_scale,
     common_unit,
     observations,
     require_scipy,
 )
 from qavf.inference.results import TestResult
+from qavf.stats import center_scale_observations
 
 FitMethod = Literal["ols", "deming"]
 
@@ -67,9 +70,31 @@ def _paired(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> tuple[np.ndarr
 def _deming_slope(sbb: np.ndarray, scc: np.ndarray, sbc: np.ndarray, ratio: float) -> np.ndarray:
     """Deming's slope from centred sums; ``ratio`` is the candidate's error variance over
     the baseline's (1: orthogonal regression)."""
-    gap = scc - ratio * sbb
+    # Homogeneity permits scaling before ratio*sbb or a squared norm could
+    # overflow. Rationalize the negative-gap branch to avoid cancellation.
+    factor = max(1.0, ratio)
+    bb, cc, bc = sbb, scc / factor, sbc
+    scaled_ratio = ratio / factor
+    gap = cc - scaled_ratio * bb
+    cross = 2 * np.sqrt(scaled_ratio) * (bc / np.sqrt(factor))
+    root = np.hypot(gap, cross)
     with np.errstate(divide="ignore", invalid="ignore"):
-        return (gap + np.sqrt(gap * gap + 4 * ratio * sbc * sbc)) / (2 * sbc)
+        return np.where(
+            gap >= 0,
+            (gap + root) / (2 * (bc / factor)),
+            2 * scaled_ratio * bc / (root - gap),
+        )
+
+
+def _coordinates(b: np.ndarray, c: np.ndarray):
+    """Separate origins, one unit: fit variation without rounding large means."""
+    try:
+        sb, ub, ob = center_scale_observations(b)
+        sc, uc, oc = center_scale_observations(c)
+    except ValueError as exc:
+        raise Unassessable(str(exc)) from None
+    (sb, sc), unit = common_unit(sb * ub, sc * uc)
+    return sb, sc, unit, ob, oc
 
 
 def fit_line(
@@ -87,12 +112,12 @@ def fit_line(
     """
     if method not in ("ols", "deming"):
         raise ValueError(f"method must be 'ols' or 'deming', got {method!r}")
-    if not error_ratio > 0:
-        raise ValueError("error_ratio must be positive")
+    if not math.isfinite(error_ratio) or not error_ratio > 0:
+        raise ValueError("error_ratio must be finite and positive")
     b, c = _paired(baseline, candidate)
     n = len(b)
     at_least(n, 2, "pairs", n={"pairs": n})
-    (sb, sc), unit = common_unit(b, c)
+    sb, sc, unit, origin_b, origin_c = _coordinates(b, c)
     mb, mc = float(sb.mean()), float(sc.mean())
     x, y = sb - mb, sc - mc
     sbb, scc, sbc = float(x @ x), float(y @ y), float(x @ y)
@@ -104,24 +129,46 @@ def fit_line(
         if sbc == 0:
             raise Unassessable("the sides are uncorrelated; Deming's line is undefined")
         slope = float(_deming_slope(np.array(sbb), np.array(scc), np.array(sbc), error_ratio))
-    intercept = mc - slope * mb
+    local_intercept = mc - slope * mb
+    try:
+        intercept = math.fsum((origin_c, -slope * origin_b, local_intercept * unit))
+    except (OverflowError, ValueError):
+        intercept = math.inf
+    if not math.isfinite(intercept) and math.isfinite(slope):
+        # A product may overflow even though cancellation leaves a finite
+        # intercept. Only this exceptional conversion needs exact arithmetic.
+        try:
+            intercept = float(
+                Fraction(origin_c) - Fraction(slope) * Fraction(origin_b)
+                + Fraction(local_intercept) * Fraction(unit)
+            )
+        except (OverflowError, ValueError):
+            raise Unassessable("the fitted line cannot be represented in data units") from None
+    if not math.isfinite(slope) or not math.isfinite(intercept):
+        raise Unassessable("the fitted line cannot be represented in data units")
     covariance = None
     if n >= 3:
         if method == "ols":
             residual = float(((y - slope * x) ** 2).sum()) / (n - 2)
+            full_mean = mb + origin_b / unit
             covariance = (
-                (residual * (1 / n + mb * mb / sbb), -residual * mb / sbb),
-                (-residual * mb / sbb, residual / sbb),
+                (residual * (1 / n + full_mean * full_mean / sbb), -residual * full_mean / sbb),
+                (-residual * full_mean / sbb, residual / sbb),
             )
         else:
             covariance = _jackknife(x, y, mb, mc, n, error_ratio)
+            offset = origin_b / unit
+            v00, v01, v11 = covariance[0][0], covariance[0][1], covariance[1][1]
+            covariance = (
+                (v00 - 2 * offset * v01 + offset * offset * v11, v01 - offset * v11),
+                (v01 - offset * v11, v11),
+            )
     if covariance is not None:
-        scale = ((unit * unit, unit), (unit, 1.0))
-        covariance = tuple(  # type: ignore[assignment]
-            tuple(value * factor for value, factor in zip(row, factors, strict=True))
-            for row, factors in zip(covariance, scale, strict=True)
+        covariance = (
+            ((covariance[0][0] * unit) * unit, covariance[0][1] * unit),
+            (covariance[1][0] * unit, covariance[1][1]),
         )
-    return LineFit(method, slope, intercept * unit, covariance, n)
+    return LineFit(method, slope, intercept, covariance, n)
 
 
 def _jackknife(
@@ -175,20 +222,39 @@ def identity_test(
     fit = fit_line(b, c, method=method, error_ratio=error_ratio)
     assert fit.covariance is not None
     stats = require_scipy()
-    d = np.array([fit.intercept, fit.slope - 1.0])
-    v = np.array(fit.covariance)
     df = len(b) - 2
-    if not np.isfinite(v).all():
-        raise Unassessable("the fit's covariance is not finite", n=n)
-    if np.allclose(v, 0, rtol=0, atol=0):
-        exact = bool(np.all(d == 0))
-        statistic, p = (0.0, 1.0) if exact else (math.inf, 0.0)
+    if method == "ols":
+        sb, sc, unit, ob, oc = _coordinates(b, c)
+        residual = (sc - sc.mean()) - fit.slope * (sb - sb.mean())
+        rss = float(residual @ residual)
+        if rss == 0:
+            statistic = 0.0 if np.array_equal(b, c) else math.inf
+        else:
+            with np.errstate(over="ignore", invalid="ignore"):
+                difference = (oc - ob) / unit + sc - sb
+                restricted = float(difference @ difference)
+            statistic = (restricted / rss - 1) * df / 2
+            if math.isnan(statistic) or statistic < 0:
+                raise Unassessable("the identity fit statistic is numerically undefined", n=n)
     else:
-        try:
+        # A common translation/scaling preserves the identity null while
+        # avoiding a poorly conditioned raw intercept/slope covariance.
+        (sb, sc), _ = common_scale(b, c)
+        scaled_fit = fit_line(sb, sc, method=method, error_ratio=error_ratio)
+        d = np.array([scaled_fit.intercept, scaled_fit.slope - 1.0])
+        v = np.array(scaled_fit.covariance)
+        if not np.isfinite(v).all():
+            raise Unassessable("the fit's covariance is not finite", n=n)
+        if np.all(v == 0):
+            statistic = 0.0 if np.all(d == 0) else math.inf
+        else:
+            eigenvalues = np.linalg.eigvalsh(v)
+            if eigenvalues[0] <= eigenvalues[-1] * np.finfo(float).eps * 10:
+                raise Unassessable(
+                    "the fit's covariance is singular or numerically indefinite", n=n
+                )
             statistic = float(d @ np.linalg.solve(v, d)) / 2
-        except np.linalg.LinAlgError:
-            statistic = float(d @ np.linalg.pinv(v) @ d) / 2
-        p = float(stats.f.sf(statistic, 2, df))
+    p = float(stats.f.sf(statistic, 2, df))
     half = float(stats.t.ppf(0.5 + confidence / 2, df))
     se_slope, se_intercept = fit.se_slope or 0.0, fit.se_intercept or 0.0
     low, high = fit.intercept - half * se_intercept, fit.intercept + half * se_intercept

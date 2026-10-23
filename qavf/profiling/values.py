@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from typing import Any
@@ -35,7 +35,16 @@ def validate_margin(margin: float) -> float:
     Raises:
         ValueError: for a negative, infinite or NaN margin.
     """
-    if not (isinstance(margin, int | float) and math.isfinite(margin) and margin >= 0):
+    try:
+        valid = (
+            not isinstance(margin, bool)
+            and isinstance(margin, int | float)
+            and math.isfinite(margin)
+            and margin >= 0
+        )
+    except OverflowError:
+        valid = False
+    if not valid:
         raise ValueError(f"margin must be a finite number >= 0, got {margin!r}")
     return float(margin)
 
@@ -46,7 +55,8 @@ def _widen_numbers(
     """Widen ``[low, high]`` by ``margin`` times its span, keeping integers exact.
 
     A zero span uses the magnitude of the value (at least 1) as the span.
-    Integer bounds are rounded outwards so they never exclude observed data.
+    The margin denotes its decimal spelling, as it does for Decimal bounds and
+    configuration scale factors. Integer bounds are rounded outwards.
     """
     if isinstance(low, Decimal) and isinstance(high, Decimal):
         fraction = Decimal(str(margin))
@@ -65,14 +75,14 @@ def _widen_numbers(
             return low - decimal_widen, high + decimal_widen
     if isinstance(low, int) and isinstance(high, int):
         span = high - low or max(abs(low), abs(high), 1)
-        widen = math.ceil(Fraction(margin) * span)
+        widen = math.ceil(Fraction(str(margin)) * span)
         return low - widen, high + widen
     # A finite final bound need not have a representable Float64 span: opposite
     # extrema near 1e308 are a common counterexample. Work exactly on the stored
     # binary inputs, then round each bound outwards once.
     low_q, high_q = Fraction(float(low)), Fraction(float(high))
     span_q = high_q - low_q or max(abs(low_q), abs(high_q), Fraction(1))
-    widen_q = Fraction(margin) * span_q
+    widen_q = Fraction(str(margin)) * span_q
     result = []
     for exact, direction in ((low_q - widen_q, -math.inf), (high_q + widen_q, math.inf)):
         try:
@@ -94,16 +104,32 @@ def _widen_numbers(
 def _widen_dates(low: date, high: date, margin: float) -> tuple[date, date]:
     """Widen a date or datetime range by ``margin`` times its span (a day when it has none).
 
-    Dates widen by whole days, rounded outwards.
+    Dates widen by whole days and datetimes by microseconds, rounded outwards.
     """
+    zone = None
+    if isinstance(low, datetime) and isinstance(high, datetime) and low.tzinfo is not None:
+        zone = low.tzinfo
+        low, high = low.astimezone(UTC), high.astimezone(UTC)
     span = high - low
     if not span:
         span = timedelta(days=1)
     if isinstance(low, datetime):
-        widen = span * margin
+        ticks = (span.days * 86_400 + span.seconds) * 1_000_000 + span.microseconds
+        widen = timedelta(microseconds=math.ceil(ticks * Fraction(str(margin))))
     else:
-        widen = timedelta(days=math.ceil(span.total_seconds() / 86_400 * margin))
-    return low - widen, high + widen
+        widen = timedelta(days=math.ceil(span.days * Fraction(str(margin))))
+    lower, upper = low - widen, high + widen
+    if zone is not None:
+        assert isinstance(lower, datetime) and isinstance(upper, datetime)
+        return lower.astimezone(zone), upper.astimezone(zone)
+    return lower, upper
+
+
+def _instant(value: Any) -> Any:
+    """Compare zoned datetimes by instant, including repeated DST wall times."""
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(UTC)
+    return value
 
 
 def _plain(value: Any) -> Any:

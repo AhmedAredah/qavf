@@ -7,6 +7,7 @@ import pytest
 
 from qavf import Query, Status, validate
 from qavf.engine.context import DataContext
+from qavf.engine.observation import Observations
 
 
 def run_rule(tmp_path, backend, frames, rule, *, datasets=None, params=None, limit=1):
@@ -22,6 +23,7 @@ def run_rule(tmp_path, backend, frames, rule, *, datasets=None, params=None, lim
             )
     calls = []
     original_sql, original_collect = DataContext.sql, DataContext.collect_many
+    original_observed_collect = Observations.collect
 
     def record(result):
         if any(name.startswith("__qavf_summary_") for name in result.columns):
@@ -34,7 +36,14 @@ def run_rule(tmp_path, backend, frames, rule, *, datasets=None, params=None, lim
     def collect(self, *args, **kwargs):
         return record(original_collect(self, *args, **kwargs))
 
-    with patch.object(DataContext, "sql", sql), patch.object(DataContext, "collect_many", collect):
+    def observed_collect(self, *args, **kwargs):
+        return record(original_observed_collect(self, *args, **kwargs))
+
+    with (
+        patch.object(DataContext, "sql", sql),
+        patch.object(DataContext, "collect_many", collect),
+        patch.object(Observations, "collect", observed_collect),
+    ):
         report = validate(inputs, config={
             "plugins": {"entry_points": False},
             "engine": {

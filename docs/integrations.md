@@ -42,8 +42,10 @@ QAVF_INTEGRATION_MODE=required uv run --no-sync python -m pytest tests/integrati
 ```
 
 For the complete live suite, start disposable PostgreSQL and S3-compatible
-services and supply their endpoints. The CI workflow provisions PostgreSQL and a
-[moto](https://github.com/getmoto/moto) S3 server with synthetic local credentials; it does not need personal cloud accounts.
+services and supply their endpoints. Routine CI does not provision these services;
+the release workflow's integration job uses PostgreSQL, a
+[moto](https://github.com/getmoto/moto) S3 server and the Azurite Blob emulator with
+synthetic local credentials. Personal cloud accounts are not needed.
 
 | Variable | Requirement |
 | --- | --- |

@@ -19,6 +19,10 @@ Polars, pandas and Arrow tables are accepted. A Polars `LazyFrame` is preserved
 during input normalization; the execution plan decides whether a particular
 check can scan it or needs a materialized frame. Lazy input does not promise
 that every statistical or plugin check can run in bounded memory.
+Tabular Arrow C-stream objects are also accepted and consumed once during
+adaptation. Their schema must describe a table; scalar-array streams are rejected.
+Arrow/pandas conversion explicitly preserves chunks where supported instead of
+requesting a contiguous rechunk. Some type conversions still allocate buffers.
 
 Provide `schema=`, `config=`, or an explicit contract on a `Dataset` descriptor.
 QAVF does not derive acceptance limits from the same data being checked. An empty
@@ -42,6 +46,18 @@ options that can omit rows still require explicit acknowledgement. A format can
 be specified for an extensionless file. File paths retain their exact spelling,
 including surrounding whitespace; QAVF never trims a path to choose another file.
 An unsupported suffix requires an explicit format instead of a guessed path.
+For local Parquet, reader selection considers the projected columns while still
+checking the complete file set for schema conflicts. Discarding a timestamp or
+nested column can therefore retain native SQL execution. A requested column
+whose physical name collides case-insensitively still requires the typed reader.
+
+Native file projections require the exact decoded column spelling. CSV/JSON
+readers can disambiguate case-colliding physical names (for example `x` and `X`);
+an unavailable requested spelling is rejected rather than selecting another
+column. Supply a typed Polars/pandas/Arrow frame when those original names must
+remain distinct. Local Parquet selects the typed path automatically for types
+that native SQL cannot preserve, including nested Null and version-available
+UInt128/Float16 columns.
 
 When replacing a configured file, a plain path keeps that file's reader options.
 An explicit `File` supplies a complete new reader specification. In both cases,
@@ -126,7 +142,9 @@ report = validate(
 
 `Query` accepts one SELECT query, including CTEs, and named bound parameters.
 Scalar and list parameters used as file-reader paths resolve relative to the
-configuration directory. SQL paths are normalized as a complete expression or
+configuration directory. Scalar expressions using the same parameter keep its
+original value; only the file-argument occurrence receives the resolved path.
+SQL paths are normalized as a complete expression or
 rejected before execution; QAVF never partially rewrites a path expression.
 It can name a configured database connection; SQL references its tables as
 `connection_name.table_name`. Native query scans remain available to the engine.
@@ -141,6 +159,9 @@ callable; a nonzero explicit retry policy is also required for retries, and only
 transient errors qualify. `retry_safe=True` requires `replayable=True`. Borrowed one-pass Arrow
 readers require an explicit source adapter; they are not silently consumed or
 cached by the facade. Existing `DataSource` objects can also be passed directly.
+Their bound sessions retain source-owned paths, connection definitions and storage
+secrets, including empty mappings; run settings supply execution resource policy.
+Binding snapshots the definitions without mutating the caller's source.
 
 `Query.parameters` and `Loader.kwargs` copy and freeze the mapping's bindings.
 They do not copy nested mutable values or external handles. Those values remain

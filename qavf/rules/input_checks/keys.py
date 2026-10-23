@@ -7,10 +7,13 @@ from typing import ClassVar
 import polars as pl
 
 from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
+from qavf.rules._contracts import contract_error
 from qavf.rules._execution import (
     key_relation,
+    observed_keys,
 )
 from qavf.rules._key_summary import KeySelection
 from qavf.rules._row_summary import row_aliases, summarize_rows
@@ -69,9 +72,29 @@ class DuplicateKeyRule(_SelectsDatasets):
                     # Whole-row equality needs every column. Observe volatile inputs
                     # once so all key contracts describe that same complete snapshot.
                     snapshot = ctx.get(dataset)
-                clean = self._summarized_keys(
-                    ctx, dataset, schema, failures, exempt, snapshot=snapshot
-                )
+                contracts = [
+                    *([schema.primary_key] if schema.primary_key else []),
+                    *schema.unique_keys,
+                ]
+                if (
+                    not schema.unique_rows
+                    and len(contracts) > 1
+                    and not ctx.is_materialized(dataset)
+                    and not ctx.repeatable_scan(dataset)
+                ):
+                    columns = list(dict.fromkeys(c for key in contracts for c in key))
+                    columns = [c for c in columns if c in ctx.schema(dataset)]
+                    if columns:
+                        with ctx.observe(dataset, columns) as observed:
+                            clean = self._summarized_keys(
+                                ctx, dataset, schema, failures, exempt, observation=observed
+                            )
+                    else:
+                        clean = self._summarized_keys(ctx, dataset, schema, failures, exempt)
+                else:
+                    clean = self._summarized_keys(
+                        ctx, dataset, schema, failures, exempt, snapshot=snapshot
+                    )
                 del snapshot
                 if schema.unique_rows:
                     clean &= self._unique_rows(ctx, dataset, failures)
@@ -102,6 +125,7 @@ class DuplicateKeyRule(_SelectsDatasets):
         exempt: dict[str, int],
         *,
         snapshot: pl.DataFrame | None = None,
+        observation: Observation | None = None,
     ) -> bool:
         """Check key contracts using source-side frequencies, never unrelated columns."""
         clean = True
@@ -115,73 +139,93 @@ class DuplicateKeyRule(_SelectsDatasets):
                 clean = False
                 continue
 
-            frequency = fresh_internal("occurrences", actual.columns)
-            selected = snapshot
-            if selected is None and ctx.is_materialized(dataset):
-                # In particular, keep existing IPC spills scoped and projected;
-                # ctx.scan may otherwise prefer a caller's original lazy plan.
-                selected = ctx.project(dataset, columns)
-            relation = key_relation(ctx, dataset, columns, frequency, _snapshot=selected)
-            missing, _ = _key_missing(pl.DataFrame(schema=relation.schema), columns, None)
-            missing_sql = " OR ".join(f"{quote_identifier(c)} IS NULL" for c in columns)
-            summaries = relation.summarize_many(
-                {
-                    "all": KeySelection(),
-                    "nulls": KeySelection(
-                        missing_sql, missing, ctx.evidence_limit if primary else 0
-                    ),
-                    "valid": KeySelection(f"NOT ({missing_sql})", ~missing),
-                    "duplicates": KeySelection(
-                        f"NOT ({missing_sql}) AND {quote_identifier(frequency)} > 1",
-                        ~missing & (pl.col(frequency) > 1),
-                        ctx.evidence_limit,
-                    ),
-                }
-            )
-            all_keys, nulls = summaries["all"], summaries["nulls"]
-            valid_keys, dupes = summaries["valid"], summaries["duplicates"]
-            null_count, rows = nulls.rows, all_keys.rows
-            label = f"{dataset} ({', '.join(columns)})"
-            if primary and null_count:
+            try:
+                frequency = fresh_internal("occurrences", actual.columns)
+                selected = snapshot
+                if selected is None and ctx.is_materialized(dataset):
+                    # In particular, keep existing IPC spills scoped and projected;
+                    # ctx.scan may otherwise prefer a caller's original lazy plan.
+                    selected = ctx.project(dataset, columns)
+                relation = (
+                    observed_keys(
+                        ctx,
+                        dataset,
+                        observation.scan(),
+                        columns,
+                        frequency,
+                        collector=observation.collect,
+                    )
+                    if observation is not None
+                    else key_relation(ctx, dataset, columns, frequency, _snapshot=selected)
+                )
+                missing, _ = _key_missing(pl.DataFrame(schema=relation.schema), columns, None)
+                missing_sql = " OR ".join(f"{quote_identifier(c)} IS NULL" for c in columns)
+                summaries = relation.summarize_many(
+                    {
+                        "all": KeySelection(),
+                        "nulls": KeySelection(
+                            missing_sql, missing, ctx.evidence_limit if primary else 0
+                        ),
+                        "valid": KeySelection(f"NOT ({missing_sql})", ~missing),
+                        "duplicates": KeySelection(
+                            f"NOT ({missing_sql}) AND {quote_identifier(frequency)} > 1",
+                            ~missing & (pl.col(frequency) > 1),
+                            ctx.evidence_limit,
+                        ),
+                    }
+                )
+                all_keys, nulls = summaries["all"], summaries["nulls"]
+                valid_keys, dupes = summaries["valid"], summaries["duplicates"]
+                null_count, rows = nulls.rows, all_keys.rows
+                label = f"{dataset} ({', '.join(columns)})"
+                if primary and null_count:
+                    clean = False
+                    failures.append(
+                        Finding.fail(
+                            f"{plural(null_count, 'row')} of {rows:,} in {label} "
+                            "have a null key value.",
+                            check=f"{dataset}: null keys",
+                            affected=temporal_evidence(
+                                present(nulls.sample, {frequency: "occurrences"})
+                            ),
+                            affected_count=null_count,
+                            total_records=rows,
+                            unit="rows",
+                            datasets=(dataset,),
+                        )
+                    )
+                elif null_count:
+                    exempt[label] = null_count
+                if not dupes.keys:
+                    continue
                 clean = False
+                involved = dupes.rows
                 failures.append(
                     Finding.fail(
-                        f"{plural(null_count, 'row')} of {rows:,} in {label} "
-                        "have a null key value.",
-                        check=f"{dataset}: null keys",
+                        f"{plural(dupes.keys, 'duplicated key')} of {valid_keys.keys:,} "
+                        f"in {label}, "
+                        f"shared by {plural(involved, 'row')} of {rows:,}.",
+                        check=dataset if primary else f"{dataset}: unique ({', '.join(columns)})",
                         affected=temporal_evidence(
-                            present(nulls.sample, {frequency: "occurrences"})
+                            present(dupes.sample, {frequency: "occurrences"})
                         ),
-                        affected_count=null_count,
-                        total_records=rows,
-                        unit="rows",
+                        affected_count=dupes.keys,
+                        total_records=valid_keys.keys,
+                        unit="keys",
+                        affected_rows=involved,
+                        metrics={
+                            "duplicated_keys": dupes.keys,
+                            "rows_involved": involved,
+                            "surplus_rows": involved - dupes.keys,
+                        },
                         datasets=(dataset,),
                     )
                 )
-            elif null_count:
-                exempt[label] = null_count
-            if not dupes.keys:
-                continue
-            clean = False
-            involved = dupes.rows
-            failures.append(
-                Finding.fail(
-                    f"{plural(dupes.keys, 'duplicated key')} of {valid_keys.keys:,} in {label}, "
-                    f"shared by {plural(involved, 'row')} of {rows:,}.",
-                    check=dataset if primary else f"{dataset}: unique ({', '.join(columns)})",
-                    affected=temporal_evidence(present(dupes.sample, {frequency: "occurrences"})),
-                    affected_count=dupes.keys,
-                    total_records=valid_keys.keys,
-                    unit="keys",
-                    affected_rows=involved,
-                    metrics={
-                        "duplicated_keys": dupes.keys,
-                        "rows_involved": involved,
-                        "surplus_rows": involved - dupes.keys,
-                    },
-                    datasets=(dataset,),
-                )
-            )
+            except Exception as exc:
+                clean = False
+                label = dataset if primary else f"{dataset}: unique ({', '.join(columns)})"
+                failures.append(contract_error(label, exc, (dataset,)))
+
         return clean
 
     @staticmethod

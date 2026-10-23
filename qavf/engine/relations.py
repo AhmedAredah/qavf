@@ -7,11 +7,12 @@ import duckdb
 from qavf.engine.connections import Connection
 from qavf.engine.projection import repeatable_file_source
 from qavf.sources.base import DataSource, ScanPlan
+from qavf.sources.native import OwnedRelation
 
 
 def bind_scan(
     connection: Connection, source: DataSource, plan: ScanPlan
-) -> duckdb.DuckDBPyRelation:
+) -> duckdb.DuckDBPyRelation | OwnedRelation:
     """Bind a source inside its caller-owned identity and connection operation.
 
     DuckDB can materialize parameterized relations before downstream projection.

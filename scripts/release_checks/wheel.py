@@ -105,7 +105,7 @@ def installed_checks(root: Path, output_dir: Path, check_id: str, mode: str) -> 
                         str(python),
                         "-c",
                         str(root / "tests/dependency-floors.txt"),
-                        str(wheel) + "[stats,pandas]",
+                        str(wheel) + "[stats,pandas,spatial]",
                         *FLOOR_TOOLS,
                     ],
                     root,

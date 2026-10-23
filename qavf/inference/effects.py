@@ -20,11 +20,13 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 import numpy.typing as npt
 
 from qavf._observations import float_observations
+from qavf.inference.intervals import linear_quantiles
 from qavf.stats import center_scale_observations
 
 
@@ -89,16 +91,60 @@ def rank_biserial(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | 
 def cramers_v(table: npt.ArrayLike) -> float | None:
     """Cramer's V of a contingency table: ``sqrt(chi2 / (n * (min(r, k) - 1)))``."""
     counts = np.asarray(table, dtype=float)
-    if counts.ndim != 2 or (counts < 0).any():
+    if counts.ndim != 2 or (counts < 0).any() or not np.isfinite(counts).all():
         raise ValueError("a contingency table is a 2-D array of non-negative counts")
-    counts = counts[counts.sum(axis=1) > 0][:, counts.sum(axis=0) > 0]
-    n = counts.sum()
-    smaller = min(counts.shape) - 1
-    if n == 0 or smaller < 1:
+    if not counts.size or not counts.max() > 0:
         return None
-    expected = np.outer(counts.sum(axis=1), counts.sum(axis=0)) / n
-    chi2 = float(((counts - expected) ** 2 / expected).sum())
-    return math.sqrt(chi2 / (n * smaller))
+    original = counts[np.any(counts > 0, axis=1)][:, np.any(counts > 0, axis=0)]
+    smaller = min(original.shape) - 1
+    if smaller < 1:
+        return None
+    counts = original / original.max()
+    shares = counts / counts.sum()
+    rows, columns = shares.sum(axis=1), shares.sum(axis=0)
+    expected = rows[:, None] * columns[None, :]
+    difference = shares - expected
+    if (
+        np.any((original > 0) & (shares == 0))
+        or np.any(expected == 0)
+        or np.max(np.abs(difference)) <= 16 * np.finfo(float).eps * shares.max()
+    ):
+        # Rare categories can carry perfect association even when a common
+        # float scale erases them. Near independence, subtracting rounded
+        # margins can also erase a small but representable effect.
+        # Keep only the margins, not a second matrix of Python Fraction cells.
+        row_totals = [Fraction(0)] * original.shape[0]
+        column_totals = [Fraction(0)] * original.shape[1]
+        for i, row in enumerate(original):
+            for j, value in enumerate(row):
+                exact = Fraction(float(value))
+                row_totals[i] += exact
+                column_totals[j] += exact
+        total = sum(row_totals, Fraction(0))
+        smaller = min(sum(value > 0 for value in row_totals),
+                      sum(value > 0 for value in column_totals)) - 1
+        if smaller < 1:
+            return None
+        statistic = sum((
+            (Fraction(float(value)) * total - row_total * column_total) ** 2
+            / (row_total * column_total * total * total)
+            for row, row_total in zip(original, row_totals, strict=True) if row_total
+            for value, column_total in zip(row, column_totals, strict=True) if column_total
+        ), Fraction(0))
+        squared = statistic / smaller
+        if not squared:
+            return 0.0
+        # Convert after bringing the squared effect near one: its square can
+        # underflow Float64 while the effect itself remains representable.
+        exponent = squared.numerator.bit_length() - squared.denominator.bit_length()
+        even = 2 * (exponent // 2)
+        return math.ldexp(math.sqrt(float(squared * Fraction(2) ** -even)), even // 2)
+    # Divide by the square roots separately: the expected cell probability can
+    # underflow although its square root and the standardized residual do not.
+    residual = difference / np.sqrt(rows[:, None]) / np.sqrt(columns[None, :])
+    magnitude = float(np.max(np.abs(residual)))
+    norm = math.sqrt(float(np.sum((residual / magnitude) ** 2))) * magnitude
+    return min(1.0, norm / math.sqrt(smaller))
 
 
 def rate_ratio(
@@ -107,12 +153,28 @@ def rate_ratio(
     candidate_count: float,
     candidate_exposure: float,
 ) -> float | None:
-    """``(c / exposure_c) / (b / exposure_b)``; ``None`` for a zero baseline rate."""
-    if baseline_exposure <= 0 or candidate_exposure <= 0:
-        raise ValueError("exposures must be positive")
+    """``(c / exposure_c) / (b / exposure_b)``, without intermediate overflow.
+
+    ``None`` denotes a zero baseline rate or an unrepresentably large ratio.
+    """
+    if not all(math.isfinite(x) and x > 0 for x in (baseline_exposure, candidate_exposure)):
+        raise ValueError("exposures must be positive and finite")
+    if not all(math.isfinite(x) and x >= 0 for x in (baseline_count, candidate_count)):
+        raise ValueError("counts must be finite and non-negative")
     if baseline_count == 0:
         return None
-    return (candidate_count / candidate_exposure) / (baseline_count / baseline_exposure)
+    if candidate_count == 0:
+        return 0.0
+    # Work with binary mantissas: all products remain in [1/4, 1), even when
+    # either individual rate would overflow or underflow as a float.
+    cm, ce = math.frexp(candidate_count)
+    bm, be = math.frexp(baseline_count)
+    ebm, ebe = math.frexp(baseline_exposure)
+    ecm, ece = math.frexp(candidate_exposure)
+    try:
+        return math.ldexp((cm * ebm) / (bm * ecm), ce + ebe - be - ece)
+    except OverflowError:
+        return None
 
 
 def odds_ratio(table: npt.ArrayLike) -> float | None:
@@ -122,9 +184,13 @@ def odds_ratio(table: npt.ArrayLike) -> float | None:
     a zero denominator leaves it undefined or infinite.
     """
     (a, b), (c, d) = np.asarray(table, dtype=float).reshape(2, 2)
-    if b * c == 0:
+    if not all(math.isfinite(v) and v >= 0 for v in (a, b, c, d)):
+        raise ValueError("odds ratio needs finite non-negative counts")
+    if b == 0 or c == 0:
         return None
-    return float(a * d / (b * c))
+    if a == 0 or d == 0:
+        return 0.0
+    return rate_ratio(float(b), float(a), float(d), float(c))
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,14 +257,24 @@ def mape(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | None:
     b, c = _paired(baseline, candidate)
     if (b == 0).any():
         return None
-    return float(np.mean(np.abs((c - b) / b))) * 100
+    exponent = np.frexp(np.maximum(np.abs(b), np.abs(c)))[1]
+    sb, sc = np.ldexp(b, -exponent), np.ldexp(c, -exponent)
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        terms = np.abs((sc - sb) / sb)
+        largest = float(terms.max())
+        if not math.isfinite(largest):
+            return None
+        result = float(np.mean(terms / largest)) * largest * 100 if largest else 0.0
+    return result if math.isfinite(result) else None
 
 
 def smape(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Symmetric MAPE ``mean(2 |c - b| / (|b| + |c|)) * 100``; a pair of zeros counts 0."""
     b, c = _paired(baseline, candidate)
-    scale = np.abs(b) + np.abs(c)
-    terms = np.divide(2 * np.abs(c - b), scale, out=np.zeros(len(b)), where=scale > 0)
+    exponent = np.frexp(np.maximum(np.abs(b), np.abs(c)))[1]
+    sb, sc = np.ldexp(b, -exponent), np.ldexp(c, -exponent)
+    scale = np.abs(sb) + np.abs(sc)
+    terms = np.divide(2 * np.abs(sc - sb), scale, out=np.zeros(len(b)), where=scale > 0)
     return float(terms.mean()) * 100
 
 
@@ -242,16 +318,20 @@ def jensen_shannon(baseline_counts: npt.ArrayLike, candidate_counts: npt.ArrayLi
     SciPy's ``jensenshannon`` distance is its square root.
     """
     b, c = (np.asarray(counts, dtype=float) for counts in (baseline_counts, candidate_counts))
-    if b.shape != c.shape or b.ndim != 1 or (b < 0).any() or (c < 0).any():
+    if (
+        b.shape != c.shape or b.ndim != 1 or (b < 0).any() or (c < 0).any()
+        or not np.isfinite(b).all() or not np.isfinite(c).all()
+    ):
         raise ValueError("Jensen-Shannon needs two count vectors of the same length")
-    if b.sum() <= 0 or c.sum() <= 0:
+    if not len(b) or not b.max() > 0 or not c.max() > 0:
         raise ValueError("Jensen-Shannon needs a nonempty sample on each side")
+    b, c = b / b.max(), c / c.max()
     p, q = b / b.sum(), c / c.sum()
-    m = (p + q) / 2
+    combined = p + q
 
     def kl(x: np.ndarray) -> float:
         kept = x > 0
-        return float(np.sum(x[kept] * np.log2(x[kept] / m[kept])))
+        return float(np.sum(x[kept] * np.log2(2 * x[kept] / combined[kept])))
 
     return min(1.0, max(0.0, (kl(p) + kl(q)) / 2))
 
@@ -295,9 +375,12 @@ def quantile_deltas(
     b, c = _pair(baseline, candidate)
     if not len(b) or not len(c):
         raise ValueError("quantiles need a nonempty sample on each side")
-    found = []
-    for p in probabilities:
-        if not 0 <= p <= 1:
-            raise ValueError("quantile probabilities must lie in [0, 1]")
-        found.append((float(p), float(np.quantile(b, p)), float(np.quantile(c, p))))
-    return found
+    probabilities = list(probabilities)
+    if any(not 0 <= p <= 1 for p in probabilities):
+        raise ValueError("quantile probabilities must lie in [0, 1]")
+    if not probabilities:
+        return []
+    before, after = linear_quantiles(b, probabilities), linear_quantiles(c, probabilities)
+    return [
+        (float(p), float(x), float(y)) for p, x, y in zip(probabilities, before, after, strict=True)
+    ]

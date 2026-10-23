@@ -1,12 +1,18 @@
 """Point-to-zone assignment: each point gets the id of the zone polygon it falls in.
 
 The one point-in-polygon path of QAVF: the ``assign_zones`` comparison step and
-GEO-001's ``within`` both call :func:`assign`. A plan's distinct points (with
-their row counts) are collected natively, transformed to the layer's CRS and
-joined to the zones in DuckDB with a bounding-box prefilter (a range join on
-each zone's extent) before the exact ``ST_Intersects``/``ST_Contains`` test.
-The zone of each point is then joined back to the plan lazily: no row reaches
-Python.
+GEO-001's ``within`` both call :func:`assign`. Admitted distinct points (with
+their row counts) are collected once, then transformed and matched in batches.
+DuckDB resolves boundaries and overlaps before selected mappings reach Polars;
+raw candidate matches are never exported. The mapping is joined back lazily
+and remains usable after the connection closes.
+
+Limits bound distinct-point, candidate-pair and selected-mapping row counts,
+not bytes or process RSS. Retained memory still scales with the admitted point
+keys and accepted mapping, including variable-width WKB and zone ids. Native
+grouping, joins, geometry evaluation and their spill storage follow the native
+connection's resource policy; the final expanded dataset is not materialized
+here.
 
 Policies (:class:`AssignmentPolicy`), each deterministic:
 
@@ -29,7 +35,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, cast
+from uuid import uuid4
 
 import duckdb
 import polars as pl
@@ -37,12 +44,26 @@ from pydantic import Field
 
 from qavf.engine.registry import RuleParams
 from qavf.rules.helpers import fresh_internal, plural
+from qavf.sources.sql import quote_identifier
 from qavf.spatial.crs import transform_sql
 from qavf.spatial.extension import fetch, register
 from qavf.spatial.layers import LoadedLayer
 
 
-class AssignmentPolicy(RuleParams):
+class AssignmentLimits(RuleParams):
+    """Finite row/work admission for point assignment, rather than an RSS ceiling."""
+
+    batch_size: int = Field(default=16_384, ge=1, strict=True)
+    """Maximum distinct points transformed together and selected rows per Arrow batch."""
+    max_points: int = Field(default=1_000_000, ge=1, strict=True)
+    """Maximum distinct point keys retained; excess points refuse the whole assignment."""
+    max_matches: int = Field(default=2_000_000, ge=1, strict=True)
+    """Maximum selected point-zone mappings retained, including ``overlap: all`` expansion."""
+    max_work: int = Field(default=20_000_000, ge=1, strict=True)
+    """Maximum bounding-box candidate pairs admitted across batches, before exact tests."""
+
+
+class AssignmentPolicy(AssignmentLimits):
     """How points on boundaries, in overlapping zones or in no zone are treated."""
 
     predicate: Literal["intersects", "contains"] = "intersects"
@@ -97,34 +118,46 @@ def coordinate_keys(x: str, y: str) -> tuple[pl.Expr, pl.Expr]:
     )
 
 
-def _located(con: Any, distinct: pl.DataFrame, geometry: bool, crs: str, target: str) -> None:
-    """Bind the distinct points, transformed to ``target``, as ``qavf_located``."""
-    register(con, "qavf_points", distinct)
+def _located(
+    con: Any,
+    distinct: pl.DataFrame,
+    geometry: bool,
+    crs: str,
+    target: str,
+    *,
+    points: str,
+    located: str,
+) -> None:
+    """Bind one point batch in operation-local relations, transformed to ``target``."""
+    register(con, points, distinct)
+    source = quote_identifier(points)
     try:
         if geometry:
             point = "ST_GeomFromWKB(key)"
             usable = "key IS NOT NULL"
             kinds = fetch(
                 con,
-                f"SELECT count(*) AS n FROM qavf_points WHERE {usable} AND "
+                f"SELECT count(*) AS n FROM {source} WHERE {usable} AND "
                 f"CAST(ST_GeometryType({point}) AS VARCHAR) <> 'POINT'",
             )["n"][0]
             if kinds:
-                raise ValueError(f"{int(kinds):,} value(s) of the point column are not points")
+                raise ValueError(
+                    f"at least {int(kinds):,} value(s) of the point column are not points"
+                )
         else:
             point = "ST_Point(key_x, key_y)"
             usable = (
                 "key_x IS NOT NULL AND key_y IS NOT NULL AND isfinite(key_x) AND isfinite(key_y)"
             )
         con.execute(
-            "CREATE OR REPLACE TEMP TABLE qavf_located AS SELECT pid, pt, ST_X(pt) AS px, "
+            f"CREATE TEMP TABLE {located} AS SELECT pid, pt, ST_X(pt) AS px, "
             f"ST_Y(pt) AS py FROM (SELECT pid, {transform_sql(point, crs, target)} AS pt "
-            f"FROM qavf_points WHERE {usable})"
+            f"FROM {source} WHERE {usable})"
         )
     except duckdb.Error as exc:
         raise ValueError(f"points cannot be placed: {str(exc).splitlines()[0]}") from None
     finally:
-        con.unregister("qavf_points")
+        con.unregister(points)
 
 
 def matches(
@@ -139,41 +172,126 @@ def matches(
     """Each distinct point's chosen zone(s): ``pid``, ``zone_order``, ``tie``, ``overlap``.
 
     ``distinct`` has a ``pid`` and either ``key_x``/``key_y`` (coordinates in
-    ``crs``) or ``key`` (WKB points). Points in no zone have no row.
+    ``crs``) or ``key`` (WKB points). Point ids must be unique non-null Int64-compatible
+    integers. Points in no zone have no row.
 
     Raises:
         ValueError: for points inside overlapping zones under ``overlap: error``,
             non-point geometries, or coordinates that cannot be transformed.
     """
-    _located(con, distinct, geometry, crs, layer.crs)
-    zones = layer.table
+    if distinct.height > policy.max_points:
+        raise ValueError(f"point assignment exceeds max_points ({policy.max_points:,})")
+    if (
+        "pid" not in distinct.schema
+        or not distinct.schema["pid"].is_integer()
+        or distinct["pid"].null_count()
+        or distinct["pid"].n_unique() != distinct.height
+    ):
+        raise ValueError("point ids must be unique non-null integers")
+    try:
+        distinct = distinct.with_columns(pl.col("pid").cast(pl.Int64, strict=True))
+    except pl.exceptions.PolarsError:
+        raise ValueError("point ids must fit Int64") from None
+    namespace = f"qavf_assignment_{uuid4().hex}"
+    points = f"{namespace}_points"
+    located = quote_identifier(f"{namespace}_located")
+    tally = quote_identifier(f"{namespace}_tally")
+    zones = quote_identifier(layer.table)
+    bbox = (
+        f"FROM {located} l JOIN {zones} z "
+        "ON l.px >= z.xmin AND l.px <= z.xmax AND l.py >= z.ymin AND l.py <= z.ymax"
+    )
     test = "ST_Contains" if policy.predicate == "contains" else "ST_Intersects"
-    found = fetch(
-        con,
-        f"SELECT l.pid, z.zone_order, ST_Contains(z.geom, l.pt) AS inside "
-        f'FROM qavf_located l JOIN "{zones}" z ON l.px >= z.xmin AND l.px <= z.xmax '
-        f"AND l.py >= z.ymin AND l.py <= z.ymax WHERE {test}(z.geom, l.pt)",
-    ).with_columns(pl.col("pid").cast(pl.Int64), pl.col("zone_order").cast(pl.Int64))
-    tally = found.group_by("pid").agg(
-        pl.len().alias("n"), pl.col("inside").cast(pl.Int64).sum().alias("interior")
-    )
-    found = found.join(tally, on="pid").with_columns(
-        ((pl.col("n") > 1) & (pl.col("interior") <= 1)).alias("tie"),
-        (pl.col("interior") > 1).alias("overlap"),
-    )
-    overlapping = found.filter(pl.col("overlap"))["pid"].n_unique()
+    inside = "TRUE" if policy.predicate == "contains" else "ST_Contains(z.geom, l.pt)"
+    exact = f"{bbox} WHERE {test}(z.geom, l.pt)"
+    pieces: list[pl.DataFrame] = []
+    work = selected = overlapping = 0
+    for batch in distinct.iter_slices(policy.batch_size):
+        has_located = has_tally = False
+        try:
+            _located(con, batch, geometry, crs, layer.crs, points=points, located=located)
+            has_located = True
+            # Stop the range join after one excess pair; do not enumerate a rejected
+            # Cartesian expansion merely to report its complete size.
+            candidates = int(
+                con.execute(
+                    f"SELECT count(*) FROM (SELECT 1 {bbox} LIMIT {policy.max_work - work + 1})"
+                ).fetchone()[0]
+            )
+            work += candidates
+            if work > policy.max_work:
+                raise ValueError(f"point assignment exceeds max_work ({policy.max_work:,})")
+            con.execute(
+                f"CREATE TEMP TABLE {tally} AS "
+                "SELECT pid, count(*)::BIGINT AS n, "
+                "sum(CASE WHEN inside THEN 1 ELSE 0 END)::BIGINT AS interior, "
+                "min(zone_order)::BIGINT AS first_any, "
+                "min(zone_order) FILTER (WHERE inside)::BIGINT AS first_interior "
+                f"FROM (SELECT l.pid, z.zone_order, {inside} AS inside {exact}) "
+                "GROUP BY pid"
+            )
+            has_tally = True
+            counts = con.execute(
+                "SELECT count(*) FILTER (WHERE interior > 1), "
+                + (
+                    "coalesce(sum(CASE WHEN interior > 1 THEN interior ELSE 1 END), 0)"
+                    if policy.overlap == "all"
+                    else "count(*)"
+                )
+                + f" FROM {tally}"
+            ).fetchone()
+            overlapping += int(counts[0])
+            if policy.overlap == "error" and overlapping:
+                # Preserve the total distinct-overlap diagnostic without exporting
+                # a partial mapping. Later batches can still refuse invalid inputs.
+                pieces.clear()
+                continue
+            selected += int(counts[1])
+            if selected > policy.max_matches:
+                raise ValueError(f"point assignment exceeds max_matches ({policy.max_matches:,})")
+            sql = (
+                "SELECT pid::BIGINT AS pid, coalesce(first_interior, first_any) AS zone_order, "
+                "(n > 1 AND interior <= 1) AS tie, (interior > 1) AS overlap "
+                f"FROM {tally}"
+            )
+            if policy.overlap == "all":
+                sql += (
+                    " WHERE interior <= 1 UNION ALL "
+                    "SELECT l.pid::BIGINT, z.zone_order::BIGINT, FALSE AS tie, TRUE AS overlap "
+                    f"{bbox} JOIN {tally} t ON t.pid = l.pid AND t.interior > 1 "
+                    "WHERE ST_Contains(z.geom, l.pt)"
+                )
+            query = con.execute(sql + " ORDER BY pid, zone_order")
+            reader = (
+                query.to_arrow_reader(policy.batch_size)
+                if hasattr(query, "to_arrow_reader")
+                else query.fetch_record_batch(policy.batch_size)
+            )
+            try:
+                pieces.extend(cast(pl.DataFrame, pl.from_arrow(chunk)) for chunk in reader)
+            finally:
+                reader.close()
+        finally:
+            if has_tally:
+                con.execute(f"DROP TABLE {tally}")
+            if has_located:
+                con.execute(f"DROP TABLE {located}")
     if policy.overlap == "error" and overlapping:
         raise ValueError(
             f"{plural(overlapping, 'distinct point')} lie inside several zones (overlapping "
             "zones); set overlap: first (lowest zone id) or all (one row per zone)"
         )
-    # Interior zones win over boundary contacts; among equals the lowest zone id.
-    chosen = found.filter((pl.col("interior") == 0) | pl.col("inside")).sort(["pid", "zone_order"])
-    single = chosen.filter(~pl.col("overlap")) if policy.overlap == "all" else chosen
-    picked = single.unique(subset="pid", keep="first", maintain_order=True)
-    if policy.overlap == "all":
-        picked = pl.concat([picked, chosen.filter(pl.col("overlap"))]).sort(["pid", "zone_order"])
-    return picked.select("pid", "zone_order", "tie", "overlap")
+    if not pieces:
+        return pl.DataFrame(
+            schema={
+                "pid": pl.Int64,
+                "zone_order": pl.Int64,
+                "tie": pl.Boolean,
+                "overlap": pl.Boolean,
+            }
+        )
+    result = pl.concat(pieces, rechunk=False)
+    return result if distinct["pid"].is_sorted() else result.sort(["pid", "zone_order"])
 
 
 def assign(
@@ -191,8 +309,11 @@ def assign(
 ) -> Assigned:
     """Add ``column``, the zone id of each row's point (``x``/``y`` or WKB ``geometry``).
 
-    ``collect`` evaluates a plan over ``plan``'s source (natively). Unassigned
-    rows keep a null zone; :meth:`Assigned.check` applies ``max_unassigned``.
+    ``collect`` evaluates the distinct-point aggregation once, exporting at most
+    ``max_points + 1`` keys. A limit breach refuses the entire assignment, never
+    truncates it. Unassigned rows keep a null zone; :meth:`Assigned.check` applies
+    ``max_unassigned``. The retained mapping owns its buffers independently of
+    the spatial connection.
 
     Raises:
         ValueError: as :func:`matches`, or for a ``column`` the plan already has.
@@ -211,11 +332,13 @@ def assign(
         keys = {names["x"]: kx, names["y"]: ky}
         roles = {names["x"]: "key_x", names["y"]: "key_y"}
     distinct = collect(
-        plan.group_by([key.alias(name) for name, key in keys.items()]).agg(
-            pl.len().cast(pl.Int64).alias(names["rows"])
-        )
-    ).with_row_index("pid")
-    distinct = distinct.with_columns(pl.col("pid").cast(pl.Int64))
+        plan.group_by([key.alias(name) for name, key in keys.items()])
+        .agg(pl.len().cast(pl.Int64).alias(names["rows"]))
+        .limit(policy.max_points + 1)
+    )
+    if distinct.height > policy.max_points:
+        raise ValueError(f"point assignment exceeds max_points ({policy.max_points:,})")
+    distinct = distinct.with_columns(pl.int_range(0, pl.len(), dtype=pl.Int64).alias("pid"))
     points = distinct.select("pid", *(pl.col(k).alias(r) for k, r in roles.items()))
     chosen = matches(con, points, layer, policy, crs=crs, geometry=geometry is not None)
     ids = pl.DataFrame(
@@ -224,13 +347,20 @@ def assign(
             column: layer.ids,
         }
     )
-    mapping = chosen.join(ids, on="zone_order").join(distinct, on="pid")
     rows = int(distinct[names["rows"]].sum())
-    flags = mapping.unique(subset="pid")
+    flags = (
+        chosen.unique(subset="pid")
+        .select("pid", "tie", "overlap")
+        .join(distinct.select("pid", names["rows"]), on="pid")
+    )
     assigned = int(flags[names["rows"]].sum())
     ties = int(flags.filter(pl.col("tie"))[names["rows"]].sum())
     overlaps = int(flags.filter(pl.col("overlap"))[names["rows"]].sum())
-    joined = plan.with_columns(**keys).join(
-        mapping.select(*keys, column).lazy(), on=list(keys), how="left"
+    mapping = (
+        chosen.select("pid", "zone_order")
+        .join(ids, on="zone_order")
+        .join(distinct.select("pid", *keys), on="pid")
+        .select(*keys, column)
     )
+    joined = plan.with_columns(**keys).join(mapping.lazy(), on=list(keys), how="left")
     return Assigned(joined.drop(list(keys)), rows, rows - assigned, ties, overlaps)

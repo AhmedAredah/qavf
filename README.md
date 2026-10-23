@@ -41,7 +41,8 @@ docker run --rm -v "$PWD:/work" ghcr.io/ahmedaredah/qavf run -c qavf.yaml
 ```
 
 Python 3.12 or newer on Linux, macOS or Windows. The `stats` extra adds SciPy-based
-tests; `pandas` adds pandas adapters; `all` installs both. In GitHub Actions, use
+tests; `pandas` adds pandas adapters; `spatial` adds indexed neighbour searches and
+authoritative CRS resolution; `all` installs all three. In GitHub Actions, use
 [`AhmedAredah/qavf-action`](https://github.com/AhmedAredah/qavf-action).
 
 ## Quick start
@@ -127,10 +128,13 @@ report = validate({
     "sites": Dataset("sites.parquet", schema={"primary_key": ["site_id"]}),
 })
 
-# Run in a supervised worker process with OS-enforced limits.
-report = validate("readings.parquet", config="qavf.yaml",
-                  resources=ResourceLimits(wall_time=60, address_space="4GiB"))
+# Validate the configured inputs in a supervised worker with a wall-time deadline.
+report = validate(config="qavf.yaml", resources=ResourceLimits(wall_time=60))
 ```
+
+Add `address_space="4GiB"` to limit each process's virtual address space on Linux
+or committed memory on Windows; macOS rejects this control. See
+[execution limits](docs/execution_limits.md) for the supported controls and their scopes.
 
 ## How a run is judged
 
@@ -139,9 +143,13 @@ Each result is **PASS**, **FAIL**, **SKIPPED** (nothing configured) or **ERROR**
 
 | Verdict | When | Exit code |
 |---|---|---|
-| passed | Every configured check was assessed and no failure meets `engine.fail_on` | 0 |
+| passed | At least one check was assessed, none reports ERROR, and no failure meets `engine.fail_on` | 0 |
 | failed | A failure at or above `engine.fail_on` (default `ERROR`) | 1 |
-| incomplete | Any configured check could not be assessed | 1 |
+| incomplete | No qualifying failure, but a check could not be assessed or nothing was assessed | 1 by default |
+
+A qualifying failure takes precedence over incompleteness. Setting
+`engine.fail_on_incomplete: false` allows exit code `0` for an incomplete report;
+its verdict remains `incomplete`.
 
 Use `engine.require` to name checks that must be assessed for a run to pass.
 

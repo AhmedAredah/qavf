@@ -86,6 +86,7 @@ def _native_summary(
         )
     )
     selected = ", ".join(quote_identifier(name) for name in relation.schema)
+    ordering = ", ".join(f"{quote_identifier(name)} NULLS FIRST" for name in relation.schema)
     reducers: list[str] = []
     for (_, selection), names in zip(batch, aliases, strict=True):
         keys, rows, sample = map(quote_identifier, names)
@@ -95,7 +96,7 @@ def _native_summary(
                 f"count(*) FILTER (WHERE {condition})::UBIGINT AS {keys}",
                 f"coalesce(sum({frequency}) FILTER (WHERE {condition}), 0)::UBIGINT AS {rows}",
                 f"(SELECT list(s) FROM (SELECT {selected} FROM {table} "
-                f"WHERE {condition} LIMIT {selection.limit}) s) AS {sample}",
+                f"WHERE {condition} ORDER BY {ordering} LIMIT {selection.limit}) s) AS {sample}",
             )
         )
     # A marked padding row preserves scalar results for provably empty relations

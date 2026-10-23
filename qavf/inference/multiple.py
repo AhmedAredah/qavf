@@ -16,6 +16,7 @@ conservative) when some members could not be assessed.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import numpy as np
@@ -24,6 +25,27 @@ import numpy.typing as npt
 from qavf.inference.results import Correction, TestResult
 
 CORRECTIONS: tuple[Correction, ...] = ("none", "bonferroni", "holm", "bh", "by")
+
+
+def _harmonic(n: int) -> float:
+    """H_n without an n-element array or an optional SciPy dependency.
+
+    Above 128, Euler--Maclaurin through n^-8 has error below 1e-22;
+    round-off in binary64 dominates. Small families use compensated summation.
+    """
+    if n <= 128:
+        return math.fsum(1.0 / k for k in range(1, n + 1))
+    inverse = 1.0 / n
+    square = inverse * inverse
+    return (
+        math.log(n)
+        + 0.5772156649015329
+        + inverse / 2
+        - square / 12
+        + square**2 / 120
+        - square**3 / 252
+        + square**4 / 240
+    )
 
 
 def adjust(
@@ -41,24 +63,25 @@ def adjust(
     if method not in CORRECTIONS:
         raise ValueError(f"unknown correction {method!r}; use one of {', '.join(CORRECTIONS)}")
     m = len(p) if family_size is None else family_size
+    if isinstance(m, bool) or not isinstance(m, int | np.integer) or m < 0:
+        raise ValueError("family_size must be a non-negative integer")
     if m < len(p):
         raise ValueError(f"family_size {m} is smaller than the {len(p)} p-values given")
     if not len(p) or method == "none":
         return p.copy()
     if method == "bonferroni":
         return np.minimum(1.0, p * m)
-    full = np.concatenate([p, np.ones(m - len(p))])
-    order = np.argsort(full, kind="stable")
-    ranked = full[order]
-    ranks = np.arange(1, m + 1)
+    order = np.argsort(p, kind="stable")
+    ranked = p[order]
+    ranks = np.arange(1, len(p) + 1)
     if method == "holm":
         stepped = np.maximum.accumulate((m - ranks + 1) * ranked)
     else:
-        scale = float(np.sum(1.0 / ranks)) if method == "by" else 1.0
+        scale = _harmonic(m) if method == "by" else 1.0
         stepped = np.minimum.accumulate((m * scale / ranks * ranked)[::-1])[::-1]
-    adjusted = np.empty(m)
+    adjusted = np.empty(len(p))
     adjusted[order] = np.minimum(1.0, stepped)
-    return adjusted[: len(p)]
+    return adjusted
 
 
 def correct(

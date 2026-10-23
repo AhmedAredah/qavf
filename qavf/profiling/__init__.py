@@ -18,17 +18,35 @@ from .accumulator import ProfileAccumulator, ProfileResult
 from .values import validate_margin
 
 
-def _options(margin: float, max_categories: int, bounds: bool) -> float:
+def _options(
+    margin: float,
+    max_categories: int,
+    bounds: bool,
+    max_category_bytes: int,
+    max_category_value_bytes: int,
+) -> float:
     margin = validate_margin(margin)
     if type(max_categories) is not int or max_categories < 0:
         raise ValueError("max_categories must be a non-negative integer")
+    for name, value in (
+        ("max_category_bytes", max_category_bytes),
+        ("max_category_value_bytes", max_category_value_bytes),
+    ):
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
     if not isinstance(bounds, bool):
         raise ValueError("bounds must be a boolean")
     return margin
 
 
 def profile_frame(
-    frame: pl.DataFrame, *, margin: float = 0.0, max_categories: int = 20, bounds: bool = True
+    frame: pl.DataFrame,
+    *,
+    margin: float = 0.0,
+    max_categories: int = 20,
+    bounds: bool = True,
+    max_category_bytes: int = 1 << 20,
+    max_category_value_bytes: int = 64 << 10,
 ) -> dict[str, Any]:
     """Infer a draft contract from a caller-owned frame using bounded profile state.
 
@@ -37,9 +55,13 @@ def profile_frame(
     when required by configuration datetime precision. Review inferred limits
     before relying on them: profiling describes observations, including defects.
     """
-    margin = _options(margin, max_categories, bounds)
+    margin = _options(margin, max_categories, bounds, max_category_bytes, max_category_value_bytes)
     accumulator = ProfileAccumulator(
-        dict(frame.schema), max_categories=max_categories, bounds=bounds
+        dict(frame.schema),
+        max_categories=max_categories,
+        bounds=bounds,
+        max_category_bytes=max_category_bytes,
+        max_category_value_bytes=max_category_value_bytes,
     )
     for batch in frame.iter_slices(65536):
         accumulator.update(batch)
@@ -52,6 +74,8 @@ def profile_input(
     margin: float = 0.0,
     max_categories: int = 20,
     bounds: bool = True,
+    max_category_bytes: int = 1 << 20,
+    max_category_value_bytes: int = 64 << 10,
     config: Configuration = None,
     resources: ResourceLimits | None = None,
 ) -> ProfileResult:
@@ -60,11 +84,14 @@ def profile_input(
     Native sources stream bounded batches in one complete source operation.
     Typed/lazy inputs use an exact observation under the run's memory/spill
     policy. Retained profile state scales with columns and category limits,
-    never with input row count. Source backends may require native working
+    never with input row count. Category payloads share ``max_category_bytes``
+    across all columns, with ``max_category_value_bytes`` per value. Oversized
+    enumerations fall back to exact lengths/missingness with disclosure.
+    Source backends may require native working
     storage; caller-owned frames/opaque loaders retain their ownership costs.
     Isolated execution is currently supported by validation/comparison only.
     """
-    margin = _options(margin, max_categories, bounds)
+    margin = _options(margin, max_categories, bounds, max_category_bytes, max_category_value_bytes)
     settings, frames = prepare(
         data, schema=None, config={} if config is None else config, resources=resources
     )
@@ -81,7 +108,13 @@ def profile_input(
         actual = context.schema(name)
 
         def fresh() -> ProfileAccumulator:
-            return ProfileAccumulator(actual, max_categories=max_categories, bounds=bounds)
+            return ProfileAccumulator(
+                actual,
+                max_categories=max_categories,
+                bounds=bounds,
+                max_category_bytes=max_category_bytes,
+                max_category_value_bytes=max_category_value_bytes,
+            )
 
         if context.execution_kind(name) == "native_sql":
 

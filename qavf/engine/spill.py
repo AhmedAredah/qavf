@@ -122,6 +122,13 @@ class SpillLease:
     def path(self) -> Path:
         return self._owner.path
 
+    def borrow(self) -> SpillLease:
+        with self._owner.budget.lock:
+            if self._closed:
+                raise RuntimeError("spill lease has ended")
+            self._owner._references += 1
+            return SpillLease(self._owner)
+
     def close(self) -> None:
         with self._owner.budget.lock:
             if not self._closed:

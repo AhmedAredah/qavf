@@ -10,16 +10,32 @@ import polars as pl
 from qavf.sources.base import SourceError
 
 
-def supports_frame(frame: object) -> bool:
-    """Recognize supported tabular objects without converting or consuming them."""
-    if isinstance(frame, pl.DataFrame | pl.LazyFrame):
-        return True
+def _adapter_kind(frame: object) -> str | None:
+    """One non-consuming admission decision shared by detection and conversion."""
+    if isinstance(frame, pl.DataFrame):
+        return "polars"
+    if isinstance(frame, pl.LazyFrame):
+        return "lazy"
+    if callable(getattr(frame, "read_next_batch", None)):
+        return None
     pandas = sys.modules.get("pandas")
-    return (
-        (pandas is not None and isinstance(frame, pandas.DataFrame))
-        or hasattr(frame, "__arrow_c_stream__")
-        or type(frame).__module__.startswith("pyarrow")
-    )
+    if pandas is not None and isinstance(frame, pandas.DataFrame):
+        return "pandas"
+    arrow = sys.modules.get("pyarrow")
+    if callable(getattr(frame, "__arrow_c_stream__", None)) or (
+        arrow is not None and isinstance(frame, arrow.Table | arrow.RecordBatch)
+    ):
+        return "arrow"
+    return None
+
+
+def supports_frame(frame: object) -> bool:
+    """Recognize candidate table representations without consuming them.
+
+    Arrow stream schemas are validated when adapted; a scalar-array stream is
+    not a table. Borrowed one-pass readers require an explicit source adapter.
+    """
+    return _adapter_kind(frame) is not None
 
 
 def as_polars(frame: Any) -> pl.DataFrame:
@@ -28,17 +44,22 @@ def as_polars(frame: Any) -> pl.DataFrame:
     Raises:
         SourceError: for any other type.
     """
-    if isinstance(frame, pl.DataFrame):
+    kind = _adapter_kind(frame)
+    if kind == "polars":
         return frame
-    if isinstance(frame, pl.LazyFrame):
+    if kind == "lazy":
         return frame.collect()
-    if not supports_frame(frame):
-        raise SourceError(f"expected a DataFrame or Arrow table, got {type(frame).__name__}")
-    pandas = sys.modules.get("pandas")
-    if pandas is not None and isinstance(frame, pandas.DataFrame):
-        return pl.from_pandas(frame)
-    if hasattr(frame, "__arrow_c_stream__") or type(frame).__module__.startswith("pyarrow"):
-        result = pl.from_arrow(frame)
+    if kind == "pandas":
+        return pl.from_pandas(frame, rechunk=False)
+    if kind == "arrow":
+        # Explicit across supported Polars versions: preserve chunk ownership,
+        # avoiding an otherwise unnecessary whole-table contiguous copy.
+        result = pl.from_arrow(frame, rechunk=False)
         if isinstance(result, pl.DataFrame):
             return result
+        # Polars 2 exposes a generic tabular C stream as a Struct Series;
+        # earlier releases return a frame. Unnest only a structural table,
+        # without requesting a second (possibly one-shot) stream.
+        if isinstance(result, pl.Series) and isinstance(result.dtype, pl.Struct):
+            return result.struct.unnest()
     raise SourceError(f"expected a DataFrame or Arrow table, got {type(frame).__name__}")

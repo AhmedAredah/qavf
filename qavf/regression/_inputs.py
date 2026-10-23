@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import polars as pl
+
 from qavf.engine.context import DataContext
 from qavf.engine.sql_read import NativeReadUnavailable, SqlReadSession
 from qavf.inputs.normalize import prepare
@@ -13,6 +15,7 @@ from qavf.regression._plan import comparison_plan
 from qavf.regression._streaming import compare_native
 from qavf.regression.models import ComparisonResult
 from qavf.sources.sql import quote_identifier
+from qavf.typed_values import has_object
 
 
 def compare_context(
@@ -84,7 +87,9 @@ def compare_context(
                     return result, view.fingerprint() if fingerprint else None
             result = _compare_projected(
                 plan,
-                view.project(stored).rename(dict(plan.column_map)),
+                view.project(stored).rename(
+                    {old: new for old, new in plan.column_map.items() if old in stored}
+                ),
                 ctx.project(candidate, list(plan.shared)),
                 execution="projected_fallback",
                 fallback_reason=fallback_reason,
@@ -109,7 +114,9 @@ def compare_context(
             ), None
     result = _compare_projected(
         plan,
-        ctx.project(baseline, stored).rename(dict(plan.column_map)),
+        ctx.project(baseline, stored).rename(
+            {old: new for old, new in plan.column_map.items() if old in stored}
+        ),
         ctx.project(candidate, list(plan.shared)),
         execution="projected_fallback",
         fallback_reason=fallback_reason,
@@ -142,6 +149,16 @@ def compare_inputs(
         from qavf.regression._columns import column_names
 
         return compare_isolated(settings, frames, column_names(keys), options)
+    # Opaque caller-owned frames use the established projected fallback. Keep
+    # them outside the typed owning cache, exactly as for supplied LazyFrames;
+    # arbitrary Python objects have no safe compact/spill representation.
+    frames = {
+        name: value.lazy()
+        if isinstance(value, pl.DataFrame)
+        and any(has_object(dtype) for dtype in value.schema.values())
+        else value
+        for name, value in frames.items()
+    }
     with DataContext.from_settings(
         settings,
         frames,

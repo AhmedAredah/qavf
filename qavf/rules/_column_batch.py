@@ -11,6 +11,7 @@ import duckdb
 import polars as pl
 
 from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding
 from qavf.engine.sql import missing_sql
 from qavf.rules.helpers import fresh_internal, missing_expr
@@ -63,6 +64,7 @@ class ColumnInputs:
     dataset: str
     schema: SchemaSpec
     actual: dict[str, pl.DataType]
+    observation: Observation | None = None
     row: str = field(init=False)
     reason: str = field(init=False)
     saved: dict[str, str] = field(init=False)
@@ -90,13 +92,28 @@ class ColumnInputs:
     def saved_for(self, dependencies: Iterable[str]) -> dict[str, str]:
         return {column: self.saved[column] for column in dependencies}
 
-    def lazy(self, dependencies: Iterable[str], *, empty: bool = False) -> pl.LazyFrame:
+    def lazy(
+        self,
+        dependencies: Iterable[str],
+        *,
+        empty: bool = False,
+        raw_columns: Iterable[str] = (),
+    ) -> pl.LazyFrame:
+        # Evidence-only columns retain raw values without applying their policies.
+        # Otherwise an invalid sibling policy can poison an independent check.
         saved = self.saved_for(dependencies)
+        originals = {**saved, **self.saved_for(raw_columns)}
         typed = pl.DataFrame(schema=self.actual)
-        plan = typed.lazy() if empty else self.ctx.scan(self.dataset)
+        plan = (
+            typed.lazy()
+            if empty
+            else self.observation.scan()
+            if self.observation is not None
+            else self.ctx.scan(self.dataset)
+        )
         return (
             plan.with_row_index(self.row)
-            .with_columns(pl.col(column).alias(alias) for column, alias in saved.items())
+            .with_columns(pl.col(column).alias(alias) for column, alias in originals.items())
             .with_columns(
                 pl.when(missing_expr(typed, column, self.schema.columns.get(column)))
                 .then(None)
@@ -104,6 +121,14 @@ class ColumnInputs:
                 .alias(column)
                 for column in saved
             )
+        )
+
+    def collect(self, plan: pl.LazyFrame) -> pl.DataFrame:
+        """Collect from the owned observation when source reevaluation is unsafe."""
+        return (
+            self.observation.collect(plan)
+            if self.observation is not None
+            else self.ctx.collect(self.dataset, plan)
         )
 
     def native(self, dependencies: Iterable[str]) -> str:
@@ -213,8 +238,7 @@ def reduce_columns(
         dependencies, aliases = query(batch)
         try:
             if lazy:
-                reduced = inputs.ctx.collect(
-                    inputs.dataset,
+                reduced = inputs.collect(
                     inputs.lazy(dependencies).select(
                         jobs[index].reducers[name].alias(alias) for index, name, alias in aliases
                     ),
@@ -232,4 +256,110 @@ def reduce_columns(
                 )
             except Exception as exc:
                 results[index] = exc
+    return results
+
+
+def reduce_captured_columns(
+    inputs: ColumnInputs,
+    jobs: dict[int, ColumnReduction[pl.Expr]],
+    capture_columns: tuple[str, ...],
+) -> dict[int, Finding | Exception | None]:
+    """Merge additive row counts and bounded typed samples from one evaluation.
+
+    Each source batch drops its full rows after reducing. Only at-most-K evidence
+    structs per check per batch proceed to the final merge. Polars controls input
+    batch sizes and upstream buffering; this is not a process-RSS ceiling.
+    """
+    results: dict[int, Finding | Exception | None] = {}
+
+    def expressions(batch: list[int]) -> list[pl.Expr]:
+        return [
+            value.alias(f"c{index}_{name}")
+            for index in batch
+            for name, value in jobs[index].reducers.items()
+        ]
+
+    def dependencies(batch: list[int]) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(c for index in batch for c in jobs[index].dependencies))
+
+    def preflight(batch: list[int]) -> list[int]:
+        if not batch:
+            return []
+        try:
+            inputs.lazy(dependencies(batch), empty=True, raw_columns=capture_columns).select(
+                expressions(batch)
+            ).collect()
+            return batch
+        except Exception as exc:
+            if len(batch) == 1:
+                results[batch[0]] = exc
+                return []
+            middle = len(batch) // 2
+            return preflight(batch[:middle]) + preflight(batch[middle:])
+
+    batch = preflight(list(jobs))
+    if not batch:
+        return results
+    needed = dependencies(batch)
+    reductions = expressions(batch)
+    typed = (
+        inputs.lazy(needed, empty=True, raw_columns=capture_columns)
+        .select(reductions)
+        .collect_schema()
+    )
+
+    def reduce_batch(frame: pl.DataFrame) -> pl.DataFrame:
+        return frame.select(reductions)
+
+    partials = (
+        inputs.lazy(needed, raw_columns=capture_columns)
+        .select(
+            inputs.row,
+            *needed,
+            *(inputs.saved[c] for c in dict.fromkeys((*needed, *capture_columns))),
+        )
+        .map_batches(
+            reduce_batch,
+            schema=typed,
+            streamable=True,
+            predicate_pushdown=False,
+            projection_pushdown=False,
+            slice_pushdown=False,
+        )
+    )
+    merged = []
+    for index in batch:
+        for name in jobs[index].reducers:
+            column = f"c{index}_{name}"
+            values = pl.col(column)
+            if name == "sample":
+                records = values.explode().drop_nulls()
+                merged.append(
+                    records.sort_by(records.struct.field(inputs.row))
+                    .head(inputs.ctx.evidence_limit)
+                    .implode()
+                    .alias(column)
+                )
+            else:
+                # Widen before adding partial counts; a partition count may be UInt32.
+                merged.append(values.cast(pl.UInt64).sum().alias(column))
+    try:
+        reduced = inputs.collect(partials.select(merged))
+    except Exception as exc:
+        results.update((index, exc) for index in batch)
+        return results
+    for index in batch:
+        try:
+            summary = {}
+            for name in jobs[index].reducers:
+                series = reduced[f"c{index}_{name}"]
+                if name == "sample":
+                    # Keep Arrow/Polars types intact, including nanosecond times.
+                    size = int(series.list.len().item())
+                    summary[name] = series.explode().struct.unnest().head(size)
+                else:
+                    summary[name] = series.item()
+            results[index] = jobs[index].finish(summary)
+        except Exception as exc:
+            results[index] = exc
     return results

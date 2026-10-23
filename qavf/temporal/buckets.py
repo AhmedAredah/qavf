@@ -507,7 +507,9 @@ def bucket_grid(
     """
     dtype = first.dtype
     if bucket is not None and bucket.cyclic:
-        return _cycle(bucket, dtype)
+        cycle = _cycle(bucket, dtype)
+        _bounded(len(cycle), limit)
+        return cycle
     bounds = pl.DataFrame({"first": first, "last": last})
     if bucket is not None and bucket.subday:
         assert isinstance(dtype, pl.Datetime)
@@ -516,11 +518,16 @@ def bucket_grid(
             (wall_clock(pl.col(c), dtype, zone) if zone else pl.col(c)).dt.epoch("us")
             for c in ("first", "last")
         ).row(0)
-        size = (local[1] - local[0]) // bucket.width_us + 1
+        # A skipped wall-clock start may label its first physical instant (e.g.
+        # 02:00 -> 03:00 for a two-hour bucket). Keep the midnight-based phase,
+        # rather than using that adjusted instant as the enumeration origin.
+        low = (local[0] // bucket.width_us) * bucket.width_us
+        high = (local[1] // bucket.width_us) * bucket.width_us
+        size = (high - low) // bucket.width_us + 1
         _bounded(size, limit)
         starts = pl.select(
             pl.from_epoch(
-                pl.int_range(0, size, dtype=pl.Int64) * bucket.width_us + local[0],
+                pl.int_range(0, size, dtype=pl.Int64) * bucket.width_us + low,
                 time_unit="us",
             ).alias("label")
         )
@@ -531,7 +538,9 @@ def bucket_grid(
         ).explode("label")
         grid = instants.drop_nulls().unique().sort("label")["label"].cast(dtype)
         # Compare as Polars instants: Python datetimes of a fall-back hour are equal.
-        return grid.filter((grid >= first) & (grid <= last))
+        grid = grid.filter((grid >= first) & (grid <= last))
+        _bounded(len(grid), limit)
+        return grid
     if bucket is None:
         if not (dtype.is_integer() or dtype == pl.Date):
             raise ValueError(f"periods of type {dtype} have no exact grid; set a bucket")
@@ -568,7 +577,10 @@ def sequence_positions(
     :func:`calendar_position`.
 
     Raises:
-        ValueError: for labels without an exact position, or a grid beyond ``limit``.
+        ValueError: for labels without an exact position, or a DST grid beyond
+            ``limit``. Naive and fixed-offset labels use exact tick arithmetic
+            without materializing intermediate buckets, so their span is not
+            restricted by the grid allocation limit.
     """
     frame = labels.alias("label").to_frame()
     if bucket is None or not bucket.subday:
@@ -578,6 +590,29 @@ def sequence_positions(
         return pl.Series("label", [None] * len(labels), dtype=pl.Int64)
     start = present.head(1) if first is None else first
     end = present.tail(1) if last is None else last
+    dtype = labels.dtype
+    if isinstance(dtype, pl.Datetime) and (
+        dtype.time_zone is None or ZoneInfo(dtype.time_zone).utcoffset(None) is not None
+    ):
+        if start.dtype != dtype or end.dtype != dtype:
+            raise ValueError("bucket grid bounds must have the same dtype as the labels")
+        if len(start) != 1 or len(end) != 1 or start.null_count() or end.null_count():
+            raise ValueError("bucket grid bounds must each contain one non-null label")
+        low, high = int(start.cast(pl.Int64).item()), int(end.cast(pl.Int64).item())
+        width = bucket.width_us * 1_000 if dtype.time_unit == "ns" else bucket.width_us
+        if dtype.time_unit == "ms":
+            width //= 1_000
+        # Int128 subtraction preserves differences across the Int64 epoch boundary.
+        ticks = pl.col("label").cast(pl.Int64).cast(pl.Int128)
+        delta = ticks - pl.lit(low, dtype=pl.Int128)
+        step = pl.lit(width, dtype=pl.Int128)
+        valid = (ticks >= low) & (ticks <= high) & (delta % step == 0)
+        computed = frame.select(
+            (delta // step).cast(pl.Int64).alias("label"), valid.alias("valid")
+        )
+        if low > high or not computed["valid"].drop_nulls().all():
+            raise ValueError("a label lies outside the bucket grid of the series")
+        return computed["label"]
     grid = bucket_grid(start, end, bucket, limit=limit).alias("label").to_frame()
     indexed = grid.with_row_index("position").with_columns(pl.col("position").cast(pl.Int64))
     row = "row"

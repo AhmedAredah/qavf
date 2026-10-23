@@ -25,7 +25,7 @@ integer *position* (zone order, cell ``(ix, iy)``), and an *expected grid*
 (the layer's zones, or the cells over an extent).
 """
 
-from qavf.spatial.assign import Assigned, AssignmentPolicy, assign
+from qavf.spatial.assign import Assigned, AssignmentLimits, AssignmentPolicy, assign
 from qavf.spatial.crs import DEFAULT_CRS, Crs, is_geographic, normalize_crs, same_crs
 from qavf.spatial.distance import EARTH_RADIUS_M, distance, euclidean, haversine
 from qavf.spatial.extension import SpatialUnavailable, spatial_connection
@@ -52,6 +52,7 @@ __all__ = [
     "DEFAULT_CRS",
     "EARTH_RADIUS_M",
     "Assigned",
+    "AssignmentLimits",
     "AssignmentPolicy",
     "Crosswalk",
     "Crs",

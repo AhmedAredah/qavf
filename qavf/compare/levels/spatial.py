@@ -63,6 +63,7 @@ from qavf.compare.levels.groups import (
     measure_tests,
     member_values,
     one_sided_check,
+    precise_frame,
     reduce_groups,
 )
 from qavf.compare.results import CheckResult, LevelResult, SpatialResult, ZoneMap
@@ -70,6 +71,7 @@ from qavf.compare.significance import (
     Inference,
     MeasureTest,
     Member,
+    centered_values,
     family_check,
 )
 from qavf.compare.spec import ComparisonSpec, InferenceParams, Side
@@ -91,7 +93,7 @@ from qavf.spatial.extension import fetch, spatial_connection
 from qavf.spatial.grid import Grid, cell_centres, grid_cells, label_positions
 from qavf.spatial.hierarchy import pairs_frame
 from qavf.spatial.layers import ZoneLayer, load_zones, zone_ids
-from qavf.spatial.outlines import grid_rings, layer_rings, view_paths
+from qavf.spatial.outlines import OutlineLimitExceeded, grid_rings, layer_rings, view_paths
 from qavf.spatial.weights import (
     SpatialWeights,
     WeightsSpec,
@@ -101,7 +103,7 @@ from qavf.spatial.weights import (
     grid_contiguity,
     nearest,
 )
-from qavf.statistics.series import spearman
+from qavf.statistics.series import average_ranks, spearman
 
 
 class RankCheck(RuleParams):
@@ -278,6 +280,12 @@ class SpatialLevel(ComparisonLevel):
         table = params.weights.table
         return found | (table.datasets() if table is not None else frozenset())
 
+    def required_columns(self) -> frozenset[str]:
+        from qavf.compare.levels.groups import measure_columns
+
+        params: SpatialParams = self.params  # type: ignore[assignment]
+        return frozenset({params.zone_column} | measure_columns(params.measures))
+
     def evaluate(self, inputs: LevelInputs, name: str) -> SpatialResult:
         params: SpatialParams = self.params  # type: ignore[assignment]
         column = params.zone_column
@@ -342,13 +350,17 @@ class SpatialLevel(ComparisonLevel):
             if source.layer is not None:
                 with spatial_connection(inputs.ctx) as con:
                     loaded = load_zones(con, inputs.ctx, source.layer)
-                    rings = layer_rings(con, loaded.table, loaded.ids)
+                    rings = layer_rings(
+                        con, loaded.table, loaded.ids, max_vertices=params.map_vertices
+                    )
             elif source.grid is not None:
                 ids = aligned.joined[params.zone_column].drop_nulls()
-                rings = grid_rings(ids, source.grid)
+                rings = grid_rings(ids, source.grid, max_vertices=params.map_vertices)
             else:
                 return ZoneMap(note="the zones have no geometry (an attribute zone column)")
             drawn = view_paths(rings)
+        except OutlineLimitExceeded as exc:
+            return ZoneMap(vertices=exc.vertices, note=str(exc))
         except Exception as exc:
             return ZoneMap(note=f"no zone outlines: {exc}".rstrip("."))
         if drawn.vertices > params.map_vertices:
@@ -421,15 +433,17 @@ class SpatialLevel(ComparisonLevel):
         alias = aligned.aliases[index]
         left, right = (aligned.columns[side][alias] for side in SIDES)
         column = aligned.keys[0]
-        ids, before, after = [], [], []
-        for zone, b, c in aligned.both.select(column, left, right).iter_rows():
+        kept, before, after = [], [], []
+        for position, (zone, b, c) in enumerate(
+            aligned.both.select(column, left, right).iter_rows()
+        ):
             exact = exact_rational(b), exact_rational(c)
             if zone is None or exact[0] is None or exact[1] is None:
                 continue
-            ids.append(zone)
+            kept.append(position)
             before.append(exact[0])
             after.append(exact[1])
-        series = pl.Series(column, ids, dtype=aligned.both.schema[column])
+        series = aligned.both[column].gather(kept)
         return _Zones(series, before, after)
 
     def _rank(
@@ -449,7 +463,7 @@ class SpatialLevel(ComparisonLevel):
         if not inference.tests:
             return graded("rank", int(low), ok, bad, total=1, unit="measures", metrics=record)
         side: Alternative = "greater" if inference.decision == "equivalence" else "less"
-        xb, xc = _floats(zones.baseline), _floats(zones.candidate)
+        xb, xc = (_floats(average_ranks(v)) for v in (zones.baseline, zones.candidate))
         testable = rho is not None and not any(flat)
 
         def test() -> TestResult:
@@ -471,7 +485,13 @@ class SpatialLevel(ComparisonLevel):
         alias = aligned.aliases[index]
         column = aligned.keys[0]
         left, right = (aligned.columns[side][alias] for side in SIDES)
-        rows = list(aligned.joined.select(column, left, right).iter_rows())
+        rows = list(precise_frame(aligned.joined.select(column, left, right), [column]).iter_rows())
+        presence = [aligned.columns[side][aligned.presence] for side in SIDES]
+        for b, c, on_b, on_c in aligned.joined.select(left, right, *presence).iter_rows():
+            if (on_b is not None and exact_rational(b) is None) or (
+                on_c is not None and exact_rational(c) is None
+            ):
+                return not_assessed("shares", "a present zone has an undefined measure")
         values = [(zone, exact_rational(b), exact_rational(c)) for zone, b, c in rows]
         totals = [
             sum((v for v in column_values if v is not None), Fraction(0))
@@ -561,12 +581,19 @@ class SpatialLevel(ComparisonLevel):
             inside = table.join(ids_frame.rename({ids.name: "from"}), on="from", how="semi").join(
                 ids_frame.rename({ids.name: "to"}), on="to", how="semi"
             )
-            weights = from_table(ids, inside)
+            weights = from_table(ids, inside, max_edges=spec.max_edges, max_work=spec.max_work)
         elif source.grid is not None:
             grid = source.grid
             if spec.method in ("queen", "rook"):
                 positions = label_positions(ids)
-                weights = grid_contiguity(ids, positions["ix"], positions["iy"], spec.method)
+                weights = grid_contiguity(
+                    ids,
+                    positions["ix"],
+                    positions["iy"],
+                    spec.method,
+                    max_edges=spec.max_edges,
+                    max_work=spec.max_work,
+                )
             else:
                 x, y = cell_centres(ids, grid)
                 weights = self._by_distance(ids, x, y, spec, is_geographic(source.crs))
@@ -580,8 +607,16 @@ class SpatialLevel(ComparisonLevel):
                     raise ValueError(f"{plural(unknown, 'compared zone')} are not in the layer")
                 keep = [int(i) for i in found["order"]]
                 if spec.method in ("queen", "rook"):
-                    full = contiguity(con, loaded.table, loaded.ids, spec.method)
-                    weights = full.subset(keep)
+                    weights = contiguity(
+                        con,
+                        loaded.table,
+                        loaded.ids,
+                        spec.method,
+                        keep=keep,
+                        max_edges=spec.max_edges,
+                        max_work=spec.max_work,
+                        check_cancelled=inputs.ctx._check_cancelled,
+                    )
                 else:
                     centres = fetch(
                         con,
@@ -602,10 +637,26 @@ class SpatialLevel(ComparisonLevel):
         ids: pl.Series, x: Any, y: Any, spec: WeightsSpec, geographic: bool
     ) -> SpatialWeights:
         if spec.method == "knn":
-            return nearest(ids, x, y, spec.k, geographic=geographic)
+            return nearest(
+                ids,
+                x,
+                y,
+                spec.k,
+                geographic=geographic,
+                max_edges=spec.max_edges,
+                max_work=spec.max_work,
+            )
         if spec.method == "distance_band":
             assert spec.distance is not None
-            return distance_band(ids, x, y, spec.distance, geographic=geographic)
+            return distance_band(
+                ids,
+                x,
+                y,
+                spec.distance,
+                geographic=geographic,
+                max_edges=spec.max_edges,
+                max_work=spec.max_work,
+            )
         raise ValueError(f"weights method {spec.method!r} needs zone polygons or grid cells")
 
     def _clusters(
@@ -631,7 +682,10 @@ class SpatialLevel(ComparisonLevel):
             value = comparator.compare(b, c, totals)
             if value is not None:
                 kept.append(position)
-                differences.append(float(value))
+                exact = exact_rational(value)
+                if exact is None:
+                    return [not_assessed(name, "a zone difference is not finite") for name in names]
+                differences.append(exact)
         if len(kept) < 3:
             reason = f"fewer than 3 zones have a defined {params.difference} on both sides"
             return [not_assessed(name, reason) for name in names]
@@ -643,7 +697,10 @@ class SpatialLevel(ComparisonLevel):
         details |= {"weights": weights.describe(), "islands": len(weights.islands)}
         if not weights.pairs:
             return [not_assessed(name, "no compared zone has a neighbour") for name in names]
-        d = np.array(differences)
+        try:
+            d = centered_values(differences)
+        except ValueError as exc:
+            return [not_assessed(name, str(exc)) for name in names]
         pattern = replace(inference, decision="material_and_significant") if (
             inference.decision == "equivalence"
         ) else inference  # fmt: skip
@@ -654,7 +711,17 @@ class SpatialLevel(ComparisonLevel):
         if "lisa" in names:
             results.append(
                 self._lisa(
-                    inputs, params, zones, kept, weights, d, uniform, judged, pattern, details
+                    inputs,
+                    params,
+                    zones,
+                    kept,
+                    weights,
+                    d,
+                    uniform,
+                    judged,
+                    pattern,
+                    details,
+                    differences=differences,
                 )
             )
         return results
@@ -711,6 +778,7 @@ class SpatialLevel(ComparisonLevel):
         judged: Materiality,
         inference: Inference,
         details: dict[str, Any],
+        differences: list[Fraction] | None = None,
     ) -> CheckResult:
         column = zones.ids.name
         limit = inputs.ctx.evidence_limit
@@ -726,7 +794,7 @@ class SpatialLevel(ComparisonLevel):
         counts = weights.counts()
         members, records, magnitudes = [], [], []
         for position, original in enumerate(kept):
-            zone = zones.ids[position]
+            zone = zones.ids[original]
             b, c = zones.baseline[original], zones.candidate[original]
             quadrant = local.quadrants[position]
             cluster = quadrant in ("HH", "LL")
@@ -747,10 +815,14 @@ class SpatialLevel(ComparisonLevel):
                     "local_i": result.statistic,
                     "baseline": report_number(b),
                     "candidate": report_number(c),
-                    params.difference: float(d[position]),
+                    params.difference: report_number(
+                        d[position] if differences is None else differences[position]
+                    ),
                 }
             )
-            magnitudes.append(abs(float(d[position])))
+            magnitudes.append(
+                abs(float(d[position] if differences is None else differences[position]))
+            )
         ok = f"No zone sits in a significant cluster of material change ({weights.describe()})."
         bad = "{count} sit in significant clusters of material change (" + weights.describe() + ")."
         check = family_check(

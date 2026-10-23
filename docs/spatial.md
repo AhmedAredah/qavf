@@ -80,18 +80,24 @@ by the authority's latitude-first axis order.
   a GeoJSON `crs`) must agree with the configured one; a mismatch is refused, never
   silently transformed. `EPSG:4326` and `OGC:CRS84` are the same under x-first order.
 - Distances follow the CRS: the haversine great-circle distance in metres for a
-  geographic CRS (WGS 84, CRS84, NAD83, ETRS89, GDA94, NAD83(CSRS), NZGD2000), on a
-  sphere of the IUGG mean radius 6 371 008.8 m (within about 0.5 % of the
-  ellipsoidal geodesic); the Euclidean distance in CRS units for any other CRS.
+  geographic CRS with degree axes, on a sphere of the IUGG mean radius
+  6 371 008.8 m; the Euclidean distance in the declared CRS units for a projected
+  CRS (including projected feet). Haversine is a spherical approximation, not an
+  ellipsoidal geodesic. Common geographic and WGS 84 projected CRSs work with the
+  core installation. Other codes are resolved through cached PROJ metadata using
+  `pip install 'qavf[spatial]'`. Unresolvable CRSs, geographic non-degree axes and
+  unsupported coordinate systems are rejected rather than classified by default.
   `qavf.spatial.haversine` is one formula for floats, NumPy arrays and Polars
   expressions.
 
 ## Assigning points to zones
 
 Points (`x`/`y` columns, or a WKB `geometry` column of points) get the id of the zone
-polygon they fall in. The distinct points are joined to the zones in DuckDB, with a
-bounding-box prefilter (a range join on each zone's extent) before the exact
-predicate, and the zone ids are joined back natively: no row reaches Python.
+polygon they fall in. Distinct points are collected once within an admission
+limit, then transformed and matched in batches. DuckDB resolves boundary and
+overlap policies before exporting selected mappings; raw point-zone matches are
+not copied into a Polars frame. The mapping is joined back lazily and remains
+usable after the spatial connection closes.
 
 | Situation | Policy | Outcome |
 |---|---|---|
@@ -102,6 +108,28 @@ predicate, and the zone ids are joined back natively: no row reaches Python.
 | | `overlap: first` | the lowest zone id |
 | | `overlap: all` | each of them (the row repeats per zone); counted |
 | A point in no zone, or without usable coordinates (missing, NaN, infinite) | `max_unassigned` (0 by default) | unassigned and counted; more than that fraction of the rows is not assessed |
+
+Ordinary calls use these defaults; larger admitted workloads can override them:
+
+| Option | Default | Scope |
+|---|---:|---|
+| `batch_size` | 16,384 | Distinct points transformed together; selected rows per Arrow batch |
+| `max_points` | 1,000,000 | Distinct point keys retained |
+| `max_matches` | 2,000,000 | Selected point-zone mappings, including `overlap: all` expansion |
+| `max_work` | 20,000,000 | Bounding-box candidate pairs admitted before exact predicates |
+
+These controls apply to polygon assignment. Grid-cell and attribute-zone steps
+retain their existing controls. New finite defaults can refuse workloads that
+previously attempted unrestricted assignment; increase them deliberately for larger
+validated workloads.
+
+Set these directly on an `assign_zones` step or `AssignmentPolicy`. For GEO-001,
+set `assignment_limits` on the point specification, for example
+`assignment_limits: {max_points: 2000000, batch_size: 8192}`. Exceeding a limit
+leaves the complete assignment unassessed; it never silently truncates points or
+zones. These are cardinality limits, not byte or process-memory ceilings.
+Retained memory still grows with admitted keys and selected mappings, and native
+grouping, joins and individual geometries have their own working-memory costs.
 
 ## Grid cells
 
@@ -160,6 +188,37 @@ Overlapping polygons are neighbours under both contiguity rules. Weights are
 row-standardized (`row_standardize: true`) unless set otherwise; islands keep no
 weight and are never part of a cluster.
 
+Nearest-neighbour and distance-band graphs use an exact SciPy spatial index when
+available and bounded pairwise blocks otherwise. Candidate refinement uses the
+same distance formula, inclusive band boundary and zone-order tie rule in both
+paths. Geographic graph inputs require longitude in `[-180, 180]` and latitude in
+`[-90, 90]`; wrap longitudes explicitly before constructing the graph if needed.
+Graphs use compact read-only sparse arrays behind the existing mapping interface.
+
+`weights.max_edges` defaults to 1,000,000 retained directed edges and
+`weights.max_work` to 20,000,000 admitted work units. All graph builders accept
+these keyword arguments. Polygon and table graphs also use compact arrays;
+subsetting and row standardization preserve that representation. Polygon
+comparisons construct the requested induced graph before pair evaluation, so
+excluded zones do not consume its pair budget.
+
+| Builder | Work admitted |
+|---|---|
+| `contiguity` | Selected locations and unordered bounding-box candidate pairs |
+| `grid_contiguity` | Locations and neighbor-offset probes |
+| `from_table` | Locations and input weight rows, including duplicates and self-pairs |
+| `nearest`, `distance_band` | Coordinate and candidate-distance evaluations |
+
+Admission failures are explicit; QAVF does not silently sample neighbours. These
+units do not count every internal join or spatial-index instruction. Native
+query memory follows the connection's resource policy. The nearest-neighbor
+fallback needs quadratic work and may reach its cap earlier; dense graphs need
+storage proportional to their admitted edge count. Table duplicates are combined,
+self-pairs removed, and retained directed edges checked before compact assembly.
+
+Spatial table keys and crosswalk keys use lossless identity checks: a fractional
+ID such as `1.9` cannot join integer zone `1`.
+
 ## Comparing datasets in space
 
 ### `assign_zones`
@@ -214,6 +273,13 @@ For the report's choropleth it also keeps each zone's values (`values`, bounded 
 (`ST_SimplifyPreserveTopology`, a tolerance of 1/500 of the extent) or the grid's
 cells, as SVG paths; more than `map_vertices` (20,000) vertices, or no spatial
 extension, leaves the map out with the reason (`map: false` skips it).
+The vertex budget is checked before constructing Python rings or SVG paths.
+Polygon counts are computed after simplification in DuckDB; grid counts use
+distinct nonnull cell labels. An oversized map is omitted in full while the QA
+results remain available. Accepted geometry is transferred in batches of at most
+64 features, and path projection avoids flattened coordinate copies. One geometry
+can still be large; native simplification and the accepted output retain their
+own memory costs.
 
 Permutation p-values are at least `1 / (permutations + 1)` (`smallest_p` in the
 `lisa` check's metrics). With `m` compared zones, the Benjamini-Hochberg correction

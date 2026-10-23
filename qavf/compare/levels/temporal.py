@@ -225,6 +225,12 @@ class TemporalLevel(ComparisonLevel):
     Params: ClassVar[type[RuleParams]] = TemporalParams
     Result: ClassVar[type[LevelResult]] = TemporalResult
 
+    def required_columns(self) -> frozenset[str]:
+        from qavf.compare.levels.groups import measure_columns
+
+        params: TemporalParams = self.params  # type: ignore[assignment]
+        return frozenset({params.time_column, *params.group_by} | measure_columns(params.measures))
+
     def evaluate(self, inputs: LevelInputs, name: str) -> TemporalResult:
         params: TemporalParams = self.params  # type: ignore[assignment]
         sides = bucketed_sides(inputs, params)

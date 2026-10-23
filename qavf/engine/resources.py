@@ -19,8 +19,13 @@ from uuid import uuid4
 
 import polars as pl
 
-from qavf.engine.cache_ownership import _snapshot, compact_polars, retained_size
+from qavf.engine.cache_ownership import (
+    _snapshot,
+    compact_polars_with_size,
+    retained_size,
+)
 from qavf.engine.owned_ipc import project_ipc, reduce_ipc
+from qavf.engine.retention import RetainedBudget, RetainedLease
 from qavf.engine.session import RunSession
 from qavf.engine.spill import SpillBudget, SpillFile, SpillLease
 
@@ -41,11 +46,12 @@ def _locked(method):
 class ByteCache(MutableMapping):
     """Size-aware LRU for recomputable objects; oversized objects are not retained."""
 
-    def __init__(self, limit: int) -> None:
+    def __init__(self, limit: int, budget: RetainedBudget | None = None) -> None:
         self.lock = threading.RLock()
         self.limit = limit
         self.data: OrderedDict[Any, tuple[Any, int]] = OrderedDict()
         self.bytes = self.peak_bytes = 0
+        self.budget = budget or RetainedBudget(limit)
 
     @_locked
     def __getitem__(self, key: Any) -> Any:
@@ -57,7 +63,13 @@ class ByteCache(MutableMapping):
     def __setitem__(self, key: Any, value: Any) -> None:
         if key in self.data:
             del self[key]
-        size = retained_size(key) + retained_size(value)
+        # Native frame sizing can require an IPC traversal. Compact and measure it
+        # together below instead of serializing the same nested payload twice.
+        size = retained_size(key) + (
+            int(value.estimated_size())
+            if isinstance(value, pl.DataFrame | pl.Series)
+            else retained_size(value)
+        )
         if size > self.limit:
             return
         try:
@@ -68,9 +80,14 @@ class ByteCache(MutableMapping):
         size = retained_size(key) + retained_size(value)
         if size > self.limit:
             return
-        while self.data and self.bytes + size > self.limit:
+        while self.data and (
+            self.bytes + size > self.limit or size > self.budget.remaining
+        ):
             _, (_, removed) = self.data.popitem(last=False)
             self.bytes -= removed
+            self.budget.release(removed)
+        if not self.budget.reserve(size):
+            return
         self.data[key] = (value, size)
         self.bytes += size
         self.peak_bytes = max(self.peak_bytes, self.bytes)
@@ -79,6 +96,7 @@ class ByteCache(MutableMapping):
     def __delitem__(self, key: Any) -> None:
         _, size = self.data.pop(key)
         self.bytes -= size
+        self.budget.release(size)
 
     @_locked
     def __iter__(self) -> Iterator:
@@ -95,6 +113,7 @@ class ByteCache(MutableMapping):
     @_locked
     def clear(self) -> None:
         self.data.clear()
+        self.budget.release(self.bytes)
         self.bytes = 0
 
     @_locked
@@ -114,16 +133,19 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         directory: Path,
         materialization_bytes: int | None = None,
         spill_budget: SpillBudget | None = None,
+        retained_budget: RetainedBudget | None = None,
     ) -> None:
         self.lock = threading.RLock()
         self.limit = cache_bytes
         self.spill_limit = spill_bytes
         self.spill_budget = spill_budget or SpillBudget(spill_bytes)
+        self.retained_budget = retained_budget or RetainedBudget(cache_bytes)
         self._spill_files: dict[str, SpillFile] = {}
         self.directory = directory / "frames"
         self.directory.mkdir(parents=True, exist_ok=True)
         self.materialization_bytes = materialization_bytes
         self.data: OrderedDict[str, pl.DataFrame] = OrderedDict()
+        self._memory_leases: dict[str, RetainedLease] = {}
         self.paths: dict[str, Path] = {}
         self.sizes: dict[str, int] = {}
         self.bytes = self.spill_bytes = self.peak_bytes = self.peak_spill_bytes = 0
@@ -146,10 +168,11 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         # Promote only into existing free space. A hit must not trigger eviction,
         # extra writes or ping-pong between two frames larger than the allocation.
         if self.sizes[key] <= self.limit - self.bytes:
-            owned = cast(pl.DataFrame, compact_polars(frame))
-            size = retained_size(owned)
-            if size <= self.limit - self.bytes:
+            compacted, size = compact_polars_with_size(frame)
+            owned = cast(pl.DataFrame, compacted)
+            if size <= self.limit - self.bytes and self.retained_budget.reserve(size):
                 self.data[key] = owned
+                self._memory_leases[key] = RetainedLease(self.retained_budget, size)
                 self.sizes[key] = size
                 self.bytes += size
                 self.peak_bytes = max(self.peak_bytes, self.bytes)
@@ -176,23 +199,29 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         self.spill_project_count += 1
         return project_ipc(self.paths[key], selected)
 
-    @_locked
     def reduce(self, key: str, build: Callable[[pl.LazyFrame], pl.LazyFrame]) -> pl.DataFrame:
-        """Build and collect a reduction while its owned IPC path is protected.
+        """Lease input storage, then build and collect without holding the cache lock.
 
         The callback must return a lazy plan, not retain it. No file-backed plan
-        or memory mapping is returned; release cannot remove the file mid-read.
+        or memory mapping is returned. A lease protects the input from concurrent
+        release while telemetry and unrelated cache operations remain available.
         """
-        if key in self.data:
-            self.data.move_to_end(key)
-            plan = self.data[key].lazy()
-        else:
-            self.spill_reduce_count += 1
-            return reduce_ipc(self.paths[key], build)
-        return build(plan).collect(engine="streaming")
+        frame, lease = self.observe(key)
+        try:
+            if frame is not None:
+                return build(frame.lazy()).collect(engine="streaming")
+            assert isinstance(lease, SpillLease)
+            return reduce_ipc(lease.path, build)
+        finally:
+            if isinstance(lease, RetainedLease):
+                lease.release()
+            elif lease is not None:
+                lease.close()
 
     @_locked
-    def observe(self, key: str) -> tuple[pl.DataFrame | None, SpillLease | None]:
+    def observe(
+        self, key: str
+    ) -> tuple[pl.DataFrame | None, SpillLease | RetainedLease | None]:
         """Lease immutable buffers/IPC for one scoped lazy reduction operation.
 
         A spill lease survives eviction, promotion and release of its cache entry.
@@ -200,14 +229,14 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         """
         if key in self.data:
             self.data.move_to_end(key)
-            return self.data[key].clone(), None
+            return self.data[key].clone(), self._memory_leases[key].borrow()
         self.spill_reduce_count += 1
         return None, self._spill_files[key].borrow()
 
     @_locked
     def __setitem__(self, key: str, value: pl.DataFrame) -> None:
-        value = cast(pl.DataFrame, compact_polars(value))
-        size = retained_size(value)
+        owned, size = compact_polars_with_size(value)
+        value = cast(pl.DataFrame, owned)
         if self.materialization_bytes is not None and size > self.materialization_bytes:
             raise ResourceLimitError(
                 f"dataset {key!r} materializes {size} bytes; "
@@ -215,15 +244,19 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
             )
         if key in self:
             del self[key]
-        while self.data and self.bytes + size > self.limit:
+        while self.data and (
+            self.bytes + size > self.limit or size > self.retained_budget.remaining
+        ):
             old, frame = next(iter(self.data.items()))
             self._spill(old, frame)
             self.data.pop(old)
             self.bytes -= self.sizes[old]
-        if size > self.limit:
+            self._memory_leases.pop(old).release()
+        if size > self.limit or not self.retained_budget.reserve(size):
             self._spill(key, value)
         else:
             self.data[key] = value
+            self._memory_leases[key] = RetainedLease(self.retained_budget, size)
             self.bytes += size
             self.peak_bytes = max(self.peak_bytes, self.bytes)
         self.sizes[key] = size
@@ -251,7 +284,9 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
     def __delitem__(self, key: str) -> None:
         if key in self.data:
             del self.data[key]
-            self.bytes -= self.sizes.pop(key)
+            size = self.sizes.pop(key)
+            self.bytes -= size
+            self._memory_leases.pop(key).release()
         elif key in self.paths:
             path = self.paths.pop(key)
             self.sizes.pop(key)
@@ -277,6 +312,9 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         for owned in self._spill_files.values():
             owned.close()
         self._spill_files.clear()
+        for lease in self._memory_leases.values():
+            lease.release()
+        self._memory_leases.clear()
         self.data.clear()
         self.paths.clear()
         self.sizes.clear()
@@ -319,6 +357,7 @@ class RunResources:
             cache_bytes = (
                 min(cache_bytes, memory_bytes // 2) if memory_bytes is not None else cache_bytes
             )
+            self.retained_budget = RetainedBudget(cache_bytes)
             self.spill_budget = SpillBudget(spill_bytes // 2)
             try:
                 self.frames = FrameStore(
@@ -327,16 +366,21 @@ class RunResources:
                     self.directory,
                     memory_bytes,
                     self.spill_budget,
+                    self.retained_budget,
                 )
             except BaseException:
                 shutil.rmtree(self.directory, ignore_errors=True)
                 raise
-            self.pandas = ByteCache(cache_bytes // 8)
-            self.memo = ByteCache(cache_bytes - cache_bytes * 3 // 4 - cache_bytes // 8)
+            self.pandas = ByteCache(cache_bytes // 8, self.retained_budget)
+            self.memo = ByteCache(
+                cache_bytes - cache_bytes * 3 // 4 - cache_bytes // 8, self.retained_budget
+            )
             self.spill_limit = spill_bytes
             self.eager_fallbacks: set[str] = set()
             self.lock = threading.RLock()
             self.closed = False
+            self._last_usage: dict[str, Any] = {}
+            self.usage()
             setup.pop_all()
 
     def acquire(self) -> tuple[str, int, int | None]:
@@ -369,8 +413,24 @@ class RunResources:
     def unregister_connection(self, token: object) -> None:
         self.session.unregister_connection(token)
 
-    def usage(self) -> dict[str, Any]:
-        return {
+    def check_cancelled(self) -> None:
+        """Check an owned native operation at its cooperative entry boundary."""
+        self.session.check()
+
+    def usage(self, *, blocking: bool = True) -> dict[str, Any]:
+        # Cache mutations acquire their own lock before the shared allocator.
+        # An overdue worker may be compacting/writing while holding a cache lock.
+        # Reporting must be able to use the last complete, explicitly stale
+        # snapshot instead of waiting for that worker's native operation.
+        with contextlib.ExitStack() as held:
+            for lock in (self.frames.lock, self.pandas.lock, self.memo.lock):
+                if not lock.acquire(blocking=blocking):
+                    return {**self._last_usage, "resource_usage_pending": True}
+                held.callback(lock.release)
+            cached = self.frames.bytes + self.pandas.bytes + self.memo.bytes
+            retained, retained_peak = self.retained_budget.snapshot()
+        result = {
+            "resource_usage_pending": False,
             "active_connection_reservations": len(self.reservations),
             "peak_connection_reservations": self.peak_connections,
             "reserved_native_spill_bytes": len(self.reservations) * self.connection_spill_bytes,
@@ -383,7 +443,10 @@ class RunResources:
                 "sum of fixed buffer-manager reservation ceilings; an explicit lower "
                 "DuckDB memory limit may reduce each actual limit; not process RSS"
             ),
-            "retained_cache_bytes": self.frames.bytes + self.pandas.bytes + self.memo.bytes,
+            "retained_cache_bytes": cached,
+            "retained_observation_bytes": retained - cached,
+            "retained_total_bytes": retained,
+            "peak_retained_total_bytes": retained_peak,
             "peak_retained_cache_bytes_upper_bound": self.frames.peak_bytes
             + self.pandas.peak_bytes
             + self.memo.peak_bytes,
@@ -409,6 +472,8 @@ class RunResources:
             ),
             "caller_owned_inputs": "may already be resident before validation starts",
         }
+        self._last_usage = result
+        return dict(result)
 
     def close(self) -> None:
         with self.lock:

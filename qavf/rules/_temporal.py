@@ -2,33 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import timedelta
 from fractions import Fraction
 from typing import Any, Literal
 
 import polars as pl
 
+from qavf.value_policy import temporal_ticks as temporal_ticks
+from qavf.value_policy import zoned as zoned
+
 Ambiguous = Literal["raise", "earliest", "latest", "null"]
-
-
-def zoned(
-    value: pl.Expr,
-    aware: bool,
-    zone: str,
-    *,
-    ambiguous: Ambiguous = "raise",
-    non_existent: Literal["raise", "null"] = "raise",
-) -> pl.Expr:
-    """Instants of a Datetime expression in ``zone``.
-
-    Aware values are converted (the instant is kept). Naive values are wall-clock
-    times in ``zone`` and are localized by Polars, whose ambiguity (DST fall-back)
-    and nonexistence (spring-forward gap) handling is chosen by the caller:
-    ``"null"`` marks such times instead of guessing.
-    """
-    if aware:
-        return value.dt.convert_time_zone(zone)
-    return value.dt.replace_time_zone(zone, ambiguous=ambiguous, non_existent=non_existent)
 
 
 def wall_clock(value: pl.Expr, dtype: pl.DataType, zone: str | None) -> pl.Expr:
@@ -46,27 +29,6 @@ def wall_clock(value: pl.Expr, dtype: pl.DataType, zone: str | None) -> pl.Expr:
 def utc_wall_clock(instant: pl.Expr) -> pl.Expr:
     """Naive UTC wall-clock time of an aware instant (its offset is local minus this)."""
     return instant.dt.convert_time_zone("UTC").dt.replace_time_zone(None)
-
-
-def temporal_ticks(value: date | datetime, dtype: pl.DataType) -> Fraction:
-    """Express a configured instant on a column's physical storage grid.
-
-    Naive bounds on zoned columns are wall-clock times in that zone. Polars
-    performs timezone localization, including its ambiguity/nonexistence checks,
-    on one microsecond literal before any conversion to the input's unit.
-    Fractional ticks are retained for boundaries finer than a Date/ms column.
-    """
-    stamp = value if isinstance(value, datetime) else datetime.combine(value, time())
-    literal = pl.lit(stamp).dt.cast_time_unit("us")
-    if isinstance(dtype, pl.Datetime) and dtype.time_zone:
-        literal = zoned(literal, stamp.tzinfo is not None, dtype.time_zone)
-    microseconds = int(pl.select(literal.cast(pl.Int64)).item())
-    if dtype == pl.Date:
-        return Fraction(microseconds, 86_400_000_000)
-    if not isinstance(dtype, pl.Datetime):
-        raise TypeError(f"an instant cannot be compared with {dtype}")
-    factors = {"ms": Fraction(1, 1000), "us": Fraction(1), "ns": Fraction(1000)}
-    return Fraction(microseconds) * factors[dtype.time_unit]
 
 
 def tick_seconds(dtype: pl.DataType) -> Fraction:

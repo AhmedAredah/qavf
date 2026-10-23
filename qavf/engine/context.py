@@ -18,7 +18,11 @@ import polars as pl
 
 from qavf.engine.capabilities import ReaderCapabilities
 from qavf.engine.catalog import DatasetCatalog
-from qavf.engine.connections import SqlConnections, merge_connection_binding
+from qavf.engine.connections import (
+    SqlConnections,
+    merge_connection_binding,
+    merge_secret_bindings,
+)
 from qavf.engine.relations import bind_scan
 from qavf.engine.resources import ResourceLimitError, RunResources, retained_size
 from qavf.engine.session import Invocation, KeyedLocks
@@ -35,6 +39,7 @@ from qavf.settings import (
     ConnectionSpec,
     DatasetSpec,
     QAVFSettings,
+    SecretSpec,
     SqlAssertion,
     check_sql_names,
 )
@@ -118,7 +123,7 @@ class DataContext:
         memory_budget_bytes: int | None = None,
         temp_directory: Path | None = None,
         reference_time: datetime | None = None,
-        connection_slots: int = 16,
+        connection_slots: int = 2,
     ) -> None:
         specifications = dict(specs or {})
         provided_names = frozenset(frames or {})
@@ -164,7 +169,7 @@ class DataContext:
             self._typed_plans: dict[str, pl.LazyFrame] = {}
             self._typed_checked: set[str] = set()
             self._capabilities = ReaderCapabilities()
-            self._lazy_budget_checked: set[str] = set()
+            self._budget_observations: dict[str, Observation] = {}
             self._closed = False
             self._released: set[str] = set()
             self._release_requested: set[str] = set()
@@ -255,6 +260,9 @@ class DataContext:
             if settings.engine.parallel
             else 1
         )
+        from qavf.engine.thread_budget import memory_workers
+
+        workers = memory_workers(workers, settings.engine.memory_budget_bytes)
         context = cls(
             frames=frames,
             specs=settings.datasets,
@@ -378,7 +386,10 @@ class DataContext:
                 return cached
             if self._is_lazy(name):
                 self._resources.eager_fallbacks.add(name)
-                frame = self._catalog.prepare(name, self.collect(name, self._lazy_snapshot(name)))
+                self._check_lazy_budget(name)
+                frame = self.collect(name, self._lazy_snapshot(name))
+                if name not in self._budget_observations:
+                    frame = self._catalog.prepare(name, frame)
                 self._check_row_budget(name, frame)
                 self._check_cancelled()
                 with self._lock:
@@ -540,6 +551,25 @@ class DataContext:
 
         return Store(self._resources, label)
 
+    def spill_file(self, path: Path):
+        """Own a caller-selected staging file under this run's shared disk quota.
+
+        Close the returned owner (preferably with a ``with`` block). The caller
+        owns publication of the completed payload, e.g. an atomic baseline move.
+        """
+        from qavf.engine.spill import SpillFile
+
+        self._check_cancelled()
+        return SpillFile(Path(path), self._resources.spill_budget)
+
+    def check_materialization(self, name: str, frame: pl.DataFrame) -> None:
+        """Apply the configured target to a completed typed result."""
+        self._check_materialization(name, frame)
+
+    def check_retained_bytes(self, name: str, size: int) -> None:
+        """Admit measured aggregate state without exposing the resource owner."""
+        self._check_retained_bytes(name, size)
+
     def schema(self, name: str) -> dict[str, pl.DataType]:
         """Inspect a dataset's schema without materializing native scan sources."""
         self._check_cancelled()
@@ -578,6 +608,8 @@ class DataContext:
         # Older supported Polars versions reject concurrent borrows of one Python
         # LazyFrame wrapper. Each caller gets its own wrapper over the shared plan.
         with self._lock:
+            if name in self._budget_observations:
+                return self._budget_observations[name].scan()
             plan = self._lazy.get(name)
             if plan is None:
                 plan = self._typed_plans[name]
@@ -671,6 +703,8 @@ class DataContext:
                 self._catalog.record_fingerprint(name, self._fingerprint(name, source))
 
     def _prepare_lazy(self, name: str, frame: pl.LazyFrame) -> pl.LazyFrame:
+        if name in self._budget_observations:
+            return frame  # Admission already normalized names exactly once.
         empty = pl.DataFrame(schema=frame.collect_schema())
         prepared = self._catalog.prepare(name, empty)
         return frame.rename(dict(zip(empty.columns, prepared.columns, strict=True)))
@@ -693,6 +727,9 @@ class DataContext:
         plans = {}
         attachments = set(referenced_connections(query, self.env.connections))
         bindings: dict[str, ConnectionSpec] = {}
+        secrets: dict[str, SecretSpec] = {}
+        if attachments:
+            merge_secret_bindings(secrets, self.env)
         for connection in attachments:
             merge_connection_binding(bindings, connection, self.env)
         for name in names:
@@ -706,10 +743,13 @@ class DataContext:
                 plan = source.scan()
                 if plan is not None:
                     plans[name] = plan
+                    merge_secret_bindings(secrets, source.env)
                     attachments.update(plan.connections)
                     for connection in plan.connections:
                         merge_connection_binding(bindings, connection, source.env)
-        con = self._connection(attachments, bindings)
+        if not plans:
+            merge_secret_bindings(secrets, self.env)
+        con = self._connection(attachments, bindings, secrets)
         self._sql_connections.discard(self._released)
         for name in names:
             if name in self._released:
@@ -756,9 +796,13 @@ class DataContext:
                 frame = self.get(name)
                 check_sql_columns(name, frame.columns)
                 if normalize_missing:
-                    from qavf.rules.helpers import normalize_missing as normalize_frame
+                    from qavf.missingness import normalize_frame
 
-                    frame = normalize_frame(self, name, frame)
+                    spec = self.specs.get(name)
+                    columns = (
+                        spec.schema_spec.columns if spec is not None and spec.schema_spec else {}
+                    )
+                    frame = normalize_frame(frame, columns)
                 unsupported = [
                     column
                     for column, dtype in frame.schema.items()
@@ -799,6 +843,9 @@ class DataContext:
                 self._pandas.discard(name)
                 self._lazy.pop(name, None)
                 self._typed_plans.pop(name, None)
+                observed = self._budget_observations.pop(name, None)
+                if observed is not None:
+                    observed.close()
             if eligible:
                 self._memo.clear()
             self._released.update(eligible)
@@ -967,18 +1014,71 @@ class DataContext:
     def _close_owned(self) -> None:
         with self._lock:
             self._usage_at_close = self._resources.usage()
+            for observed in self._budget_observations.values():
+                observed.close()
+            self._budget_observations.clear()
             self._lazy.clear()
             self._typed_plans.clear()
         self._sql_connections.close()
         self._resources.close()
 
     def resource_usage(self) -> dict[str, Any]:
-        usage = dict(getattr(self, "_usage_at_close", self._resources.usage()))
+        snapshot = getattr(self, "_usage_at_close", None)
+        usage = dict(
+            self._resources.usage(blocking=not self._active) if snapshot is None else snapshot
+        )
         usage["active_workers_at_report"] = len(self._active)
         usage["polars_process_threads"] = pl.thread_pool_size()
         usage["duckdb_threads_per_connection"] = self.env.threads
         usage.update(self._sql_connections.usage())
         return usage
+
+    def reporting_snapshot(self) -> dict[str, Any]:
+        """Describe completed metadata without joining an overdue admission.
+
+        The runner records a snapshot before scheduling. If an active invocation
+        owns the catalog lock during cache admission, keep that prior complete
+        snapshot and explicitly mark metadata/identity as pending.
+        """
+        active = bool(self._active)
+        catalog_acquired = self._lock.acquire(blocking=not active)
+        frames_acquired = catalog_acquired and self._frames.lock.acquire(blocking=not active)
+        acquired = catalog_acquired and frames_acquired
+        snapshot: dict[str, Any]
+        try:
+            if acquired:
+                snapshot = {
+                    "datasets": self.describe(),
+                    "unused_datasets": self.unused(),
+                    "unavailable_datasets": self.unavailable(),
+                    "query_plans": self.query_plans(),
+                }
+                self._reporting_snapshot = snapshot
+            else:
+                snapshot = dict(getattr(self, "_reporting_snapshot", {
+                    "datasets": [], "unused_datasets": [],
+                    "unavailable_datasets": {}, "query_plans": [],
+                }))
+                snapshot["datasets"] = [
+                    info.model_copy(update={"notes": {
+                        **info.notes,
+                        "identity_verified": False,
+                        "identity_verification": "pending: timed-out work remains active",
+                    }})
+                    for info in snapshot["datasets"]
+                ]
+        finally:
+            if frames_acquired:
+                self._frames.lock.release()
+            if catalog_acquired:
+                self._lock.release()
+        return {
+            **snapshot,
+            "resource_usage": {
+                **self.resource_usage(),
+                "metadata_snapshot_pending": not acquired,
+            },
+        }
 
     def query_plans(self) -> list[dict[str, Any]]:
         return self._catalog.query_plans()
@@ -1134,25 +1234,32 @@ class DataContext:
             if source is not None
             else (spec.effective_load_policy().row_budget if spec is not None else None)
         )
-        if budget is None or (source is None and name in self._lazy_budget_checked):
+        if budget is None or name in self._budget_observations:
             return
         with self._operations.guard(), self._key_lock(("row_budget", name)):
-            if source is not None or name not in self._lazy_budget_checked:
-                rows = self._source_operation(
-                    [name],
-                    lambda: (
-                        self._lazy_snapshot(name)
-                        .limit(budget + 1)
-                        .select(pl.len())
-                        .collect(engine="streaming")
-                        .item()
-                    ),
-                )
-                if rows > budget:
-                    raise SourceError(
-                        f"dataset {name!r} has more than {budget:,} rows (row_budget)"
-                    )
-                self._lazy_budget_checked.add(name)
+            if name in self._budget_observations:
+                return
+            from qavf.engine.observation import _lazy
+
+            attempts: list[Observation] = []
+
+            def admit() -> Observation:
+                for previous in attempts:
+                    previous.close()
+                attempts.clear()
+                plan = self._prepare_lazy(name, self._lazy_snapshot(name))
+                observed = _lazy(self, plan, None, budget)
+                attempts.append(observed)
+                return observed
+
+            try:
+                observed = self._source_operation([name], admit)
+            except BaseException:
+                for previous in attempts:
+                    previous.close()
+                raise
+            with self._lock:
+                self._budget_observations[name] = observed
 
     def verify_inputs(self) -> dict[str, str]:
         """Final consistency check for every source used by any execution mode."""
@@ -1160,8 +1267,15 @@ class DataContext:
         if self._active:
             # An overdue worker may hold a source's identity lock while hashing or
             # reading. Finalization must never wait on that worker's source state.
-            for name in self._catalog.identity_names():
-                self._catalog.identity_pending(name)
+            # Admission also publishes catalog/cache state under this lock and
+            # may be blocked in native compaction. Reporting marks its retained
+            # metadata snapshot pending if the lock cannot be acquired now.
+            if self._lock.acquire(blocking=False):
+                try:
+                    for name in self._catalog.identity_names():
+                        self._catalog.identity_pending(name)
+                finally:
+                    self._lock.release()
             return failures
         for name in self._catalog.identity_names():
             try:
@@ -1226,12 +1340,14 @@ class DataContext:
     ) -> tuple[dict[str, pl.DataFrame], dict[str, SourceError], datetime]:
         """Read one transaction; return staged data without publishing a cache entry."""
         bindings: dict[str, ConnectionSpec] = {}
+        secrets: dict[str, SecretSpec] = {}
         for name in members:
             merge_connection_binding(bindings, connection, self._catalog.sources[name].env)
+            merge_secret_bindings(secrets, self._catalog.sources[name].env)
         staged: dict[str, pl.DataFrame] = {}
         failures: dict[str, SourceError] = {}
         staged_bytes = 0
-        with self._sql_connections.temporary([connection], bindings) as con:
+        with self._sql_connections.temporary([connection], bindings, secrets) as con:
             started_at = datetime.now(UTC)
             try:
                 con.execute("BEGIN TRANSACTION")
@@ -1270,7 +1386,7 @@ class DataContext:
                 return staged, failures, started_at
             except BaseException:
                 with contextlib.suppress(duckdb.Error):
-                    con.execute("ROLLBACK")
+                    con.rollback()
                 raise
 
     def _cached(self, name: str) -> pl.DataFrame | None:
@@ -1288,9 +1404,10 @@ class DataContext:
         self,
         attach: Iterable[str],
         bindings: Mapping[str, ConnectionSpec] | None = None,
+        secrets: Mapping[str, SecretSpec] | None = None,
     ) -> duckdb.DuckDBPyConnection | OwnedConnection:
         """This thread's reusable connection with exactly ``attach`` attached."""
-        return self._sql_connections.connection(attach, bindings)
+        return self._sql_connections.connection(attach, bindings, secrets)
 
     def _key_lock(self, key: Any) -> contextlib.AbstractContextManager[None]:
         return self._key_locks.hold(key, check_cancelled=self._check_cancelled)

@@ -10,12 +10,12 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
-from qavf.keys import KeyTypeError, align_keys
 from qavf.rules._execution import (
     KeyBackend,
+    KeyRelation,
     align_key_relations,
-    key_frequencies,
     key_relation,
+    observed_keys,
     paired_key_backend,
 )
 from qavf.rules._key_summary import KeySelection, KeySummary
@@ -29,14 +29,12 @@ from qavf.rules.helpers import (
 from qavf.settings import (
     ForeignKeySpec,
     QAVFSettings,
-    SchemaSpec,
 )
 from qavf.sources.sql import quote_identifier
 
 from ._datasets import (
     CATEGORY,
     DatasetSelection,
-    _key_missing,
     _must_assess,
     _SelectsDatasets,
 )
@@ -103,81 +101,44 @@ class ReferentialIntegrityRule(_SelectsDatasets):
                             )
                         )
                         continue
-                    rows_name = fresh_internal("rows", child_columns)
-                    parent_rows = fresh_internal("rows", parent_columns)
                     backend = paired_key_backend(ctx, dataset, fk.ref_dataset)
-                    if backend is not None:
-                        if self._relation_rules(ctx, dataset, label, fk, failures, exempt, backend):
-                            passed.append(label)
-                        continue
-                    child = key_frequencies(ctx, dataset, fk.columns, rows_name)
-                    parent = key_frequencies(ctx, fk.ref_dataset, fk.target_columns, parent_rows)
-                    child_schema = spec.schema_spec
-                    parent_spec = ctx.specs.get(fk.ref_dataset)
-                    parent_schema = parent_spec.schema_spec if parent_spec else None
-                    clean = self._key_rules(
-                        dataset,
-                        label,
-                        fk,
-                        child,
-                        parent,
-                        failures,
-                        exempt,
-                        ctx.evidence_limit,
-                        child_schema,
-                        parent_schema,
-                        rows_name,
-                        parent_rows,
+                    stable = all(
+                        ctx.is_materialized(name) or ctx.repeatable_scan(name)
+                        for name in (dataset, fk.ref_dataset)
                     )
-                    child_missing, _ = _key_missing(child, fk.columns, child_schema)
-                    parent_missing, _ = _key_missing(parent, fk.target_columns, parent_schema)
-                    position = fresh_internal("position", [*fk.columns, rows_name])
-                    keys = child.filter(~child_missing).select(*fk.columns, rows_name)
-                    reference = (
-                        parent.filter(~parent_missing)
-                        .select(fk.target_columns)
-                        .unique()
-                        .rename(dict(zip(fk.target_columns, fk.columns, strict=True)))
-                    )
-                    try:
-                        left, right = align_keys(keys.select(fk.columns), reference, fk.columns)
-                    except KeyTypeError as exc:
-                        failures.append(
-                            Finding.unassessed(
-                                f"Not assessed: {label}: {exc}.",
-                                check=label,
-                                severity=fk.severity,
-                                datasets=(dataset, fk.ref_dataset),
+                    if backend is not None and stable:
+                        clean = self._relation_rules(
+                            ctx, dataset, label, fk, failures, exempt, backend
+                        )
+                    else:
+                        projections = {dataset: list(fk.columns)}
+                        projections.setdefault(fk.ref_dataset, []).extend(fk.target_columns)
+                        with ctx.projected_observations(projections) as observations:
+                            frequency = fresh_internal("rows", child_columns)
+                            parent_frequency = fresh_internal(
+                                "rows", [*child_columns, *parent_columns, frequency]
                             )
-                        )
-                        continue
-                    matched = left.with_row_index(position).join(
-                        right, on=fk.columns, how="anti", nulls_equal=True
-                    )
-                    # Report orphans with their original (unconverted) key values.
-                    orphans = (
-                        keys.with_row_index(position)
-                        .join(matched.select(position), on=position)
-                        .drop(position)
-                    )
-                    if orphans.is_empty():
-                        if clean:
-                            passed.append(label)
-                        continue
-                    # Counted in distinct keys; ``rows`` holds each key's frequency.
-                    orphan_rows = int(orphans[rows_name].sum())
-                    failures.append(
-                        _orphan_finding(
-                            dataset,
-                            label,
-                            fk,
-                            KeySummary(
-                                orphans.height, orphan_rows, orphans.head(ctx.evidence_limit)
-                            ),
-                            keys.height,
-                            rows_name,
-                        )
-                    )
+                            child = observed_keys(
+                                ctx,
+                                dataset,
+                                observations[dataset].scan(),
+                                fk.columns,
+                                frequency,
+                                collector=observations.collect,
+                            )
+                            parent = observed_keys(
+                                ctx,
+                                fk.ref_dataset,
+                                observations[fk.ref_dataset].scan(),
+                                fk.target_columns,
+                                parent_frequency,
+                                collector=observations.collect,
+                            )
+                            clean = self._check_relations(
+                                ctx, dataset, label, fk, failures, exempt, child, parent
+                            )
+                    if clean:
+                        passed.append(label)
                 except Exception as exc:
                     failures.append(
                         Finding.unassessed(
@@ -216,6 +177,23 @@ class ReferentialIntegrityRule(_SelectsDatasets):
         parent = key_relation(
             ctx, fk.ref_dataset, fk.target_columns, parent_frequency, backend=backend
         )
+        return ReferentialIntegrityRule._check_relations(
+            ctx, dataset, label, fk, failures, exempt, child, parent
+        )
+
+    @staticmethod
+    def _check_relations(
+        ctx: DataContext,
+        dataset: str,
+        label: str,
+        fk: ForeignKeySpec,
+        failures: list[Finding],
+        exempt: dict[str, int],
+        child: KeyRelation,
+        parent: KeyRelation,
+    ) -> bool:
+        """Judge one coherent child/parent observation on either execution backend."""
+        frequency = child.frequency
         child_missing = pl.any_horizontal(pl.col(name).is_null() for name in fk.columns)
         child_all = pl.all_horizontal(pl.col(name).is_null() for name in fk.columns)
         missing_sql = " OR ".join(f"{quote_identifier(name)} IS NULL" for name in fk.columns)
@@ -289,69 +267,6 @@ class ReferentialIntegrityRule(_SelectsDatasets):
         valid = summaries["valid"]
         failures.append(_orphan_finding(dataset, label, fk, orphans, valid.keys, frequency))
         return False
-
-    @staticmethod
-    def _key_rules(
-        dataset: str,
-        label: str,
-        fk: ForeignKeySpec,
-        child: pl.DataFrame,
-        parent: pl.DataFrame,
-        failures: list[Finding],
-        exempt: dict[str, int],
-        limit: int,
-        child_schema: SchemaSpec | None,
-        parent_schema: SchemaSpec | None,
-        child_frequency: str,
-        parent_frequency: str,
-    ) -> bool:
-        """Null-key policy (``match``) and ``cardinality``; ``False`` if any is violated."""
-        clean = True
-        null_any, null_all = _key_missing(child, fk.columns, child_schema)
-        exempt_mask = null_all if fk.match == "full" else null_any
-        if exempted := int(child.filter(exempt_mask)[child_frequency].sum()):
-            exempt[label] = exempted
-        if fk.match == "full":
-            partial_keys = child.filter(null_any & ~null_all)
-            partial_count = int(partial_keys[child_frequency].sum())
-            if partial_count:
-                clean = False
-                failures.append(
-                    _partial_finding(
-                        dataset,
-                        label,
-                        fk,
-                        KeySummary(partial_keys.height, partial_count, partial_keys.head(limit)),
-                        int(child[child_frequency].sum()),
-                        child_frequency,
-                    )
-                )
-        sides = []
-        if fk.cardinality in ("many_to_one", "one_to_one"):
-            sides.append(("parent", parent, fk.target_columns, fk.ref_dataset))
-        if fk.cardinality == "one_to_one":
-            sides.append(("child", child, fk.columns, dataset))
-        for side, frame, columns, name in sides:
-            schema = parent_schema if side == "parent" else child_schema
-            missing, _ = _key_missing(frame, columns, schema)
-            occurrences = parent_frequency if side == "parent" else child_frequency
-            dupes = frame.filter(~missing & (pl.col(occurrences) > 1))
-            if dupes.is_empty():
-                continue
-            clean = False
-            failures.append(
-                _cardinality_finding(
-                    dataset,
-                    label,
-                    fk,
-                    side,
-                    columns,
-                    name,
-                    KeySummary(dupes.height, int(dupes[occurrences].sum()), dupes.head(limit)),
-                    occurrences,
-                )
-            )
-        return clean
 
     @staticmethod
     def _blocked(ctx: DataContext, label: str, fk: ForeignKeySpec, missing: str) -> Finding:

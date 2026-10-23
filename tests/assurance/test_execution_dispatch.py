@@ -9,14 +9,13 @@ import pytest
 from qavf import Query, Status
 from qavf.engine import observation as observation_module
 from qavf.engine.context import DataContext
-from qavf.rules.input_checks import references
 
 from .support.contracts import run_checks
 
 pytestmark = pytest.mark.assurance
 
 
-def _materialize_during_dispatch(monkeypatch, transition: str, rule_id: str) -> list[str]:
+def _materialize_during_dispatch(monkeypatch, transition: str) -> list[str]:
     """Inject a valid cache transition at an exact interleaving, without sleeps."""
     observed = []
     if transition.startswith("dispatch-"):
@@ -33,7 +32,7 @@ def _materialize_during_dispatch(monkeypatch, transition: str, rule_id: str) -> 
             return kind
 
         monkeypatch.setattr(DataContext, "execution_kind", execution_kind)
-    elif rule_id == "REC-004":
+    else:
         original_observe = observation_module.observe
 
         @contextmanager
@@ -47,19 +46,6 @@ def _materialize_during_dispatch(monkeypatch, transition: str, rule_id: str) -> 
                 yield observation
 
         monkeypatch.setattr(observation_module, "observe", observe)
-    else:
-        original_relation = references.key_relation
-
-        def key_relation(ctx, dataset, *args, **kwargs):
-            relation = original_relation(ctx, dataset, *args, **kwargs)
-            if dataset == "child" and not observed:
-                # The left relation already exists. A different consumer fills
-                # the right cache before its matching relation is constructed.
-                ctx.get("parent")
-                observed.append("parent")
-            return relation
-
-        monkeypatch.setattr(references, "key_relation", key_relation)
     return observed
 
 
@@ -83,7 +69,7 @@ def test_paired_verdicts_survive_materialization_transition(
             "left": {"dataset": "child", "columns": ["id"]},
             "right": {"dataset": "parent", "columns": ["id"]},
         }]
-    observed = _materialize_during_dispatch(monkeypatch, transition, rule_id)
+    observed = _materialize_during_dispatch(monkeypatch, transition)
     results = run_checks(inputs, rule_id, datasets=datasets, params=params)
     assert len(observed) == 1, "the materialization interleaving must actually be exercised"
     assert len(results) == 1

@@ -1,10 +1,12 @@
 """Seeded resampling (i.i.d. and block bootstraps), the work budget, and HAC errors.
 
 Every resampling test draws from ``numpy.random.Generator(PCG64(seed))`` and
-records the seed, so a run is reproduced exactly by the same seed (PCG64 and
-the integer draws used here are platform-independent). The work budget caps
-``resamples x n``: a test that would exceed ``max_work`` is not assessed
-rather than slow.
+records the seed. Reproduce a run with the same inputs, options and locked
+numerical environment; NumPy does not guarantee identical streams across
+arbitrary builds or changed draw calls. The work budget caps
+the estimated values processed (including permutations and leave-one-out
+calculations). A test that would exceed ``max_work`` is
+not assessed, with its required work reported.
 
 For sequential observations (time buckets) the circular block bootstrap
 resamples blocks of consecutive observations, wrapping at the end, so
@@ -31,12 +33,50 @@ DEFAULT_SEED = 0
 DEFAULT_RESAMPLES = 2_000
 """Bootstrap and permutation resamples unless configured."""
 DEFAULT_MAX_WORK = 20_000_000
-"""Largest ``resamples x n`` one test may spend (values touched)."""
+"""Largest estimated work one test may spend (values touched)."""
 _CHUNK = 1_000_000
 """Values resampled per batch, bounding the memory of one test."""
 
 type Statistic = Callable[[np.ndarray], np.ndarray]
 """A statistic computed along the last axis (``lambda a: a.mean(axis=-1)``)."""
+
+
+def check_resamples(resamples: int) -> int:
+    """At least two draws are needed for resampling uncertainty estimates."""
+    if isinstance(resamples, bool) or not isinstance(resamples, int | np.integer) or resamples < 2:
+        raise ValueError("resamples must be an integer >= 2")
+    return int(resamples)
+
+
+def checked_statistics(values: object, shape: tuple[int, ...]) -> np.ndarray:
+    """Admit exactly one finite statistic per last-axis sample, never broadcast it."""
+    result = np.asarray(values, dtype=float)
+    if result.shape != shape:
+        raise Unassessable(
+            f"statistic returned shape {result.shape}; expected {shape} (one value per sample)"
+        )
+    if not np.isfinite(result).all():
+        raise Unassessable("the statistic is not finite in the observations or resamples")
+    return result
+
+
+def evaluate(statistic: Statistic, values: np.ndarray) -> np.ndarray:
+    """Evaluate a last-axis statistic in the units supplied by its caller."""
+    return checked_statistics(statistic(values), values.shape[:-1])
+
+
+def jackknife(sample: np.ndarray, statistic: Statistic) -> np.ndarray:
+    """Leave-one-out statistics with bounded sample batches, in input order."""
+    n = len(sample)
+    out = np.empty(n)
+    done = 0
+    for step in batches(n, n):
+        positions = np.arange(n - 1)[None, :]
+        omitted = np.arange(done, done + step)[:, None]
+        indices = positions + (positions >= omitted)
+        out[done : done + step] = evaluate(statistic, sample[indices])
+        done += step
+    return out
 
 
 def generator(seed: int) -> np.random.Generator:
@@ -50,9 +90,11 @@ def check_work(work: int, max_work: int, what: str) -> None:
     Raises:
         Unassessable: naming the work needed and the budget.
     """
+    if isinstance(max_work, bool) or not isinstance(max_work, int | np.integer) or max_work < 0:
+        raise ValueError("max_work must be a non-negative integer")
     if work > max_work:
         raise Unassessable(
-            f"{what} needs {work:,} units of work (resamples x values), more than "
+            f"{what} needs {work:,} units of work (values processed), more than "
             f"max_work {max_work:,}"
         )
 
@@ -78,6 +120,7 @@ def bootstrap_distribution(
     ``combine`` receives one ``(batch, n_i)`` array per sample and returns the
     ``batch`` statistics.
     """
+    check_resamples(resamples)
     out = np.empty(resamples)
     done = 0
     total = sum(len(sample) for sample in samples)
@@ -85,7 +128,7 @@ def bootstrap_distribution(
         drawn = [
             sample[rng.integers(0, len(sample), size=(step, len(sample)))] for sample in samples
         ]
-        out[done : done + step] = combine(*drawn)
+        out[done : done + step] = checked_statistics(combine(*drawn), (step,))
         done += step
     return out
 
@@ -100,16 +143,31 @@ def permutation_p_value(
     ``1e-12`` count as extreme. Two-sided: twice the smaller one-sided value,
     capped at 1 (SciPy's convention).
     """
-    tolerance = 1e-12 * max(abs(observed), 1.0)
-    above = np.count_nonzero(distribution >= observed - tolerance)
-    below = np.count_nonzero(distribution <= observed + tolerance)
+    checked_statistics(distribution, (len(distribution),))
+    checked_statistics(observed, ())
+    if not len(distribution):
+        raise Unassessable("no resampling statistics are available")
+    if alternative not in ("two-sided", "greater", "less"):
+        raise ValueError(f"unknown alternative {alternative!r}")
+    tolerance = 1e-12 * abs(observed)
+    above = int(np.count_nonzero(distribution >= observed - tolerance))
+    below = int(np.count_nonzero(distribution <= observed + tolerance))
+    return permutation_p_from_counts(above, below, len(distribution), alternative, exact)
+
+
+def permutation_p_from_counts(
+    above: int, below: int, resamples: int, alternative: str, exact: bool = False
+) -> float:
+    """Tail counts allow permutation distributions to be consumed in bounded batches."""
     extra = 0 if exact else 1
-    greater = (above + extra) / (len(distribution) + extra)
-    less = (below + extra) / (len(distribution) + extra)
+    greater = (above + extra) / (resamples + extra)
+    less = (below + extra) / (resamples + extra)
     if alternative == "greater":
         return float(greater)
     if alternative == "less":
         return float(less)
+    if alternative != "two-sided":
+        raise ValueError(f"unknown alternative {alternative!r}")
     return float(min(1.0, 2 * min(greater, less)))
 
 
@@ -120,7 +178,12 @@ def interval_p_value(distribution: np.ndarray, alternative: str = "two-sided") -
     + 1, #(d* >= 0) + 1) / (B + 1)`` capped at 1, or one tail for ``greater``
     (a positive difference) and ``less``.
     """
+    checked_statistics(distribution, (len(distribution),))
     resamples = len(distribution)
+    if not resamples:
+        raise Unassessable("no resampling statistics are available")
+    if alternative not in ("two-sided", "greater", "less"):
+        raise ValueError(f"unknown alternative {alternative!r}")
     upper = (np.count_nonzero(distribution <= 0) + 1) / (resamples + 1)
     lower = (np.count_nonzero(distribution >= 0) + 1) / (resamples + 1)
     if alternative == "greater":

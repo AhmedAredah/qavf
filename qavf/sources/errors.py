@@ -15,7 +15,14 @@ def redacted_error(exc: BaseException, cls: type[SourceError] = SourceError) -> 
     The original exception is not chained: its text (and its traceback, if
     logged) could still hold a password or access token.
     """
-    error = cls(redact_text(str(exc)))
+    message = redact_text(str(exc))
+    if "__qavf_exact_column" in message and "empty set of columns" in message:
+        message += (
+            "\nThe requested column spelling is unavailable in the native reader. "
+            "Use its exact decoded name, or supply a typed frame to preserve "
+            "physical column names that differ only in case."
+        )
+    error = cls(message)
     error.retryable = bool(getattr(exc, "retryable", False))
     if isinstance(exc, duckdb.HTTPException):
         # Authentication/not-found responses are permanent; retry only explicit

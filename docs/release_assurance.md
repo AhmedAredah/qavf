@@ -8,7 +8,8 @@ workflow does not publish a release.
 
 ## Modular verification tools
 
-`scripts/verify_release.py` is the small command-line interface. The
+`scripts/verify_platform.py` runs the complete checks for one host;
+`scripts/verify_release.py` exposes individual checks. The
 `scripts/release_checks` package separates responsibilities:
 
 - `provenance.py`: source/lock identity, interpreter and dependency versions,
@@ -21,6 +22,7 @@ workflow does not publish a release.
 - `extensions.py`: required signed DuckDB extension provisioning through HTTPS.
 - `validation.py`: independent checks of completed outcomes and actual runtimes.
 - `gate.py`: the complete required matrix and aggregate release decision.
+- `platform.py`: host detection, full command sequencing and retained failure evidence.
 
 These development helpers are included in the source distribution; they add no
 runtime dependency to the QAVF wheel. The production API remains unchanged.
@@ -34,15 +36,21 @@ runtime dependency to the QAVF wheel. The production API remains unchanged.
 | macOS / Python 3.12 | Source and installed wheel, normal and optimized Python |
 | Linux / Python 3.12 / direct dependency floors | Installed wheel, normal and optimized Python |
 | Linux / Python 3.12 / core dependencies only | Installed wheel capability checks, normal and optimized Python |
-| Linux / Python 3.12 / live integration dependencies | Required PostgreSQL and S3-compatible service tests |
+| Linux / Python 3.12 / live integration dependencies | Required HTTP, PostgreSQL and S3-compatible service tests |
 
-Two GitHub Actions workflows keep routine runs small. `ci.yml` runs on pushes and
-pull requests: lint, types, generated-docs check and the full suite on Linux, plus
-the operating-system-specific tests on Windows and macOS. `verify.yml` runs this
-complete matrix for `v*` release tags or on demand. It runs every shard without
-matrix fail-fast and uploads execution evidence even after failure. Its final
-**Required release assurance** job requires successful upstream job conclusions and
-one matching evidence record for every required phase.
+The included [CI workflow](../.github/workflows/ci.yml) runs on pushes, pull
+requests and manual dispatch. Every matrix member runs `verify_platform.py`:
+full source and isolated installed-wheel suites in normal and optimized Python,
+with distribution validation and signed extension preparation. Linux 3.12 also
+captures branch/subprocess coverage and checks lint, types, generated docs and
+a separately installed core-only wheel. Matrix jobs do not fail fast; completed
+evidence and distributions are uploaded even after failure. The workflow has
+read-only repository permissions and does not publish packages.
+
+The workflow has not been executed on GitHub Actions as part of this local
+review. Actual Windows and macOS runs remain required. Dependency floors and
+live integrations use the separate procedures below. A green routine CI run
+does not replace the complete aggregate gate.
 
 Each record identifies the source digest, lockfile digest, Git revision (when
 available), CI run/attempt, dependency versions, OS, Python version, optimization
@@ -76,6 +84,10 @@ separate test directory under the system temporary directory. It copies test and
 documentation fixtures, never the `qavf` source package, and verifies the imported
 package is inside the wheel environment. Locked runs export the committed lock
 with `uv export --locked` and install those exact resolved versions with the wheel.
+The committed lock currently selects DuckDB 1.5.6. The updated-package audit ran
+locally with DuckDB 2.0.0; that result is separate evidence and does not establish
+that the locked 1.5.6 environment passes. The CI workflow uses `uv sync --locked`,
+and each strict execution record reports its actual dependency versions.
 The floor run intentionally uses the separate direct-version constraints in
 `tests/dependency-floors.txt`, not the current dependency lock. Its transitive
 versions are recorded; it does not claim they are minimum or locked versions.
@@ -86,7 +98,10 @@ signatures and version/platform checks remain enabled. Download failure still
 blocks the gate.
 
 Core-only runs export only locked core dependencies and run explicit checks even
-under `python -O`.
+under `python -O`. They require pandas, SciPy and pyproj to be absent, exercise
+ordinary input verdicts and exact temporal readback, and verify that unavailable
+statistics and unsupported coordinate systems fail explicitly. The floor recipe
+includes every core and optional direct dependency, including the spatial extra.
 
 For required integration tests, provision the disposable services and environment
 variables described in `docs/integrations.md`, then run:
@@ -98,7 +113,7 @@ uv run --no-sync python scripts/verify_release.py test --integration --id integr
 ```
 
 The ordinary strict suite deselects `integration` tests; the dedicated integration
-job requires them. A developer's optional integration skips never satisfy release
+phase requires them. A developer's optional integration skips never satisfy release
 readiness. Extension download or service failures remain failures, not successful
 coverage. External pytest flags, plugin injection and Python import paths are
 removed from verification child environments; the required Hypothesis and release
@@ -126,8 +141,10 @@ After collecting **all** required environments for the same source revision:
 uv run --no-project python scripts/verify_release.py aggregate --evidence-dir evidence --output release-assurance.json
 ```
 
-A partial local run deliberately produces `release_ready: false`. CI additionally
-passes its independent job conclusions via `QAVF_CI_JOBS`. Never describe unexecuted
+A partial local run deliberately produces `release_ready: false`. When automating
+the complete release gate, also supply independent upstream job conclusions via
+`QAVF_CI_JOBS` or `--jobs-json`; the included routine CI does not invoke this gate.
+Never describe unexecuted
 Windows, macOS, remote services, or Python versions as passing based on another
 platform's result. Evidence is execution provenance, not cryptographic attestation
 against a malicious actor who can modify the workflow and records together.
@@ -162,3 +179,25 @@ policy explicitly.
   and [required status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches).
 - [DuckDB: installing extensions](https://duckdb.org/docs/stable/extensions/installing_extensions.html).
 - [coverage.py: subprocess measurement](https://coverage.readthedocs.io/en/latest/subprocess.html).
+
+
+## Full native platform verification
+
+Use Python 3.12 on Windows and macOS. From the repository root,
+run these commands in PowerShell or Terminal:
+
+```sh
+uv sync --locked --all-extras --group dev --python 3.12
+uv run --no-sync python scripts/verify_platform.py --output-dir release-evidence/attempt-1
+```
+
+Keep the entire `release-evidence/attempt-1` directory as that host's evidence. The command builds the
+package and runs full source and isolated installed-wheel suites in normal and
+optimized Python. Linux supports Python 3.12, 3.13 and 3.14; select the matching
+interpreter during sync. Linux 3.12 also records branch and subprocess coverage.
+Dependencies and signed DuckDB extensions require network access. Failures and
+missing evidence remain blocking. Use a fresh attempt directory for retries;
+run only one verification process per checkout because it rebuilds `dist`.
+A host pass does not qualify the complete release: dependency floors and live
+integrations remain separate gates. Native Windows/macOS results must come
+from actual runs on those operating systems.

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import ClassVar
 
-import duckdb
+import polars as pl
 
-from qavf.engine.context import DataContext, DatasetNotAvailableError
+from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
+from qavf.engine.observation_sql import sample_observed
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
@@ -17,14 +20,12 @@ from qavf.rules.helpers import (
 from qavf.settings import (
     QAVFSettings,
 )
-from qavf.sources.base import SourceError
 from qavf.sources.sql import quote_identifier
 
 from ._datasets import (
     CATEGORY,
     DatasetSelection,
     _must_assess,
-    _row_count,
     _SelectsDatasets,
 )
 
@@ -53,15 +54,19 @@ class ExpressionRule(_SelectsDatasets):
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         failures: list[Finding] = []
         passed: list[str] = []
+        known_unavailable = ctx.unavailable()
         for dataset, spec in ctx.specs.items():
             selection = self.params.datasets
             if (selection is not None and dataset not in selection) or not spec.expressions:
                 continue
-            if not ctx.has(dataset):
+            # Availability probing can evaluate a parameter-bound native query
+            # on older DuckDB versions. Consult known failures without reading;
+            # the owned observation below performs the first actual read.
+            if (reason := known_unavailable.get(dataset)) is not None:
                 if _must_assess(ctx, dataset, selection):
                     failures += [
                         Finding.unassessed(
-                            f"Not assessed: {ctx.unavailable_reason(dataset)}.",
+                            f"Not assessed: {reason}.",
                             check=f"{dataset}: {expression.name or expression.expr}",
                             severity=expression.severity,
                             datasets=(dataset,),
@@ -69,52 +74,79 @@ class ExpressionRule(_SelectsDatasets):
                         for expression in spec.expressions
                     ]
                 continue
-            rows = _row_count(ctx, dataset)
-            table = quote_identifier(dataset)
-            for expression in spec.expressions:
-                label = expression.name or expression.expr
-                fallback = "true" if expression.null_as == "pass" else "false"
-                query = f"SELECT * FROM {table} WHERE NOT coalesce(({expression.expr}), {fallback})"
+            with contextlib.ExitStack() as stack:
                 try:
-                    # Dependencies come from parsing the whole query, so names inside
-                    # literals or comments are not mistaken for datasets. Offending rows
-                    # are counted in full but only a sample is materialised.
-                    bad, count = ctx.sql_sample(query, ctx.evidence_limit, normalize_missing=True)
-                except (duckdb.Error, DatasetNotAvailableError, SourceError) as exc:
-                    # Each expression stands alone: one that cannot run never hides the
-                    # results of the others.
-                    failures.append(
+                    observed = stack.enter_context(ctx.observe(dataset))
+                    rows = int(observed.reduce(lambda frame: frame.select(pl.len())).item())
+                except Exception as exc:
+                    if not _must_assess(ctx, dataset, selection):
+                        continue
+                    failures.extend(
                         Finding.unassessed(
-                            f"Not assessed: expression '{label}' on {dataset} could not be "
-                            f"evaluated: {_reason(exc)}",
-                            check=f"{dataset}: {label}",
+                            f"Not assessed: expression '{expression.name or expression.expr}' "
+                            f"on {dataset} could not read its input: {_reason(exc)}",
+                            check=f"{dataset}: {expression.name or expression.expr}",
                             severity=expression.severity,
                             datasets=(dataset,),
                         )
+                        for expression in spec.expressions
                     )
                     continue
-                if not count:
-                    passed.append(f"{dataset}: {label}")
-                    continue
-                failures.append(
-                    Finding.fail(
-                        f"{plural(count, 'row')} of {rows:,} in {dataset} "
-                        f"{'violates' if count == 1 else 'violate'} '{expression.expr}'.",
-                        check=f"{dataset}: {label}",
-                        severity=expression.severity,
-                        affected=bad,
-                        affected_count=count,
-                        total_records=rows,
-                        unit="rows",
-                        datasets=(dataset,),
-                    )
-                )
+                found, successful = self._evaluate_observed(ctx, dataset, rows, observed)
+                failures.extend(found)
+                passed.extend(successful)
         return outcome(
             failures,
             passed,
             f"{plural(len(passed), 'row expression')} hold.",
             "No row expressions are configured.",
         )
+
+    @staticmethod
+    def _evaluate_observed(
+        ctx: DataContext, dataset: str, rows: int, observed: Observation
+    ) -> tuple[list[Finding], list[str]]:
+        failures: list[Finding] = []
+        passed: list[str] = []
+        table = quote_identifier(dataset)
+        for expression in ctx.specs[dataset].expressions:
+            label = expression.name or expression.expr
+            fallback = "true" if expression.null_as == "pass" else "false"
+            query = f"SELECT * FROM {table} WHERE NOT coalesce(({expression.expr}), {fallback})"
+            try:
+                bad, count = sample_observed(
+                    ctx, query, {dataset: observed}, ctx.evidence_limit, normalize_missing=True
+                )
+            except Exception as exc:
+                # Each expression stands alone: one that cannot run never hides the
+                # results of the others.
+                failures.append(
+                    Finding.unassessed(
+                        f"Not assessed: expression '{label}' on {dataset} could not be "
+                        f"evaluated: {_reason(exc)}",
+                        check=f"{dataset}: {label}",
+                        severity=expression.severity,
+                        datasets=(dataset,),
+                    )
+                )
+                continue
+            if not count:
+                passed.append(f"{dataset}: {label}")
+                continue
+            failures.append(
+                Finding.fail(
+                    f"{plural(count, 'row')} of {rows:,} in {dataset} "
+                    f"{'violates' if count == 1 else 'violate'} '{expression.expr}'.",
+                    check=f"{dataset}: {label}",
+                    severity=expression.severity,
+                    affected=bad,
+                    affected_count=count,
+                    total_records=rows,
+                    unit="rows",
+                    datasets=(dataset,),
+                )
+            )
+        return failures, passed
 
 
 def _reason(exc: Exception) -> str:
@@ -152,7 +184,7 @@ class SqlAssertionRule(Rule):
                 bad, count = ctx.sql_sample(
                     sql, ctx.evidence_limit, ordered=True, normalize_missing=True
                 )
-            except (duckdb.Error, DatasetNotAvailableError, SourceError) as exc:
+            except Exception as exc:
                 # e.g. a database connection that cannot be attached: this assertion only.
                 failures.append(
                     Finding.unassessed(

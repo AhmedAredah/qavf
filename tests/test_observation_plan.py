@@ -28,7 +28,9 @@ def test_plan_unions_once_and_releases_each_input_at_its_last_contract(tmp_path,
     calls, opened = {"a": [], "b": []}, []
     frame = pl.DataFrame({"x": [1, 2], "y": [3, 4], "unused": ["secret"] * 2})
     with DataContext(
-        frames={name: lazy(frame, seen) for name, seen in calls.items()}, temp_directory=tmp_path
+        frames={name: lazy(frame, seen) for name, seen in calls.items()},
+        cache_max_bytes=0,
+        temp_directory=tmp_path,
     ) as ctx:
         original = ctx.observe
 
@@ -103,7 +105,9 @@ def test_failure_cache_drops_tracebacks_and_allows_unrelated_input(tmp_path, mon
 def test_view_close_never_closes_shared_parent_and_unused_contracts_do_not_read(tmp_path):
     calls = []
     with DataContext(
-        frames={"a": lazy(pl.DataFrame({"x": [1]}), calls)}, temp_directory=tmp_path
+        frames={"a": lazy(pl.DataFrame({"x": [1]}), calls)},
+        cache_max_bytes=0,
+        temp_directory=tmp_path,
     ) as ctx:
         with ctx.observation_plan([{"a": ["x"]}, {"a": ["x"]}, {"absent": ["x"]}]) as plan:
             with plan.contract(0) as observed:

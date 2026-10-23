@@ -304,6 +304,8 @@ class ComparisonSpec(RuleParams):
             if condition is not None:
                 _check_where(condition)
         levels = self.selected_levels()
+        if not levels:
+            raise ValueError("'levels' must select at least one comparison level")
         if repeated := _repeated([level.label for level in levels]):
             raise ValueError(
                 f"levels repeat the name(s) {', '.join(repeated)}; give each a distinct 'name'"

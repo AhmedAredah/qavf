@@ -77,6 +77,10 @@ def _normalize(
             return item
         if isinstance(item, Enum):
             return visit(item.value, depth)
+        if isinstance(item, str):
+            # Caller text may carry a renderer-specific __html__ trust marker
+            # (e.g. Markup). Evidence is data, never trusted template content.
+            return str.__str__(item)
         if isinstance(item, datetime | timedelta) and type(item) not in (datetime, timedelta):
             item = normalize_temporal_scalar(item)
         if (
@@ -291,7 +295,8 @@ def iter_json_string(value: str) -> Iterator[bytes]:
 
 
 def iter_audit_json(
-    value: Any, *, sort_keys: bool = False, max_bytes: int | None = None
+    value: Any, *, sort_keys: bool = False, max_bytes: int | None = None,
+    normalize_float_zero: bool = False,
 ) -> Iterator[bytes]:
     """Stream canonical tagged values without constructing a second evidence graph.
 
@@ -300,6 +305,8 @@ def iter_audit_json(
     contains ordered lists instead of sets. Strings and binary values are emitted
     in bounded chunks. A byte ceiling rejects a known oversized binary value
     before expanding it into base64.
+    ``normalize_float_zero`` gives indexed grouping equal signed-zero keys
+    without constructing a second container graph; audit output preserves signs.
     """
     if max_bytes is not None and (
         isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0
@@ -394,6 +401,8 @@ def iter_audit_json(
             yield suffix
             return
         if isinstance(item, float) and math.isfinite(item):
+            if normalize_float_zero and item == 0:
+                item = 0.0
             yield json.dumps(item, allow_nan=False).encode("ascii")
             return
         normalized = normalize_evidence(item)

@@ -27,6 +27,7 @@ a constant column, a zero denominator) is not assessed, never passed.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -38,7 +39,13 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from qavf.compare.levels import SIDES, ComparisonLevel, LevelInputs, not_assessed, register_level
-from qavf.compare.levels.groups import MeasureSpec, materiality, reduce_groups
+from qavf.compare.levels.groups import (
+    MeasureSpec,
+    group_partitions,
+    materiality,
+    precise_frame,
+    reduce_groups,
+)
 from qavf.compare.levels.temporal import KeyedSides, TimeMembers, keyed_sides
 from qavf.compare.results import (
     Agreement,
@@ -53,7 +60,6 @@ from qavf.compare.significance import (
     MeasureTest,
     Member,
     family_check,
-    sample_extras,
 )
 from qavf.compare.significance import label as member_label
 from qavf.compare.spec import ComparisonSpec, InferenceParams, Side
@@ -205,7 +211,10 @@ class _Family:
 
 
 def _float(value: Any) -> float | None:
-    return None if value is None or not np.isfinite(value) else float(value)
+    if value is None:
+        return None
+    converted = float(value)
+    return converted if math.isfinite(converted) else None
 
 
 def _equivalence(method: str) -> TestResult:
@@ -232,6 +241,19 @@ class RelationshipsLevel(ComparisonLevel):
         if params.agreement is not None and not spec.keys:
             return ["'agreement' needs the comparison's 'keys' to match records"]
         return []
+
+    def required_columns(self) -> frozenset[str]:
+        params: RelationshipsParams = self.params  # type: ignore[assignment]
+        columns = set(params.group_by)
+        if params.time is not None:
+            columns.add(params.time.time_column)
+        if params.correlation is not None:
+            columns.update(params.correlation.columns)
+        if params.agreement is not None:
+            columns.update(params.agreement.columns)
+        for ratio in params.ratios:
+            columns.update((ratio.numerator, ratio.denominator))
+        return frozenset(columns)
 
     def evaluate(self, inputs: LevelInputs, name: str) -> RelationshipsResult:
         params: RelationshipsParams = self.params  # type: ignore[assignment]
@@ -321,41 +343,32 @@ class RelationshipsLevel(ComparisonLevel):
                 dtype = relations[side].schema.get(column)
                 if dtype is None or not dtype.is_numeric():
                     raise ValueError(f"{side} column {column!r} is missing or not numeric")
-        rows = sum(inputs.rows(side) for side in SIDES) * len(check.columns)
-        if rows > inference.max_work:
-            raise ValueError(f"collecting {rows:,} values exceeds max_work {inference.max_work:,}")
+        pair_count = len(check.columns) * (len(check.columns) - 1) // 2
+        work = (
+            max(1, sum(inputs.rows(side) for side in SIDES)) * 2 * pair_count * len(check.methods)
+        )
+        if work > inference.max_work:
+            raise ValueError(
+                f"correlation pair/method work {work:,} exceeds max_work {inference.max_work:,}"
+            )
         pairs = list(combinations(check.columns, 2))
-        roles: dict[str, Callable[[ProjectedRelation, bool], pl.Expr]] = {}
-        for column in check.columns:
-            roles[f"lossy_{column}"] = sample_extras(column)["lossy"]
-        for index, (a, b) in enumerate(pairs):
-            roles[f"x_{index}"] = _complete(a, b, a)
-            roles[f"y_{index}"] = _complete(a, b, b)
-        count = (MeasureSpec(measure="count"),)
-        aligned = reduce_groups(inputs, sides.keys, count, relations, [roles])
-        named = aligned.extras[0]
-        keys = aligned.keys
-        lossy = [
-            aligned.columns[side][named[f"lossy_{c}"]] for c in check.columns for side in SIDES
-        ]
-        columns = [
-            aligned.columns[side][named[f"{axis}_{index}"]]
-            for index in range(len(pairs))
-            for side in SIDES
-            for axis in ("x", "y")
-        ]
-        # Exact correlations of each member's complete rows (deterministic whatever the
-        # order or batching of the rows), per pair and side.
+        # One pair at a time: raw samples no longer expand quadratically in width.
+        # Results retain scalar coefficients only. Selected methods alone execute.
         measured: list[tuple[dict[str, Any], int, dict[str, Any]]] = []
-        for row in aligned.both.select([*keys, *lossy, *columns]).iter_rows():
-            group = dict(zip(keys, row[: len(keys)], strict=True))
-            unusable = any(row[len(keys) : len(keys) + len(lossy)])
-            values = row[len(keys) + len(lossy) :]
-            for index in range(len(pairs)):
-                sides_xy = values[4 * index : 4 * index + 4]
-                found_r: dict[str, Any] = {"unusable": unusable}
-                for side, (x, y) in zip(SIDES, (sides_xy[:2], sides_xy[2:]), strict=True):
-                    found_r[side] = _exact_correlations(x or [], y or [])
+        keys = sides.keys
+        for index, (a, b) in enumerate(pairs):
+            roles = {"x": _complete(a, b, a), "y": _complete(a, b, b)}
+            aligned = reduce_groups(
+                inputs, keys, (MeasureSpec(measure="count"),), relations, [roles]
+            )
+            named = aligned.extras[0]
+            columns = [aligned.columns[side][named[axis]] for side in SIDES for axis in ("x", "y")]
+            for row in precise_frame(aligned.both.select([*keys, *columns]), keys).iter_rows():
+                group = dict(zip(keys, row[: len(keys)], strict=True))
+                values = row[len(keys) :]
+                found_r: dict[str, Any] = {"unusable": False}
+                for side, (x, y) in zip(SIDES, (values[:2], values[2:]), strict=True):
+                    found_r[side] = _exact_correlations(x or [], y or [], check.methods)
                 measured.append((group, index, found_r))
         results: list[CheckResult] = []
         changes: list[CorrelationChange] = []
@@ -437,7 +450,7 @@ class RelationshipsLevel(ComparisonLevel):
         )
         keys = aligned.keys
         columns = [aligned.columns[side][alias] for alias in aligned.aliases for side in SIDES]
-        rows = list(aligned.both.select([*keys, *columns]).iter_rows())
+        rows = list(precise_frame(aligned.both.select([*keys, *columns]), keys).iter_rows())
         parts = [[exact_rational(v) for v in row[len(keys) :]] for row in rows]
         whole = all(
             value is not None and value >= 0 and value.denominator == 1
@@ -505,10 +518,14 @@ class RelationshipsLevel(ComparisonLevel):
         inference: Inference,
     ) -> tuple[list[CheckResult], list[Agreement], int]:
         keys = list(inputs.spec.keys)
-        members = [k for k in sides.keys if k not in keys]
-        rows = sum(inputs.rows(side) for side in SIDES)
-        if rows > inference.max_work:
-            raise ValueError(f"collecting {rows:,} rows exceeds max_work {inference.max_work:,}")
+        # A member key may also identify the record (site, year, ...). It is
+        # already projected in that case, but still belongs in the partition.
+        members = list(sides.keys)
+        values = sum(inputs.rows(side) for side in SIDES) * len(check.columns)
+        if values > inference.max_work:
+            raise ValueError(
+                f"collecting {values:,} agreement values exceeds max_work {inference.max_work:,}"
+            )
         frames: dict[Side, pl.DataFrame] = {}
         for side in SIDES:
             relation = relations[side]
@@ -531,32 +548,58 @@ class RelationshipsLevel(ComparisonLevel):
             keys,
         )
         # Key order makes the floating-point metrics independent of row order.
-        matched = base.join(cand, on=keys, how="inner", nulls_equal=False).sort(keys)
+        matched = base.join(cand, on=keys, how="inner", nulls_equal=True).sort(keys)
         results: list[CheckResult] = []
         agreement: list[Agreement] = []
-        groups = (
-            matched.partition_by(members, maintain_order=True, as_dict=True)
-            if members
-            else {(): matched}
-        )
-        ordered = sorted(groups.items(), key=lambda item: _order(item[0]))
+        ordered = sorted(group_partitions(matched, members), key=lambda item: _order(item[0]))
         noun = "bucket" if sides.bucket is not None else "group"
         for column in check.columns:
             family = _Family()
             found: list[Agreement] = []
             for key, frame in ordered:
                 group = dict(zip(members, key, strict=True))
-                pair = frame.select(
-                    pl.col(renamed[column]).cast(pl.Float64), pl.col(column).cast(pl.Float64)
-                ).drop_nulls()
-                pair = pair.filter(pl.all_horizontal(pl.all().is_finite()))
-                b, c = (pair.to_series(i).to_numpy() for i in (0, 1))
-                record = {**group, "column": column, "pairs": len(b)}
-                if len(b) < check.min_pairs:
+                pair = frame.select(renamed[column], column).drop_nulls()
+                floating = [name for name, dtype in pair.schema.items() if dtype.is_float()]
+                if floating:
+                    pair = pair.filter(pl.all_horizontal(pl.col(floating).is_finite()))
+                record = {**group, "column": column, "pairs": pair.height}
+                if pair.height < check.min_pairs:
                     reason = f"fewer than min_pairs {check.min_pairs} matched pairs"
                     family.unmeasured.append({**record, "reason": reason})
                     continue
-                measured = _agreement(check, column, group, b, c)
+                exact = any(dtype.is_integer() or dtype.is_decimal() for dtype in pair.dtypes)
+                if exact:
+                    originals = [
+                        pair.to_series(i).to_list()
+                        if pair.dtypes[i].is_integer()
+                        else list(map(Fraction, pair.to_series(i)))
+                        for i in (0, 1)
+                    ]
+                    b = c = np.empty(0)
+                    if check.fit != "ols" or inference.tests:
+                        # A shared translation preserves the identity null. Admission
+                        # prevents differences being rounded away by the inference kernel.
+                        origin = originals[0][0]
+                        centred = [[v - origin for v in values] for values in originals]
+                        lossless = all(
+                            math.isfinite(float(v)) and Fraction(float(v)) == v
+                            for values in centred
+                            for v in values
+                        )
+                        if not lossless:
+                            family.unmeasured.append(
+                                {
+                                    **record,
+                                    "reason": "centred exact values cannot be represented "
+                                    "as Float64 for inference",
+                                }
+                            )
+                            continue
+                        b, c = (np.asarray(values, dtype=float) for values in centred)
+                    measured = _exact_agreement(check, column, group, *originals)
+                else:
+                    b, c = (pair.to_series(i).cast(pl.Float64).to_numpy() for i in (0, 1))
+                    measured = _agreement(check, column, group, b, c)
                 record |= {
                     name: getattr(measured, name)
                     for name in ("bias", "lower", "upper", "ccc", "mae", "rmse", "slope",
@@ -597,18 +640,23 @@ def _complete(a: str, b: str, column: str) -> Callable[[ProjectedRelation, bool]
     """A member's values of ``column`` over its rows where both ``a`` and ``b`` exist."""
 
     def build(side: ProjectedRelation, grouped: bool) -> pl.Expr:
-        kept = _numbers(column, side).filter(_both(a, b, side))
+        from qavf.aggregation import numeric_expr
+
+        kept = numeric_expr(column, side.schema[column]).filter(_both(a, b, side))
         return kept if grouped else kept.implode()
 
     return build
 
 
-def _exact_correlations(x: list[float], y: list[float]) -> tuple[int, dict[str, float | None]]:
+def _exact_correlations(
+    x: list[Any], y: list[Any], methods: tuple[str, ...] = ("pearson", "spearman")
+) -> tuple[int, dict[str, float | None]]:
     """Pearson and Spearman correlations of paired values, exact until rounded once."""
     if len(x) < 2:
-        return len(x), {"pearson": None, "spearman": None}
+        return len(x), dict.fromkeys(methods)
     xs, ys = [Fraction(v) for v in x], [Fraction(v) for v in y]
-    found = {"pearson": pearson(xs, ys), "spearman": spearman(xs, ys)}
+    kernels = {"pearson": pearson, "spearman": spearman}
+    found = {method: kernels[method](xs, ys) for method in methods}
     return len(x), {name: None if r is None else r.value for name, r in found.items()}
 
 
@@ -643,6 +691,18 @@ def _agreement(
         "intercept": intercept,
     }
     found = {name: _float(value) for name, value in found.items()}
+    return _agreement_result(check, column, group, len(b), found)
+
+
+def _agreement_result(
+    check: AgreementCheck,
+    column: str,
+    group: dict[str, Any],
+    pairs: int,
+    found: dict[str, Any],
+) -> Agreement:
+    """Judge exact metrics before converting the report's display values."""
+    slope, intercept = found["slope"], found["intercept"]
     material = []
     above = (
         ("bias", abs(found["bias"] or 0.0), check.max_abs_bias),
@@ -655,16 +715,101 @@ def _agreement(
         ("slope", None if slope is None else abs(slope - 1), check.max_slope_deviation),
     )
     for name, value, limit in above:
-        if limit is not None and (value is None or value > limit):
+        if limit is not None and (
+            value is None
+            or value > (Fraction(str(limit)) if isinstance(value, Fraction) else limit)
+        ):
             material.append(name)
     below = (("ccc", found["ccc"], check.min_ccc), ("r_squared", found["r_squared"],
                                                        check.min_r_squared))  # fmt: skip
     for name, value, limit in below:
-        if limit is not None and (value is None or value < limit):
+        if limit is not None and (
+            value is None
+            or value < (Fraction(str(limit)) if isinstance(value, Fraction) else limit)
+        ):
             material.append(name)
     return Agreement(
-        column=column, group=group, pairs=len(b), fit=check.fit, material=material, **found
+        column=column,
+        group=group,
+        pairs=pairs,
+        fit=check.fit,
+        material=material,
+        **{name: _float(value) for name, value in found.items()},
     )
+
+
+def _exact_agreement(
+    check: AgreementCheck,
+    column: str,
+    group: dict[str, Any],
+    b: list[Fraction],
+    c: list[Fraction],
+) -> Agreement:
+    """Exact differences and centred moments for integral/decimal measurements."""
+    n = len(b)
+    sb, sc = sum(b), sum(c)
+    mb, mc = Fraction(sb) / n, Fraction(sc) / n
+    # Exact sufficient statistics need no centred sample copies; Python integer
+    # accumulation stays cheap for the common integral input path.
+    sbb = Fraction(sum(v * v for v in b)) - Fraction(sb * sb) / n
+    scc = Fraction(sum(v * v for v in c)) - Fraction(sc * sc) / n
+    sbc = Fraction(sum(a * v for a, v in zip(b, c, strict=True))) - Fraction(sb * sc) / n
+    d = [after - before for before, after in zip(b, c, strict=True)]
+    bias = Fraction(sum(d)) / n
+    squares = Fraction(sum(v * v for v in d))
+    sd = math.sqrt(float((squares - n * bias * bias) / (n - 1)))
+    slope: Fraction | float | None = sbc / sbb if sbb else None
+    if check.fit == "deming":
+        ratio = Fraction(str(check.error_ratio))
+        gap = scc - ratio * sbb
+        discriminant = gap * gap + 4 * ratio * sbc * sbc
+        numerator = math.isqrt(discriminant.numerator)
+        denominator_root = math.isqrt(discriminant.denominator)
+        root = (
+            Fraction(numerator, denominator_root)
+            if numerator * numerator == discriminant.numerator
+            and denominator_root * denominator_root == discriminant.denominator
+            else Fraction(math.sqrt(float(discriminant)))
+        )
+        # Rationalize the negative-gap branch to avoid subtractive cancellation.
+        slope = (
+            ((gap + root) / (2 * sbc) if gap >= 0 else 2 * ratio * sbc / (root - gap))
+            if sbc
+            else None
+        )
+    intercept = mc - Fraction(slope) * mb if slope is not None else None
+    denominator = sbb + scc + n * (mb - mc) ** 2
+    found: dict[str, Any] = {
+        "bias": bias,
+        "sd": sd,
+        "lower": bias if sd == 0 else float(bias) - 1.96 * sd,
+        "upper": bias if sd == 0 else float(bias) + 1.96 * sd,
+        "ccc": 2 * sbc / denominator if denominator else None,
+        "mae": sum(map(abs, d), Fraction()) / n,
+        "rmse": math.sqrt(float(squares / n)),
+        "mape": None
+        if any(v == 0 for v in b)
+        else sum(abs(Fraction(delta) / before) for delta, before in zip(d, b, strict=True))
+        / n
+        * 100,
+        "smape": sum(
+            2 * abs(Fraction(delta)) / (abs(before) + abs(after)) if before or after else Fraction()
+            for delta, before, after in zip(d, b, c, strict=True)
+        )
+        / n
+        * 100,
+        "r_squared": 1 - squares / sbb if sbb else None,
+        "slope": slope,
+        "intercept": intercept,
+    }
+    result = _agreement_result(check, column, group, n, found)
+    if check.max_rmse is not None:
+        # Compare squared quantities without rounding at the threshold.
+        material = [name for name in result.material if name != "rmse"]
+        if squares / n > Fraction(str(check.max_rmse)) ** 2:
+            material.append("rmse")
+        result = result.model_copy(update={"material": material})
+    return result
 
 
 def _with_tests[T: (CorrelationChange, RatioChange, Agreement)](

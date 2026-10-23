@@ -93,8 +93,7 @@ def missing_sql(column: str, dtype: pl.DataType, spec: Any = None) -> str:
     Raw column validation can reuse this predicate while retaining original
     NaN/sentinel representations for explicit forbidden-value checks/evidence.
     """
-    from qavf.rules._predicates import is_temporal, is_text, members
-    from qavf.rules._temporal import temporal_ticks
+    from qavf.value_policy import is_temporal, is_text, members, temporal_ticks
 
     quoted = quote_identifier(column)
     conditions = [f"{quoted} IS NULL"]

@@ -394,9 +394,26 @@ def grouped_quantile(
     count, low, high = (fresh_internal(name, taken) for name in ("q_count", "q_low", "q_high"))
     measured = numeric_expr(value, dtype)
     ordered = measured.drop_nulls().sort()
-    rank = (measured.count().cast(pl.Int64) - 1).clip(lower_bound=0) * exact.numerator
-    lower = rank // exact.denominator
-    upper = -((-rank) // exact.denominator)
+    size = measured.count()
+    # A count fits UInt64. With a numerator below 2**63, their product
+    # therefore fits signed Int128, regardless of the actual group size.
+    # Decimal probabilities can exceed that proven domain; only their scalar
+    # group counts cross the arbitrary-precision fallback, never member rows.
+    if exact.numerator < 2**63 and exact.denominator < 2**127:
+        rank = (size.cast(pl.Int128) - 1).clip(lower_bound=0) * pl.lit(
+            exact.numerator, dtype=pl.Int128
+        )
+        denominator = pl.lit(exact.denominator, dtype=pl.Int128)
+        quotient = rank // denominator
+        lower = quotient.cast(pl.Int64)
+        upper = (quotient + (rank % denominator != 0).cast(pl.Int128)).cast(pl.Int64)
+    else:
+        def rank_at(count: int, *, upper: bool = False) -> int:
+            quotient, remainder = divmod(max(count - 1, 0) * exact.numerator, exact.denominator)
+            return quotient + int(upper and remainder != 0)
+
+        lower = size.map_elements(rank_at, return_dtype=pl.Int64)
+        upper = size.map_elements(lambda count: rank_at(count, upper=True), return_dtype=pl.Int64)
     reduced = grouped_reduce(
         relation,
         keys,
