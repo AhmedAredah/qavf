@@ -24,6 +24,7 @@ the unreleased package does not retain aliases for former private locations.
 | Public input preparation | `api.py`, `inputs/` | A thin `validate` facade; separate descriptors, resource policy, source adapters, and normalization into one validated run request. |
 | Source definitions | `sources/parameters.py`, `formats.py`, `frames.py` | Parameter validation, format inference and dataframe conversion. |
 | Source execution | `sources/file.py`, `query.py`, `python.py`, `native.py` | File policy, shared SQL source lifecycle, Python loaders and native connection/budget primitives. |
+| CSV probes | `sources/csv_probe.py` | Bounded queries reusing a CSV source's reader settings: header reads, declared-type conversion in the scan and its violations, header review, located read failures. |
 | Source discovery | `sources/base.py`, `builtin.py` | Transactional registration and the explicit built-in source inventory. |
 | Dataset catalog | `engine/catalog.py` | Source/declaration inventory and observed dataset metadata; keeps provenance independent of retained payloads. |
 | Execution context | `engine/context.py`, `connections.py`, `sql.py` | Dataset reads and cache lifetime; worker-local connection ownership and cleanup; SQL analysis and bounded sampling. |
@@ -32,7 +33,8 @@ the unreleased package does not retain aliases for former private locations.
 | Native binding | `engine/relations.py` | Preserve verified local file-reader pushdown; retain existing binding semantics for other native source kinds. |
 | Rule compilation | `engine/compilation.py` | Discovery, configuration and required-plugin validation, rule construction, and complete planning diagnostics. |
 | Scheduling | `engine/runner.py`, `planning.py` | Rule execution, deadlines, actual consumer completion, resource release, and report admission. |
-| Input checks | `rules/input_checks/` | Separate availability, columns, keys, references and expressions; private helpers own eager/lazy execution and evidence. |
+| Input checks | `rules/input_checks/` | Separate availability, columns, keys, references and expressions; private helpers own eager/lazy execution and evidence. `_conformance.py` holds INP-002's value-level checks, one class each. |
+| Duplicate rows | `rules/_duplicate_rows.py` | Row positions of sampled duplicated keys, with native and lazy strategies matching the key summary. |
 | Rule failures | `rules/_contracts.py` | Consistent unassessed findings and exception isolation for independent contracts. |
 | Key policy | `keys.py` | Lossless dtype compatibility shared by eager frames, execution relations and regression. |
 | Reductions | `rules/_row_summary.py`, `_coordinate_sql.py`, `_grouped.py`, `_spatial_aggregation.py` | Coherent bounded summaries, selected normalized relations and safe grouped aggregation. |
@@ -45,6 +47,7 @@ the unreleased package does not retain aliases for former private locations.
 | Statistical inference | `inference/results.py`, `paired.py`, `independent.py`, `equivalence.py`, `categorical.py`, `counts.py`, `trend.py`, `spatial.py`, `multiple.py`, `intervals.py`, `resampling.py`, `pvalues.py`, `effects.py`, `decision.py`, `registry.py`, `components.py` | Arrays in, typed results out, independent of comparisons: one module per test family; corrections; intervals, seeded resampling and the work budget; effect sizes; decision policies; test components and their registry. SciPy supplies every distribution function. |
 | Component registries | `plugins/registry.py` | One registry implementation, discovery transaction and `plugins.entry_points` scope for comparison components and statistical tests. |
 | Typed values | `typed_values.py` | Lossless temporal normalization, checked casts with per-row loss flags, exact numeric scaling. |
+| Types in text | `text_types.py`, `rules/_declared_types.py` | How each declared type is written as text, defined once for DuckDB and Polars, and its use on text columns. |
 | Configuration | `configuration.py` | One duplicate-rejecting YAML/JSON parser and environment expansion policy for validation and comparisons. |
 | Neutral snapshots | `snapshots.py` | Detached immutable model snapshots shared by inference, regression and reports without importing presentation code. |
 | Shared value policy | `value_policy.py`, `missingness.py` | Typed membership, exact temporal literals and missing-value normalization shared by SQL admission and rules. |
