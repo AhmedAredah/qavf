@@ -13,8 +13,8 @@ from qavf.sources.base import SourceError
 
 
 @contextmanager
-def context(frame, columns, backend, tmp_path, *, evidence_limit=0):
-    dataset = {"schema": {"columns": columns}}
+def context(frame, columns, backend, tmp_path, *, evidence_limit=0, evidence_columns="checked"):
+    dataset = {"schema": {"columns": columns, "evidence_columns": evidence_columns}}
     frames = {"d": frame.lazy()}
     if backend == "native":
         path = tmp_path / "batch.parquet"
@@ -212,7 +212,9 @@ def test_raw_missing_evidence_and_aliases_survive_fusion(backend, tmp_path):
         "__QAVF_ORIGINAL_X": {},
         "__QAVF_VIOLATES": {},
     }
-    with context(frame, columns, backend, tmp_path, evidence_limit=1) as ctx:
+    with context(
+        frame, columns, backend, tmp_path, evidence_limit=1, evidence_columns="all"
+    ) as ctx:
         found = [f for f in ColumnCheckRule().evaluate(ctx) if not f.passed]
         assert all(f.assessed for f in found), [f.message for f in found]
         assert [(f.check, f.affected_count) for f in found] == [

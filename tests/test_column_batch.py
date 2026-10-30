@@ -11,10 +11,15 @@ from qavf.settings import QAVFSettings
 from qavf.sources.base import SourceError
 
 
-def context(frame, columns, *, evidence=3, primary_key=None):
+def context(frame, columns, *, evidence=3, primary_key=None, evidence_columns="checked"):
+    schema = {
+        "columns": columns,
+        "primary_key": primary_key or [],
+        "evidence_columns": evidence_columns,
+    }
     settings = QAVFSettings.model_validate(
         {
-            "datasets": {"d": {"schema": {"columns": columns, "primary_key": primary_key or []}}},
+            "datasets": {"d": {"schema": schema}},
             "engine": {"max_affected_records": evidence},
         }
     )
@@ -160,12 +165,14 @@ def test_compact_typed_evidence_does_not_round_trip_through_python():
         found = [f for f in ColumnCheckRule().evaluate(ctx) if not f.passed]
     assert all(f.assessed and f.affected_count == 2 for f in found)
     for finding in found:
+        checked = "x" if finding.check.startswith("d.x:") else "big"
         assert finding.affected["id"].to_list() == [
             "2023-11-14T22:13:20.000000001",
             "2023-11-14T22:13:20.000000002",
         ]
-        assert finding.affected["x"].to_list() == frame["x"].to_list()
-        assert finding.affected["big"].to_list() == [2**100 + 1, 2**100 + 2]
+        assert finding.affected[checked].to_list() == frame[checked].to_list()
+        # Evidence shows the checked column and the key, not the sibling column.
+        assert {"x", "big"} - {checked} - set(finding.affected.columns) == {"x", "big"} - {checked}
 
 
 @pytest.mark.parametrize("limit", [0, 7])
@@ -304,7 +311,7 @@ def test_native_and_compact_lazy_evidence_have_identical_source_order(tmp_path):
 def test_invalid_sibling_missing_policy_does_not_normalize_raw_evidence(evidence):
     frame = pl.DataFrame({"good": [-1, -2], "bad": [1, 2]})
     columns = {"good": {"nullable": True, "ge": 0}, "bad": {"missing_values": ["oops"]}}
-    with context(frame.lazy(), columns, evidence=evidence) as ctx:
+    with context(frame.lazy(), columns, evidence=evidence, evidence_columns="all") as ctx:
         found = ColumnCheckRule().evaluate(ctx)
     assert len(found) == 2
     assert found[0].check == "d.good: ge 0"

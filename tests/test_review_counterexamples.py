@@ -659,3 +659,47 @@ def test_f26_a_member_is_scaled_once_for_all_its_metrics(level, prepared, monkey
     cand = base.with_columns(pl.Series("x", x * 1.01))
     compare_datasets(base, cand, keys="id", entry_points=False, levels=[level])
     assert counted.calls == prepared
+
+
+# =========================================================================
+# F23: failing-row evidence shows the checked columns, not the whole row
+# =========================================================================
+_EVIDENCE_FRAME = pl.DataFrame({
+    "id": [1, 2, 3],
+    "x": [-1.0, 5.0, -3.0],
+    "y": ["a", "bb", "zz"],
+    "scope": [1, 1, 0],
+    "unit": ["m", "km", "m"],
+    "payload": ["p" * 4096] * 3,
+})
+_EVIDENCE_SCHEMA = {
+    "primary_key": ["id"],
+    "columns": {
+        "id": {},
+        "x": {"ge": 0},
+        "y": {"checks": [{"name": "short", "where": "scope = 1", "regex": "^[a-z]$"}]},
+        "scope": {"nullable": True},
+        "unit": {"nullable": True},
+    },
+}
+
+
+@pytest.mark.parametrize("engine", ["native", "lazy", "eager"])
+@pytest.mark.parametrize("whole", [False, True])
+def test_f23_evidence_projects_checked_columns(engine, whole, tmp_path) -> None:
+    schema = {**_EVIDENCE_SCHEMA, "evidence_columns": "all" if whole else "checked"}
+    if engine == "native":
+        path = tmp_path / "wide.parquet"
+        _EVIDENCE_FRAME.write_parquet(path)
+        data: object = File(path)
+    else:
+        data = _EVIDENCE_FRAME.lazy() if engine == "lazy" else _EVIDENCE_FRAME
+    report = validate({"d": Dataset(data, schema=schema)})
+    failed = {r.check: r for r in report.results_for("INP-003") if r.status is Status.FAIL}
+    shown = {check: set(r.affected_records[0]) for check, r in failed.items()}
+    everything = set(_EVIDENCE_FRAME.columns)
+    assert shown["d.x: ge 0"] >= ({"id", "x", "_row"} | (everything if whole else set()))
+    assert ("payload" in shown["d.x: ge 0"]) is whole
+    [scoped] = [check for check in shown if check.startswith("d.y:")]
+    assert shown[scoped] >= {"id", "y", "scope"}
+    assert ("payload" in shown[scoped]) is whole

@@ -10,6 +10,8 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
 from qavf.redaction import exception_details, redact_text
+from qavf.rules._column_plan import ColumnPlan
+from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._predicates import (
     compatibility_error,
     is_nan,
@@ -42,6 +44,7 @@ def evaluate_eager(
     rows = frame.height
     failures: list[Finding] = []
     passed: list[str] = []
+    evidence = EvidenceColumns(schema, tuple(frame.columns))
 
     # Missing-value policy: NaN counts as missing, exactly like null, for every
     # limit. ``prepared`` therefore replaces NaN with null in float columns, and
@@ -121,7 +124,9 @@ def evaluate_eager(
                     None,
                     f"{plural(missing, 'missing value')}{detail} in non-nullable "
                     f"{dataset}.{column}.",
-                    affected=values._rows(frame, missing_mask, "missing", ctx.evidence_limit),
+                    affected=values._rows(
+                        frame, missing_mask, "missing", ctx.evidence_limit, evidence.of([column])
+                    ),
                     affected_count=missing,
                     total_records=rows,
                     unit="rows",
@@ -138,7 +143,11 @@ def evaluate_eager(
                     f"{plural(infinite, 'infinite value')} in {dataset}.{column} "
                     f"(set allow_infinite: true if they are legitimate).",
                     affected=values._rows(
-                        frame, pl.col(column).is_infinite(), "infinite", ctx.evidence_limit
+                        frame,
+                        pl.col(column).is_infinite(),
+                        "infinite",
+                        ctx.evidence_limit,
+                        evidence.of([column]),
                     ),
                     affected_count=infinite,
                     total_records=rows,
@@ -159,7 +168,10 @@ def evaluate_eager(
                 )
             else:
                 try:
-                    _units(dataset, column, spec, frame, rows, failures, passed, ctx, prepared)
+                    _units(
+                        dataset, column, spec, frame, rows, failures, passed, ctx, prepared,
+                        evidence.of(ColumnPlan(column, spec, "units").dependencies),
+                    )  # fmt: skip
                 except Exception as exc:
                     failures.append(
                         Finding.unassessed(
@@ -281,7 +293,11 @@ def evaluate_eager(
                 predicates = [(name, bad & pl.lit(applicable)) for name, bad in predicates]
             try:
                 count, affected = values._row_limits(
-                    frame, prepared, predicates, ctx.evidence_limit
+                    frame,
+                    prepared,
+                    predicates,
+                    ctx.evidence_limit,
+                    evidence.of(ColumnPlan(column, spec, "check", check).dependencies),
                 )
             except Exception as exc:
                 blocked(
@@ -344,6 +360,7 @@ def _units(
     passed: list[str],
     ctx: DataContext,
     prepared: pl.DataFrame,
+    shown: list[str],
 ) -> None:
     """Every row with a value carries an allowed unit in ``spec.unit_column``."""
     check = f"{dataset}.{column}: units"
@@ -371,7 +388,7 @@ def _units(
             f"{'is' if count == 1 else 'are'} not in {', '.join(allowed)} "
             f"(per {unit_column}).",
             check=check,
-            affected=values._rows(frame, mask, "unit", ctx.evidence_limit),
+            affected=values._rows(frame, mask, "unit", ctx.evidence_limit, shown),
             affected_count=count,
             total_records=rows,
             unit="rows",

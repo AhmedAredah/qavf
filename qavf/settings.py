@@ -440,6 +440,10 @@ class SchemaSpec(_Strict):
     with a null in the set is exempt (and counted)."""
     unique_rows: bool = False
     """No two rows may be identical in every column."""
+    evidence_columns: Literal["checked", "all"] = "checked"
+    """Columns shown for the failing rows of a column check: ``checked`` (the checked
+    column, the columns of its ``where`` and unit, and ``primary_key``) or ``all``
+    (whole rows, which reads every column for each failing check)."""
 
     @model_validator(mode="after")
     def _consistent_key(self) -> SchemaSpec:

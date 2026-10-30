@@ -205,9 +205,8 @@ def test_decimal_aggregate_limits_remain_exact():
 
 def test_reserved_user_columns_survive_failure_evidence():
     frame = pl.DataFrame({"v": [-1], "__qavf_row": ["keep"], "__qavf_violates": ["also keep"]})
-    found = results(
-        "INP-003", {"d": frame}, datasets={"d": {"schema": {"columns": {"v": {"ge": 0}}}}}
-    )
+    schema = {"columns": {"v": {"ge": 0}}, "evidence_columns": "all"}
+    found = results("INP-003", {"d": frame}, datasets={"d": {"schema": schema}})
     failure = next(r for r in found if r.status is Status.FAIL)
     assert failure.affected_records[0]["__qavf_row"] == "keep"
     assert failure.affected_records[0]["__qavf_violates"] == "also keep"

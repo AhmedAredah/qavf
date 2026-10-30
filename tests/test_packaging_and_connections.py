@@ -218,7 +218,7 @@ def test_user_row_column_survives_null_and_limit_failures(registry) -> None:
     report = _run(
         registry,
         {"t": frame},
-        datasets={"t": {"schema": {"columns": {"v": {"ge": 0}}}}},
+        datasets={"t": {"schema": {"columns": {"v": {"ge": 0}}, "evidence_columns": "all"}}},
     )
     failed = {r.check: r for r in report.results if r.rule_id == "INP-003" and r.failed}
     assert {r.status for r in failed.values()} == {Status.FAIL}
@@ -233,7 +233,7 @@ def test_user_violates_column_is_preserved(registry) -> None:
     report = _run(
         registry,
         {"t": frame},
-        datasets={"t": {"schema": {"columns": {"v": {"ge": 0}}}}},
+        datasets={"t": {"schema": {"columns": {"v": {"ge": 0}}, "evidence_columns": "all"}}},
     )
     failed = {r.check: r for r in report.results if r.rule_id == "INP-003" and r.failed}
     null_record = failed["t.v: not null"].affected_records[0]

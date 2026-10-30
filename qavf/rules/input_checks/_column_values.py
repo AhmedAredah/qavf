@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from decimal import Decimal
 from fractions import Fraction
 from typing import Any, cast
@@ -139,8 +139,12 @@ def _row_limits(
     prepared: pl.DataFrame,
     predicates: list[tuple[str, pl.Expr]],
     limit: int,
+    columns: Sequence[str],
 ) -> tuple[int, pl.DataFrame | None]:
-    """Count a union of row failures, then build reasons only for its sample."""
+    """Count a union of row failures, then build reasons only for its sample.
+
+    The sample shows ``columns`` (see :class:`~qavf.rules._evidence_columns.EvidenceColumns`).
+    """
     if not predicates:
         return 0, None
     bad = pl.any_horizontal([predicate for _, predicate in predicates])
@@ -152,7 +156,7 @@ def _row_limits(
     positions = (
         prepared.lazy().with_row_index(row).filter(bad).select(row).limit(limit).collect()[row]
     )
-    sample = original[positions]
+    sample = original.select(columns)[positions]
     # Evaluate at most one boolean mask per constraint, then gather only
     # sampled positions; never construct the all-failure reason table.
     labels = []
@@ -171,12 +175,19 @@ def _row_limits(
 
 
 def _rows(
-    frame: pl.DataFrame, mask: pl.Expr | pl.Series, violates: str, limit: int
+    frame: pl.DataFrame,
+    mask: pl.Expr | pl.Series,
+    violates: str,
+    limit: int,
+    columns: Sequence[str],
 ) -> pl.DataFrame:
-    """The first ``limit`` rows matching ``mask`` (callers pass the exact count)."""
+    """The first ``limit`` rows matching ``mask``, showing ``columns`` (callers pass
+    the exact count)."""
     row = fresh_internal("row", frame.columns)
     reason = fresh_internal("violates", [*frame.columns, row])
-    selected = frame.lazy().with_row_index(row).filter(mask).limit(limit).collect()
+    selected = (
+        frame.lazy().with_row_index(row).filter(mask).limit(limit).select(row, *columns).collect()
+    )
     return temporal_evidence(
         present(
             selected.with_columns(pl.lit(violates).alias(reason)),

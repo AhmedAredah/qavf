@@ -108,6 +108,11 @@ All notable changes to this project are documented here. The format follows
 - INP-004 duplicate-key evidence lists the first row positions of each key (`rows`).
 - A column's `unique` limit reports the rows holding repeated values, like other row
   limits, instead of only stating that values repeat.
+- **Column-check evidence shows the checked columns.** A failing column check's rows
+  list the checked column, the columns of its `where` and unit column, and the
+  `primary_key`, with `_row` and `violates`; unrelated columns are no longer read for
+  each failing check. Set `evidence_columns: all` in a dataset's `schema` for whole
+  rows, as before.
 - `qavf.spatial.compose` documents its exactness per step: each step's weights are
   exact and rounded once, so a chain of several steps is rounded once per step.
 

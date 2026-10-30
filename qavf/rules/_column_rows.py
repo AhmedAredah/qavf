@@ -15,6 +15,7 @@ from qavf.rules._column_batch import (
     exceeds_missing_fraction,
     independent_scope,
 )
+from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._predicates import compatibility_error, row_tests
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import present
@@ -62,7 +63,12 @@ def native_row_check(
     )
     evidence = inputs.ctx.evidence_limit > 0
     saved = inputs.saved_for(dependencies) if evidence else {}
-    selected = [*dependencies, *saved.values(), *([inputs.row] if evidence else [])]
+    shown = (
+        EvidenceColumns(inputs.schema, tuple(inputs.actual)).of(dependencies) if evidence else []
+    )
+    selected = list(
+        dict.fromkeys([*dependencies, *shown, *saved.values(), *([inputs.row] if evidence else [])])
+    )
     projection = ", ".join(map(quote_identifier, selected))
     statement = f"SELECT {projection} FROM {inputs.native(dependencies)}"
 
@@ -90,7 +96,7 @@ def native_row_check(
                         samples.extend(
                             temporal_evidence(
                                 present(
-                                    original.select(*dependencies, inputs.row, inputs.reason),
+                                    original.select(*shown, inputs.row, inputs.reason),
                                     {inputs.row: "_row", inputs.reason: "violates"},
                                 )
                             ).to_dicts()

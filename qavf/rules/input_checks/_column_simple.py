@@ -10,6 +10,7 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
 from qavf.engine.severity import Severity
+from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._predicates import (
     decimal_bound,
     float_bound,
@@ -74,6 +75,7 @@ def evaluate_simple(
     passed: list[str] = []
     row_name = fresh_internal("row", actual)
     reason_name = fresh_internal("violates", [*actual, row_name])
+    evidence = EvidenceColumns(schema, tuple(actual))
     base = f"(SELECT row_number() OVER () - 1 AS {quote_identifier(row_name)}, * FROM {table})"
 
     def record(
@@ -99,8 +101,11 @@ def evaluate_simple(
             "CASE WHEN (" + predicate + ") THEN '" + name.replace("'", "''") + "' END"
             for name, predicate in conditions
         )
+        shown = ", ".join(
+            quote_identifier(name) for name in (row_name, *evidence.of([column]))
+        )
         sql = (
-            f"SELECT *, concat_ws('; ', {labels}) AS {quote_identifier(reason_name)} "
+            f"SELECT {shown}, concat_ws('; ', {labels}) AS {quote_identifier(reason_name)} "
             f"FROM {base} WHERE {bad}"
         )
         try:
@@ -191,6 +196,7 @@ def _lazy_dataset(
 ) -> tuple[list[Finding], list[str]]:
     """Simple built-ins remain lazy for caller-provided Polars plans."""
     plan = ctx.scan(dataset)
+    evidence = EvidenceColumns(schema, tuple(actual))
     rows = 0
     jobs: list[tuple[str, str, list[tuple[str, pl.Expr]], Severity | None]] = []
     failures: list[Finding] = []
@@ -233,6 +239,7 @@ def _lazy_dataset(
                     plan.with_row_index(row)
                     .filter(bad)
                     .with_columns(reasons.alias(reason))
+                    .select(row, *evidence.of([column]), reason)
                     .limit(ctx.evidence_limit),
                 )
                 if ctx.evidence_limit

@@ -162,6 +162,11 @@ dataset read from several files adds `_file` and `_file_row`, the row's position
 within that file. Duplicate keys list their positions in `rows`, and a line the
 reader could not parse is named by its file and 1-based `line`.
 
+A column check's failing rows show the columns the check reads (the checked column,
+the columns of its `where` and its unit column) and the `primary_key`; other columns
+are not read for evidence. Set `evidence_columns: all` in a dataset's `schema` to show
+whole rows.
+
 ## Rules
 
 | ID | Default | Checks |

@@ -25,6 +25,7 @@ datasets:
       strict: false                   # true: reject undeclared columns
       min_rows: 1
       max_rows: 50000000
+      evidence_columns: checked       # failing rows show checked columns and the key; all: whole rows
       columns:
         station:
           dtype: str                  # int | float | decimal | str | bool | date | datetime

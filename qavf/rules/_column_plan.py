@@ -29,6 +29,7 @@ from qavf.rules._column_batch import (
 )
 from qavf.rules._column_rows import native_row_check
 from qavf.rules._column_stream import native_float_statistics
+from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._predicates import compatibility_error, is_nan, row_tests
 from qavf.rules._regex import sql_compatible
 from qavf.rules._temporal import temporal_evidence
@@ -128,6 +129,7 @@ def _lazy_column_reduction(
     dependencies = item.dependencies
     inputs.validate(dependencies)
     row, reason, saved = inputs.row, inputs.reason, inputs.saved_for(dependencies)
+    shown = EvidenceColumns(inputs.schema, tuple(actual)).of(dependencies)
     scope = pl.sql_expr(check.where).fill_null(False) if check and check.where else pl.lit(True)
     value = pl.col(column).filter(scope)
     predicates: list[tuple[str, pl.Expr]] = []
@@ -275,18 +277,18 @@ def _lazy_column_reduction(
             if capture_columns is not None:
                 sample = summary["sample"]
             else:
+                # Raw values of the dependencies, the other shown columns as read.
                 sample = inputs.collect(
                     inputs.lazy(dependencies)
                     .filter(bad)
                     .with_columns(reasons.alias(reason))
+                    .select(*(saved.get(name, name) for name in shown), row, reason)
                     .limit(ctx.evidence_limit),
                 )
-                sample = sample.drop(list(saved)).rename({v: k for k, v in saved.items()})
+                sample = sample.rename({saved[name]: name for name in shown if name in saved})
             sample = temporal_evidence(
                 present(
-                    sample.select(
-                        *(name for name in actual if name in sample.columns), row, reason
-                    ),
+                    sample.select(*(name for name in shown if name in sample.columns), row, reason),
                     {row: "_row", reason: "violates"},
                 )
             )
@@ -366,6 +368,7 @@ def _native_column_reduction(
     inputs.validate(dependencies)
     q = quote_identifier
     row, reason, saved = inputs.row, inputs.reason, inputs.saved_for(dependencies)
+    shown = EvidenceColumns(inputs.schema, tuple(actual)).of(dependencies)
     scope = f"coalesce(({check.where}), FALSE)" if check and check.where else "TRUE"
     value = q(column)
     predicates: list[tuple[str, str]] = []
@@ -508,13 +511,14 @@ def _native_column_reduction(
             reasons = ", ".join(
                 f"CASE WHEN ({p}) THEN {sql_literal(name)} END" for name, p in predicates
             )
+            columns = ", ".join(q(saved.get(name, name)) for name in (*shown, row))
             sample = ctx.sql(
-                f"SELECT *, concat_ws('; ', {reasons}) AS {q(reason)} "
+                f"SELECT {columns}, concat_ws('; ', {reasons}) AS {q(reason)} "
                 f"FROM {inputs.native(dependencies)} WHERE {bad} LIMIT {ctx.evidence_limit}"
             )
-            sample = sample.drop(list(saved)).rename({v: k for k, v in saved.items()})
+            sample = sample.rename({saved[name]: name for name in shown if name in saved})
             sample = temporal_evidence(
-                present(sample.select(*actual, row, reason), {row: "_row", reason: "violates"})
+                present(sample.select(*shown, row, reason), {row: "_row", reason: "violates"})
             )
         return Finding.fail(
             f"{count:,} value{'s' if count != 1 else ''} of {applicable:,} "
@@ -624,6 +628,8 @@ def coherent_column_checks(
             return None
     inputs = ColumnInputs(ctx, dataset, schema, actual)
     needed = set(schema.primary_key or []) if ctx.evidence_limit else set()
+    if ctx.evidence_limit and EvidenceColumns(schema, tuple(actual)).whole_rows:
+        needed.update(actual)
     for item in items:
         try:
             needed.update(item.dependencies)

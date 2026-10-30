@@ -18,6 +18,7 @@ from qavf.rules._declared_types import (
     converts_text,
     typed_spec,
 )
+from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._execution import (
     projected_frame,
 )
@@ -151,6 +152,8 @@ class ColumnCheckRule(_SelectsDatasets):
             needed = {item.column for item in items}
             if ctx.evidence_limit:
                 needed.update(schema.primary_key or [])
+                if EvidenceColumns(schema, tuple(actual)).whole_rows:
+                    needed.update(actual)
             for item in items:
                 try:
                     needed.update(item.dependencies)
@@ -238,10 +241,12 @@ class ColumnCheckRule(_SelectsDatasets):
                 # Unsupported exact operations project only this contract's
                 # dependencies, and the primary key that identifies evidence rows;
                 # siblings retain their source-side reductions.
-                key = [c for c in schema.primary_key or [] if c in actual]
-                if not ctx.evidence_limit:
-                    key = []
-                dependencies = list(dict.fromkeys([*item.dependencies, *key]))
+                shown = (
+                    EvidenceColumns(schema, tuple(actual)).of(item.dependencies)
+                    if ctx.evidence_limit
+                    else []
+                )
+                dependencies = list(dict.fromkeys([*item.dependencies, *shown]))
                 projected = (
                     observation.collect(observation.scan().select(dependencies))
                     if observation is not None
