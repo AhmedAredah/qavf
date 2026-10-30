@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -16,6 +17,7 @@ import polars as pl
 from qavf.redaction import redact, redact_text
 from qavf.sources.base import (
     DataSource,
+    RejectedRows,
     ScanPlan,
     SourceError,
     SourceIntegrityError,
@@ -352,6 +354,8 @@ class FileSource(DataSource[FileParams]):
             if params.columns
             else "*"
         )
+        with self._state_lock:
+            self._reader = (location, dict(options))
         if type(self) is FileSource and files is not None:
             # Only the built-in local reader embeds its pinned manifest. All
             # other source kinds retain their existing parameterized binding.
@@ -395,12 +399,7 @@ class FileSource(DataSource[FileParams]):
         with self._state_lock:
             if hasattr(self, "_header"):
                 return list(self._header)
-        rejects = {"ignore_errors", "store_rejects", "rejects_table", "rejects_scan"}
-        args = "".join(
-            f", {quote_identifier(key)} = {sql_literal(value)}"
-            for key, value in options.items()
-            if key not in rejects and key != "rejects_limit"
-        )
+        args = _reader_args(options, drop=_REJECT_OPTIONS)
         try:
             con = connect(self.env)
             try:
@@ -414,6 +413,140 @@ class FileSource(DataSource[FileParams]):
         with self._state_lock:
             self._header = header
         return list(header)
+
+    def rejected_rows(self) -> RejectedRows | None:
+        with self._state_lock:
+            return getattr(self, "_rejected", None)
+
+    def explain_failure(self, error: SourceError) -> SourceError | None:
+        """Locate the CSV lines behind a read error, once, with one bounded pass.
+
+        The pass records at most :data:`REJECTED_SAMPLE` failing lines per file
+        and keeps no data. Clean reads never pay for it.
+        """
+        message = str(error)
+        if not _CSV_ERROR.search(message) or not self._is_csv():
+            return None
+        if _SNIFF_ERROR.search(message):
+            return SourceError(
+                f"{redact_text(self.describe())}: the reader could not detect the CSV layout "
+                "(delimiter, quoting, header) from its first rows, often because an early "
+                "line has extra or missing fields. Set options {delim: ','} (and quote or "
+                "header) so the line can be located."
+            )
+        with self._state_lock:
+            planned = getattr(self, "_reader", None)
+            if planned is None:
+                return None
+            if not hasattr(self, "_diagnosis"):
+                self._diagnosis = self._diagnose(*planned)
+            rejected: RejectedRows | None = self._diagnosis
+        if rejected is None or not rejected.sample:
+            return None
+        return SourceError(_unreadable_message(redact_text(self.describe()), rejected))
+
+    def header_problems(self) -> list[dict[str, Any]]:
+        """Duplicate, blank or unrecognized CSV header names.
+
+        Only names the reader synthesized (``v_1``, ``column3``) prompt a check, so
+        a clean header costs nothing beyond the cached header read.
+        """
+        with self._state_lock:
+            planned = getattr(self, "_reader", None)
+        if planned is None or not self._is_csv() or planned[1].get("header") is False:
+            return []
+        location, options = planned
+        names = self._csv_header(location, options)
+        if not names:
+            return []
+        if len(names) == 1 and any(mark in names[0] for mark in ",;|\t"):
+            return [
+                {
+                    "column": names[0],
+                    "problem": "the header was read as one column: rows could not be split "
+                    "into fields, usually because a line has extra or missing fields; set "
+                    "options {delim: ...} to locate it",
+                }
+            ]
+        if all(_GENERIC_NAME.fullmatch(name) for name in names):
+            return [
+                {
+                    "column": None,
+                    "problem": f"the header row was not recognized (columns read as "
+                    f"{', '.join(names[:3])}{', …' if len(names) > 3 else ''}): an early line "
+                    "may have extra or missing fields; set options {header: true} to locate it",
+                }
+            ]
+        folded = {name.casefold() for name in names}
+        if not any(
+            _GENERIC_NAME.fullmatch(name)
+            or ((match := _DEDUPED_NAME.fullmatch(name)) and match[1].casefold() in folded)
+            for name in names
+        ):
+            return []
+        raw = self._raw_header(location, options)
+        if len(raw) != len(names):
+            return []
+        problems: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for original, name in zip(raw, names, strict=True):
+            if original is None or not original.strip():
+                problems.append({"column": name, "problem": f"blank header, read as {name!r}"})
+            elif original.casefold() in seen:
+                problems.append(
+                    {"column": name, "problem": f"duplicate header {original!r}, read as {name!r}"}
+                )
+            if original is not None:
+                seen.add(original.casefold())
+        return problems
+
+    def _is_csv(self) -> bool:
+        try:
+            return (self.params.format or infer_format(self.params.path)) == "csv"
+        except ValueError:
+            return False
+
+    def _diagnose(self, location: str | list[str], options: dict[str, Any]) -> RejectedRows | None:
+        probe = {
+            key: value for key, value in options.items() if key not in _REJECT_OPTIONS
+        }
+        probe.update(store_rejects=True, rejects_limit=REJECTED_SAMPLE)
+        try:
+            con = connect(self.env)
+            try:
+                # count(COLUMNS(*)) converts every column: count(*) would skip them.
+                con.execute(
+                    f"SELECT count(COLUMNS(*)) FROM {READERS['csv']}($path{_reader_args(probe)})",
+                    {"path": location},
+                ).fetchall()  # the scan, and so the reject table, completes on fetch
+                return _rejected_rows(
+                    con, "reject_errors", "reject_scans", REJECTED_SAMPLE, REJECTED_SAMPLE
+                )
+            finally:
+                con.close()
+        except duckdb.Error:
+            return None
+
+    def _raw_header(self, location: str | list[str], options: dict[str, Any]) -> list[str | None]:
+        """The first line's fields exactly as written, before the reader names them."""
+        probe = {
+            key: value
+            for key, value in options.items()
+            if key not in _REJECT_OPTIONS | {"header", "types", "dtypes", "column_types"}
+        }
+        probe.update(header=False, all_varchar=True)
+        try:
+            con = connect(self.env)
+            try:
+                row = con.execute(
+                    f"SELECT * FROM {READERS['csv']}($path{_reader_args(probe)}) LIMIT 1",
+                    {"path": location},
+                ).fetchone()
+            finally:
+                con.close()
+        except duckdb.Error:
+            return []
+        return [None if value is None else str(value) for value in row or ()]
 
     def scan(self) -> ScanPlan | None:
         self.verify_identity()
@@ -482,20 +615,20 @@ class FileSource(DataSource[FileParams]):
             )
             check_budget(frame, self.params.row_budget, redact_text(self._location()))
             if count_rejects:
-                table = quote_identifier(
-                    str(self.params.options.get("rejects_table", "reject_errors"))
+                rejected = _rejected_rows(
+                    con,
+                    str(self.params.options.get("rejects_table", "reject_errors")),
+                    str(self.params.options.get("rejects_scan", "reject_scans")),
+                    int(self.params.options.get("rejects_limit", 0)),
+                    REJECTED_SAMPLE,
                 )
-                row = con.execute(
-                    f"SELECT count(*) FROM (SELECT DISTINCT scan_id, file_id, line FROM {table})"
-                ).fetchone()
-                rejected = int(row[0]) if row else 0
-                limit = self.params.options.get("rejects_limit", 0)
-                if limit:
-                    notes["rejected_rows_lower_bound"] = rejected
-                    notes["rejected_rows_exact"] = False
+                with self._state_lock:
+                    self._rejected = rejected
+                if rejected.exact:
+                    notes["rejected_rows"] = rejected.count
                 else:
-                    notes["rejected_rows"] = rejected
-                    notes["rejected_rows_exact"] = True
+                    notes["rejected_rows_lower_bound"] = rejected.count
+                notes["rejected_rows_exact"] = rejected.exact
             self._assert_unchanged()
             self.load_notes = notes
             return frame
@@ -561,3 +694,100 @@ class FileSource(DataSource[FileParams]):
         if hash_contents:
             info.update(identity="content", sha256=self._hash_file(path))
         return info
+
+
+REJECTED_SAMPLE = 100
+"""Failing lines located per file, for messages and evidence."""
+_REJECT_OPTIONS = frozenset(
+    {"ignore_errors", "store_rejects", "rejects_table", "rejects_scan", "rejects_limit"}
+)
+_CSV_ERROR = re.compile(r"CSV Error|sniffing|CSV parsing dialect", re.IGNORECASE)
+_SNIFF_ERROR = re.compile(r"sniffing|CSV parsing dialect", re.IGNORECASE)
+_GENERIC_NAME = re.compile(r"column\d+")
+_DEDUPED_NAME = re.compile(r"(.+)_\d+")
+_ADVICE = {
+    "CAST": (
+        "The reader chose the column's type from the first rows: read the column as text "
+        "with text_columns, list placeholders such as 'n/a' in options {nullstr: [...]}, "
+        "or let the reader see every row with options {sample_size: -1}."
+    ),
+    "TOO MANY COLUMNS": (
+        "The line has more fields than the header: quote values that contain the "
+        "delimiter, or leave such lines out and have them reported with options "
+        "{store_rejects: true} and acknowledge_lossy: true."
+    ),
+    "MISSING COLUMNS": (
+        "The line has fewer fields than the header: fix the line, or leave such lines out "
+        "and have them reported with options {store_rejects: true} and "
+        "acknowledge_lossy: true."
+    ),
+    "UNQUOTED VALUE": "A value has a quote character inside an unquoted field: quote it.",
+    "INVALID ENCODING": (
+        "The file is not UTF-8: set options {encoding: latin-1}, or the file's encoding."
+    ),
+    "LINE SIZE OVER MAXIMUM": "Set options {max_line_size: ...} above the longest line.",
+}
+
+
+def _reader_args(options: dict[str, Any], drop: frozenset[str] = frozenset()) -> str:
+    return "".join(
+        f", {quote_identifier(key)} = {sql_literal(value)}"
+        for key, value in options.items()
+        if key not in drop
+    )
+
+
+def _rejected_rows(
+    con: Any, errors: str, scans: str, limit: int, sample: int
+) -> RejectedRows:
+    """Count rejected lines and locate the first ``sample`` of them.
+
+    A line with several errors counts once and shows its root error. With a
+    per-file ``limit`` (0 for none), a file that reached it makes the count a
+    lower bound.
+    """
+    e, s = quote_identifier(errors), quote_identifier(scans)
+    per_file = con.execute(
+        f"SELECT count(DISTINCT line) FROM {e} GROUP BY scan_id, file_id"
+    ).fetchall()
+    count = sum(int(row[0]) for row in per_file)
+    exact = not limit or all(int(row[0]) < limit for row in per_file)
+    rows = con.execute(
+        f"SELECT s.file_path, e.line, e.column_name, e.error_type, e.csv_line "
+        f"FROM {e} AS e JOIN {s} AS s USING (scan_id, file_id) "
+        # A line's structural error (wrong field count, encoding) causes any type
+        # error on the same line, so it is the one shown.
+        f"QUALIFY row_number() OVER (PARTITION BY e.scan_id, e.file_id, e.line "
+        f"ORDER BY e.error_type = 'CAST', e.column_idx NULLS LAST) = 1 "
+        f"ORDER BY s.file_path, e.line LIMIT {int(sample)}"
+    ).fetchall()
+    located = tuple(
+        {
+            "file": redact_text(str(file)),
+            "line": int(line),
+            "column": column,
+            "error": str(kind),
+            "text": _clipped(text),
+        }
+        for file, line, column, kind, text in rows
+    )
+    return RejectedRows(count, exact, located)
+
+
+def _clipped(text: object, width: int = 200) -> str:
+    value = str(text or "").strip("\r\n")
+    return value if len(value) <= width else value[: width - 1] + "…"
+
+
+def _unreadable_message(source: str, rejected: RejectedRows) -> str:
+    first = rejected.sample[0]
+    files = {row["file"] for row in rejected.sample}
+    count = f"{rejected.count:,}" if rejected.exact else f"at least {rejected.count:,}"
+    rows = "row" if rejected.exact and rejected.count == 1 else "rows"
+    where = f"line {first['line']:,}" + (f" of {first['file']}" if len(files) > 1 else "")
+    column = f", column {first['column']!r}" if first["column"] else ""
+    advice = _ADVICE.get(first["error"], "")
+    return (
+        f"{count} {rows} of {source} cannot be read. The first is {where}{column} "
+        f"({first['error'].lower()}): {first['text']!r}. {advice}"
+    ).rstrip(" .")  # callers end the sentence

@@ -74,6 +74,20 @@ class SourceIntegrityError(SourceError):
     """The input changed after its run identity was established; never optional metadata."""
 
 
+@dataclass(frozen=True, slots=True)
+class RejectedRows:
+    """Input lines a reader could not read, with the first few of them located.
+
+    ``count`` is exact unless ``exact`` is false (a reject limit stopped
+    recording); each ``sample`` entry names the ``file``, ``line``, ``column``,
+    ``error`` and the raw ``text`` of the line.
+    """
+
+    count: int
+    exact: bool
+    sample: tuple[dict[str, Any], ...] = ()
+
+
 class SourceParams(BaseModel):
     """Base class for source parameter models. Unknown keys are rejected."""
 
@@ -279,6 +293,24 @@ class DataSource[P: SourceParams](ABC):
         attached, inside the caller's transaction). Sources that support snapshots
         override it together with :meth:`snapshot_connection`."""
         raise NotImplementedError
+
+    def explain_failure(self, error: SourceError) -> SourceError | None:
+        """A clearer error for an operation on this source that failed for good.
+
+        Sources whose reader can locate the problem (a CSV line and column)
+        override this; ``None`` keeps ``error``. It runs at most once per failure
+        and must not raise.
+        """
+        return None
+
+    def rejected_rows(self) -> RejectedRows | None:
+        """Rows the reader left out under lossy reader options, after a load."""
+        return None
+
+    def header_problems(self) -> list[dict[str, Any]]:
+        """Header names the reader had to change or could not split, as problems
+        with ``column`` and ``problem`` keys (duplicate or blank names)."""
+        return []
 
     def describe(self) -> str:
         """Short human-readable description of where the data comes from.

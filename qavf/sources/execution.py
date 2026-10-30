@@ -52,6 +52,19 @@ class SourceOperations:
             )
 
 
+def _explained(error: SourceError, participants: Iterable[DataSource]) -> SourceError:
+    """The first participant's clearer account of a final failure, else ``error``."""
+    for source in participants:
+        try:
+            better = source.explain_failure(error)
+        except Exception:
+            # An explanation is a courtesy; it must never hide the original failure.
+            continue
+        if better is not None:
+            return better
+    return error
+
+
 def execute_with_source_policy[T](
     sources: Iterable[DataSource],
     operation: Callable[[], T],
@@ -92,7 +105,7 @@ def execute_with_source_policy[T](
                 or isinstance(error, SourceNotFoundError | SourceIntegrityError)
                 or not error.retryable
             ):
-                raise error from None
+                raise _explained(error, participants) from None
             pause = delay * 2**attempt
             if on_retry is not None:
                 on_retry(attempt + 1, pause, error)

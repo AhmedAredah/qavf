@@ -11,7 +11,7 @@ from datetime import datetime
 import polars as pl
 import pytest
 
-from qavf import Dataset, validate
+from qavf import Dataset, File, validate
 from qavf.engine.severity import Status
 from qavf.sources.formats import infer_format
 
@@ -68,3 +68,86 @@ def test_macro_workbooks_read_as_excel_and_legacy_workbooks_say_why() -> None:
     assert infer_format("book.xlsm") == "excel"
     with pytest.raises(ValueError, match=r"save the workbook as \.xlsx"):
         infer_format("book.xls")
+
+
+# =========================================================================
+# Unreadable lines are located, once, with advice
+# =========================================================================
+CLEAN_ROWS = 25_000
+"""More rows than the reader samples to choose column types (20,480)."""
+
+
+def _late(tmp_path, last: str, name: str = "t.csv") -> str:
+    """Clean rows past the reader's type sample, then ``last``."""
+    path = tmp_path / name
+    rows = "".join(f"{i},n{i},{i}\n" for i in range(CLEAN_ROWS))
+    path.write_text(f"id,name,v\n{rows}{last}")
+    return str(path)
+
+
+def _errors(source: object, schema: dict) -> set[str]:
+    report = validate({"t": Dataset(source, schema=schema)})
+    return {r.message for r in report.results if r.status is Status.ERROR}
+
+
+@pytest.mark.parametrize(
+    ("last", "located", "advice"),
+    [
+        ("1,x,n/a\n", "line 25,002, column 'v' (cast): '1,x,n/a'", "text_columns"),
+        ("1,Smith, John,5\n", "line 25,002 (too many columns)", "quote values"),
+    ],
+)
+def test_an_unreadable_line_is_located_with_advice(tmp_path, last, located, advice) -> None:
+    errors = _errors(_late(tmp_path, last), {"columns": {"v": {"dtype": "int", "ge": 0}}})
+    assert errors and all("1 row of" in e and located in e and advice in e for e in errors)
+    assert not any("Possible fixes" in e or e.endswith("..") for e in errors)
+
+
+def test_lossy_reads_report_the_lines_they_left_out(tmp_path) -> None:
+    path = _late(tmp_path, "1,Smith, John,5\n2,a,b,c,d\n")
+    schema = {"columns": {"v": {"dtype": "int"}}}
+    lossy = File(path, options={"store_rejects": True}, acknowledge_lossy=True)
+    [left_out] = [f for f in _failed(lossy, schema, "INP-002") if "unreadable" in f.check]
+    assert left_out.affected_count == 2
+    assert [(r["line"], r["error"]) for r in left_out.affected_records] == [
+        (25_002, "TOO MANY COLUMNS"),
+        (25_003, "TOO MANY COLUMNS"),
+    ]
+    tolerated = File(
+        path, options={"store_rejects": True}, acknowledge_lossy=True, max_rejected_rows=2
+    )
+    assert _failed(tolerated, schema, "INP-002") == []
+
+
+# =========================================================================
+# Header names the reader had to change
+# =========================================================================
+def test_duplicate_and_blank_headers_are_reported(tmp_path) -> None:
+    path = tmp_path / "t.csv"
+    path.write_text("id,v,v,,V\n1,2,-3,4,5\n")
+    [schema_failure] = _failed(str(path), {"columns": {"v": {"ge": 0}}}, "INP-002")
+    assert [(r["column"], r["problem"]) for r in schema_failure.affected_records] == [
+        ("v_1", "duplicate header 'v', read as 'v_1'"),
+        ("column3", "blank header, read as 'column3'"),
+        ("V_2", "duplicate header 'V', read as 'V_2'"),
+    ]
+
+
+def test_an_unrecognized_header_row_is_explained(tmp_path) -> None:
+    path = tmp_path / "t.csv"
+    path.write_text("id,name,v\n" + "".join(f"{i},n{i},{i}\n" for i in range(39)) + "40,a, b,5\n")
+    [schema_failure] = _failed(str(path), {"columns": {"v": {}}}, "INP-002")
+    problems = [r["problem"] for r in schema_failure.affected_records]
+    assert any("header row was not recognized" in p for p in problems)
+
+
+def test_clean_headers_need_no_raw_header_read(tmp_path, monkeypatch) -> None:
+    from qavf.sources.file import FileSource
+
+    def unexpected(*_args):
+        raise AssertionError("a clean header must not be re-read")
+
+    monkeypatch.setattr(FileSource, "_raw_header", unexpected)
+    path = tmp_path / "t.csv"
+    path.write_text("id,v_1,column_a\n1,2,3\n")
+    assert _failed(str(path), {"columns": {"id": {"dtype": "int"}}}, "INP-002") == []

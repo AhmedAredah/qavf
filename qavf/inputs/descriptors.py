@@ -33,6 +33,7 @@ class File:
     options: Mapping[str, Any] | None = None
     columns: Sequence[str] | None = None
     text_columns: Sequence[str] = ()
+    max_rejected_rows: int = 0
     min_files: int | None = None
     acknowledge_lossy: bool = False
 
@@ -49,6 +50,7 @@ class File:
                 "options": {} if self.options is None else self.options,
                 "columns": self.columns,
                 "text_columns": list(self.text_columns),
+                "max_rejected_rows": self.max_rejected_rows,
                 "min_files": self.min_files,
                 "acknowledge_lossy": self.acknowledge_lossy,
             }
@@ -70,6 +72,7 @@ class File:
                 "options": self.options,
                 "columns": self.columns,
                 "text_columns": list(self.text_columns),
+                "max_rejected_rows": self.max_rejected_rows,
                 "min_files": self.min_files,
                 "acknowledge_lossy": self.acknowledge_lossy,
             }

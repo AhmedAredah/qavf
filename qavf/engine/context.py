@@ -306,6 +306,10 @@ class DataContext:
         return self._catalog.specs
 
     # ------------------------------------------------------------------ access
+    def source(self, name: str) -> DataSource | None:
+        """The configured source of ``name``; ``None`` for in-memory inputs."""
+        return self._catalog.sources.get(name)
+
     def names(self) -> list[str]:
         """Every dataset that has data or a source, loaded or not."""
         return self._catalog.names(self._frames, self._lazy)

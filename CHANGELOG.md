@@ -23,6 +23,16 @@ All notable changes to this project are documented here. The format follows
 - An absent column names its likely spelling in the data (`ID` for `id`, `Site ID` for
   `site_id`, a close misspelling) in INP-002, INP-003 and INP-004.
 - `.xlsm` workbooks are read as Excel; a legacy `.xls` workbook explains how to read it.
+- **Unreadable CSV lines are located.** When a CSV line cannot be read (a value of the
+  wrong type past the reader's type sample, extra or missing fields, a wrong encoding),
+  checks report how many lines fail, the first one's line number, column and text, and
+  what to set, instead of the reader's raw error. The lines are found with one bounded
+  pass, only after a read has failed.
+- **Lossy reads are reported.** With `store_rejects` or `ignore_errors`, INP-002 fails
+  when more lines were left out than the new `max_rejected_rows` (default 0), and lists
+  them by file and line.
+- INP-002 reports duplicate and blank CSV header names that the reader renamed (`v_1`,
+  `column3`), and a header row the reader did not recognize.
 
 ### Changed
 

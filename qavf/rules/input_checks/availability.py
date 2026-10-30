@@ -25,7 +25,7 @@ from qavf.settings import (
     QAVFSettings,
     SchemaSpec,
 )
-from qavf.sources.base import SourceNotFoundError
+from qavf.sources.base import DataSource, SourceNotFoundError
 
 from . import _column_values as values
 from ._datasets import (
@@ -174,6 +174,13 @@ class SchemaConformanceRule(_SelectsDatasets):
                 problems.append(
                     {"column": column, "problem": f"expected {spec.dtype}, found {actual}"}
                 )
+            source = ctx.source(dataset)
+            if source is not None:
+                problems.extend(_header_problems(source))
+                rejected = _rejected(dataset, source, ctx.evidence_limit)
+                if rejected is not None:
+                    failures.append(rejected)
+                    failing.add(dataset)
             if schema.strict:
                 for column in actual_schema:
                     if column not in schema.columns:
@@ -211,6 +218,32 @@ class SchemaConformanceRule(_SelectsDatasets):
             f"{plural(len(passed), 'dataset')} conform to their schemas.",
             "No available dataset has a schema configured.",
         )
+
+
+def _header_problems(source: DataSource) -> list[dict[str, Any]]:
+    try:
+        return source.header_problems()
+    except Exception:
+        return []  # a diagnosis is a courtesy; the schema checks still decide
+
+
+def _rejected(dataset: str, source: DataSource, limit: int) -> Finding | None:
+    """Lines a lossy read left out, beyond the source's ``max_rejected_rows``."""
+    rejected = source.rejected_rows()
+    allowed = int(getattr(source.params, "max_rejected_rows", 0))
+    if rejected is None or rejected.count <= allowed:
+        return None
+    count = f"{rejected.count:,}" if rejected.exact else f"at least {rejected.count:,}"
+    return Finding.fail(
+        f"{count} {'line' if rejected.count == 1 else 'lines'} of {dataset} could not be "
+        f"read and {'was' if rejected.count == 1 else 'were'} left out "
+        f"(max_rejected_rows: {allowed}).",
+        check=f"{dataset}: unreadable lines",
+        affected=list(rejected.sample[:limit]),
+        affected_count=rejected.count,
+        unit="lines",
+        datasets=(dataset,),
+    )
 
 
 def _invalid_values(

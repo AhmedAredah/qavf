@@ -39,6 +39,9 @@ class FileParams(SourceParams):
     min_files: int | None = Field(default=None, ge=1)
     """With a local glob: fewer matching files than this fails the load (a glob alone
     only proves that some files matched)."""
+    max_rejected_rows: int = Field(default=0, ge=0)
+    """With ``store_rejects`` or ``ignore_errors``: more lines left out than this fails
+    INP-002, which lists the first of them by file and line."""
     acknowledge_lossy: bool = False
     """Allow reader options that can leave rows out (``ignore_errors``, ``skip``,
     ``store_rejects``, Excel ``range``/``stop_at_empty``). Rejected CSV rows are then
