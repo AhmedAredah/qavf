@@ -204,18 +204,79 @@ class BlandAltman:
     n: int
 
 
+class PairedValues:
+    """One member's paired values, validated and center-scaled once for every metric.
+
+    Agreement metrics share this preparation instead of each concatenating and
+    scaling the pair again; the module's functions build one per call.
+    """
+
+    __slots__ = ("b", "c", "difference", "sb", "sc", "unit")
+
+    def __init__(self, baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> None:
+        self.b, self.c = _paired(baseline, candidate)
+        self.sb, self.sc, self.unit = _scaled_pair(self.b, self.c)
+        self.difference = self.sc - self.sb
+        """``candidate - baseline`` in scaled units."""
+
+    def bland_altman(self, multiplier: float = 1.96) -> BlandAltman:
+        """Bland-Altman bias and limits ``bias -/+ multiplier * sd`` of the differences."""
+        if len(self.b) < 2:
+            raise ValueError("limits of agreement need at least two pairs")
+        bias = float(self.difference.mean()) * self.unit
+        sd = float(self.difference.std(ddof=1)) * self.unit
+        return BlandAltman(bias, sd, bias - multiplier * sd, bias + multiplier * sd, len(self.b))
+
+    def concordance(self) -> float | None:
+        """Lin's concordance correlation; ``None`` when both sides are one constant."""
+        mb, mc = self.sb.mean(), self.sc.mean()
+        covariance = float(((self.sb - mb) * (self.sc - mc)).mean())
+        denominator = float(self.sb.var() + self.sc.var() + (mb - mc) ** 2)
+        return None if denominator == 0 else 2 * covariance / denominator
+
+    def bias(self) -> float:
+        return float(self.difference.mean()) * self.unit
+
+    def mae(self) -> float:
+        return float(np.abs(self.difference).mean()) * self.unit
+
+    def rmse(self) -> float:
+        return math.sqrt(float((self.difference**2).mean())) * self.unit
+
+    def mape(self) -> float | None:
+        b, c = self.b, self.c
+        if (b == 0).any():
+            return None
+        exponent = np.frexp(np.maximum(np.abs(b), np.abs(c)))[1]
+        sb, sc = np.ldexp(b, -exponent), np.ldexp(c, -exponent)
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            terms = np.abs((sc - sb) / sb)
+            largest = float(terms.max())
+            if not math.isfinite(largest):
+                return None
+            result = float(np.mean(terms / largest)) * largest * 100 if largest else 0.0
+        return result if math.isfinite(result) else None
+
+    def smape(self) -> float:
+        b, c = self.b, self.c
+        exponent = np.frexp(np.maximum(np.abs(b), np.abs(c)))[1]
+        sb, sc = np.ldexp(b, -exponent), np.ldexp(c, -exponent)
+        scale = np.abs(sb) + np.abs(sc)
+        terms = np.divide(2 * np.abs(sc - sb), scale, out=np.zeros(len(b)), where=scale > 0)
+        return float(terms.mean()) * 100
+
+    def r_squared(self) -> float | None:
+        total = float(((self.sb - self.sb.mean()) ** 2).sum())
+        if total == 0:
+            return None
+        return 1 - float((self.difference**2).sum()) / total
+
+
 def bland_altman(
     baseline: npt.ArrayLike, candidate: npt.ArrayLike, multiplier: float = 1.96
 ) -> BlandAltman:
     """Bland-Altman bias and limits ``bias -/+ multiplier * sd`` of the differences."""
-    b, c = _paired(baseline, candidate)
-    if len(b) < 2:
-        raise ValueError("limits of agreement need at least two pairs")
-    sb, sc, unit = _scaled_pair(b, c)
-    difference = sc - sb
-    bias = float(difference.mean()) * unit
-    sd = float(difference.std(ddof=1)) * unit
-    return BlandAltman(bias, sd, bias - multiplier * sd, bias + multiplier * sd, len(b))
+    return PairedValues(baseline, candidate).bland_altman(multiplier)
 
 
 def concordance(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | None:
@@ -223,70 +284,38 @@ def concordance(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | No
 
     Moments use ``1/n`` (Lin 1989); ``None`` when both sides are one constant.
     """
-    b, c = _paired(baseline, candidate)
-    sb, sc, _ = _scaled_pair(b, c)
-    mb, mc = sb.mean(), sc.mean()
-    covariance = float(((sb - mb) * (sc - mc)).mean())
-    denominator = float(sb.var() + sc.var() + (mb - mc) ** 2)
-    return None if denominator == 0 else 2 * covariance / denominator
+    return PairedValues(baseline, candidate).concordance()
 
 
 def bias(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Mean of ``candidate - baseline``."""
-    b, c = _paired(baseline, candidate)
-    sb, sc, unit = _scaled_pair(b, c)
-    return float((sc - sb).mean()) * unit
+    return PairedValues(baseline, candidate).bias()
 
 
 def mae(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Mean absolute difference."""
-    b, c = _paired(baseline, candidate)
-    sb, sc, unit = _scaled_pair(b, c)
-    return float(np.abs(sc - sb).mean()) * unit
+    return PairedValues(baseline, candidate).mae()
 
 
 def rmse(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Root mean squared difference."""
-    b, c = _paired(baseline, candidate)
-    sb, sc, unit = _scaled_pair(b, c)
-    return math.sqrt(float(((sc - sb) ** 2).mean())) * unit
+    return PairedValues(baseline, candidate).rmse()
 
 
 def mape(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | None:
     """Mean absolute percentage difference relative to the baseline (``None`` for a zero)."""
-    b, c = _paired(baseline, candidate)
-    if (b == 0).any():
-        return None
-    exponent = np.frexp(np.maximum(np.abs(b), np.abs(c)))[1]
-    sb, sc = np.ldexp(b, -exponent), np.ldexp(c, -exponent)
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        terms = np.abs((sc - sb) / sb)
-        largest = float(terms.max())
-        if not math.isfinite(largest):
-            return None
-        result = float(np.mean(terms / largest)) * largest * 100 if largest else 0.0
-    return result if math.isfinite(result) else None
+    return PairedValues(baseline, candidate).mape()
 
 
 def smape(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Symmetric MAPE ``mean(2 |c - b| / (|b| + |c|)) * 100``; a pair of zeros counts 0."""
-    b, c = _paired(baseline, candidate)
-    exponent = np.frexp(np.maximum(np.abs(b), np.abs(c)))[1]
-    sb, sc = np.ldexp(b, -exponent), np.ldexp(c, -exponent)
-    scale = np.abs(sb) + np.abs(sc)
-    terms = np.divide(2 * np.abs(sc - sb), scale, out=np.zeros(len(b)), where=scale > 0)
-    return float(terms.mean()) * 100
+    return PairedValues(baseline, candidate).smape()
 
 
 def r_squared(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | None:
     """``1 - sum((c - b)^2) / sum((b - mean b)^2)``: the candidate as a prediction of
     the baseline; ``None`` for a constant baseline."""
-    b, c = _paired(baseline, candidate)
-    sb, sc, _ = _scaled_pair(b, c)
-    total = float(((sb - sb.mean()) ** 2).sum())
-    if total == 0:
-        return None
-    return 1 - float(((sc - sb) ** 2).sum()) / total
+    return PairedValues(baseline, candidate).r_squared()
 
 
 # ------------------------------------------------------------ distributions
@@ -336,25 +365,37 @@ def jensen_shannon(baseline_counts: npt.ArrayLike, candidate_counts: npt.ArrayLi
     return min(1.0, max(0.0, (kl(p) + kl(q)) / 2))
 
 
-def _distribution_functions(
-    baseline: npt.ArrayLike, candidate: npt.ArrayLike
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
-    """Both empirical distribution functions on the pooled sorted (scaled) values."""
-    b, c = _pair(baseline, candidate)
-    if not len(b) or not len(c):
-        raise ValueError("distribution distances need a nonempty sample on each side")
-    sb, sc, unit = _scaled_pair(b, c)
-    sb, sc = np.sort(sb), np.sort(sc)
-    pooled = np.sort(np.concatenate([sb, sc]))
-    below_b = np.searchsorted(sb, pooled, side="right") / len(sb)
-    below_c = np.searchsorted(sc, pooled, side="right") / len(sc)
-    return pooled, below_b, below_c, unit
+class EmpiricalDistributions:
+    """Both empirical distribution functions on the pooled sorted (scaled) values.
+
+    Built once per member, then shared by the KS and Wasserstein distances.
+    """
+
+    __slots__ = ("below_b", "below_c", "pooled", "unit")
+
+    def __init__(self, baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> None:
+        b, c = _pair(baseline, candidate)
+        if not len(b) or not len(c):
+            raise ValueError("distribution distances need a nonempty sample on each side")
+        sb, sc, self.unit = _scaled_pair(b, c)
+        sb, sc = np.sort(sb), np.sort(sc)
+        self.pooled = np.sort(np.concatenate([sb, sc]))
+        self.below_b = np.searchsorted(sb, self.pooled, side="right") / len(sb)
+        self.below_c = np.searchsorted(sc, self.pooled, side="right") / len(sc)
+
+    def ks_distance(self) -> float:
+        """Kolmogorov-Smirnov distance: the largest gap between the two empirical CDFs."""
+        return float(np.abs(self.below_b - self.below_c).max())
+
+    def wasserstein(self) -> float:
+        """First Wasserstein distance, in data units (the area between the CDFs)."""
+        gaps = np.diff(self.pooled)
+        return float(np.sum(np.abs(self.below_b[:-1] - self.below_c[:-1]) * gaps)) * self.unit
 
 
 def ks_distance(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Kolmogorov-Smirnov distance: the largest gap between the two empirical CDFs."""
-    _, below_b, below_c, _ = _distribution_functions(baseline, candidate)
-    return float(np.abs(below_b - below_c).max())
+    return EmpiricalDistributions(baseline, candidate).ks_distance()
 
 
 def wasserstein(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
@@ -363,9 +404,7 @@ def wasserstein(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     The area between the empirical CDFs, ``sum |F_b - F_c| dx`` over the pooled
     sorted values, as SciPy's ``wasserstein_distance`` of the two samples.
     """
-    pooled, below_b, below_c, unit = _distribution_functions(baseline, candidate)
-    gaps = np.diff(pooled)
-    return float(np.sum(np.abs(below_b[:-1] - below_c[:-1]) * gaps)) * unit
+    return EmpiricalDistributions(baseline, candidate).wasserstein()
 
 
 def quantile_deltas(

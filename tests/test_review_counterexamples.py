@@ -618,3 +618,41 @@ def test_f25_integer_structs_exit_early_and_float_structs_keep_nonfinite_counts(
     floats = pl.DataFrame({"k": [1], "s": [{"v": [1.0, 2.0, 3.0]}]})
     later_nan = pl.DataFrame({"k": [1], "s": [{"v": [0.0, 2.0, float("nan")]}]})
     assert compare_frames(floats, later_nan, "k").nonfinite_changes == 1
+
+
+# =========================================================================
+# F26: one member's numeric preparation is shared by its metrics
+# =========================================================================
+class _CountedScaling:
+    """``_scaled_pair`` that counts how often a pair is prepared."""
+
+    def __init__(self) -> None:
+        from qavf.inference import effects
+
+        self.scale, self.calls = effects._scaled_pair, 0
+
+    def __call__(self, *args: object) -> object:
+        self.calls += 1
+        return self.scale(*args)
+
+
+@pytest.mark.parametrize(
+    ("level", "prepared"),
+    [
+        ({"level": "relationships", "agreement": {"columns": ["x"]}}, 1),
+        ({"level": "distribution", "columns": ["x"], "decision": "material"}, 1),
+    ],
+)
+def test_f26_a_member_is_scaled_once_for_all_its_metrics(level, prepared, monkeypatch) -> None:
+    import numpy as np
+
+    from qavf import compare_datasets
+    from qavf.inference import effects
+
+    counted = _CountedScaling()
+    monkeypatch.setattr(effects, "_scaled_pair", counted)
+    x = np.arange(1.0, 51.0)
+    base = pl.DataFrame({"id": np.arange(50), "x": x})
+    cand = base.with_columns(pl.Series("x", x * 1.01))
+    compare_datasets(base, cand, keys="id", entry_points=False, levels=[level])
+    assert counted.calls == prepared

@@ -680,7 +680,8 @@ def _agreement(
     check: AgreementCheck, column: str, group: dict[str, Any], b: np.ndarray, c: np.ndarray
 ) -> Agreement:
     """Every agreement metric of one member's matched pairs and which pass a threshold."""
-    limits = effects.bland_altman(b, c)
+    pair = effects.PairedValues(b, c)
+    limits = pair.bland_altman()
     slope: float | None
     intercept: float | None
     try:
@@ -693,12 +694,12 @@ def _agreement(
         "sd": limits.sd,
         "lower": limits.lower,
         "upper": limits.upper,
-        "ccc": effects.concordance(b, c),
-        "mae": effects.mae(b, c),
-        "rmse": effects.rmse(b, c),
-        "mape": effects.mape(b, c),
-        "smape": effects.smape(b, c),
-        "r_squared": effects.r_squared(b, c),
+        "ccc": pair.concordance(),
+        "mae": pair.mae(),
+        "rmse": pair.rmse(),
+        "mape": pair.mape(),
+        "smape": pair.smape(),
+        "r_squared": pair.r_squared(),
         "slope": slope,
         "intercept": intercept,
     }

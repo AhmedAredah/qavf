@@ -70,11 +70,10 @@ from qavf.compare.spec import InferenceParams, Side
 from qavf.engine.registry import RuleParams
 from qavf.inference.categorical import chi_square, g_test
 from qavf.inference.effects import (
+    EmpiricalDistributions,
     jensen_shannon,
-    ks_distance,
     population_stability,
     quantile_deltas,
-    wasserstein,
 )
 from qavf.inference.registry import TESTS, TestInput
 from qavf.inference.results import TestResult
@@ -363,8 +362,9 @@ class DistributionLevel(ComparisonLevel):
         labels, b_counts, c_counts = numeric_bins(b, c, params.bins, display_limit=params.bins * 2)
         psi = population_stability(zip(b_counts, c_counts, strict=True), (len(b), len(c)))
         js = jensen_shannon(b_counts, c_counts)
-        ks = ks_distance(b, c)
-        distance = wasserstein(b, c)
+        functions = EmpiricalDistributions(b, c)
+        ks = functions.ks_distance()
+        distance = functions.wasserstein()
         quantiles = []
         if params.quantiles is not None and judged is not None:
             for p, qb, qc in quantile_deltas(b, c, params.quantiles.probabilities):
