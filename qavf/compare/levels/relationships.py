@@ -72,7 +72,7 @@ from qavf.inference.results import TestResult
 from qavf.inference.results import not_assessed as untested
 from qavf.inference.trend import FIELLER_VARIANCE, compare_correlations
 from qavf.keys import align_keys
-from qavf.numeric import exact_rational, report_number
+from qavf.numeric import count_input, exact_rational, report_number
 from qavf.rules._grouped import ProjectedRelation
 from qavf.rules.helpers import fresh_internal, plural
 from qavf.statistics.series import pearson, spearman
@@ -491,7 +491,8 @@ class RelationshipsLevel(ComparisonLevel):
             run = None
             if test is not None:
                 data = TestInput(
-                    counts=(float(nb), float(nc)), totals=(float(db), float(dc)),
+                    counts=(count_input(nb), count_input(nc)),
+                    totals=(count_input(db), count_input(dc)),
                     seed=inference.seed + position, max_work=inference.max_work,
                 )  # fmt: skip
                 runner = test.equivalent if inference.decision == "equivalence" else test.run

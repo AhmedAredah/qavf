@@ -72,6 +72,20 @@ def report_number(value: Fraction | float | None) -> int | float | None:
         return math.inf if value > 0 else -math.inf
 
 
+def count_input(value: Any) -> int | float:
+    """A count or total for a statistical test: a whole value stays an exact integer.
+
+    A Float64 cannot hold every integer above ``2**53``; a whole count is never
+    rounded on its way to a test, which admits or refuses its magnitude itself.
+    """
+    exact = exact_rational(value)
+    if exact is None:
+        return float(value)
+    number = report_number(exact)
+    assert number is not None
+    return number
+
+
 def checked_float(value: int | float | Decimal) -> float:
     """Convert finite exact data only when its stored value is representable."""
     try:

@@ -86,7 +86,7 @@ from qavf.inference.spatial import (
 )
 from qavf.inference.trend import rank_correlation_test
 from qavf.keys import align_keys
-from qavf.numeric import exact_rational, report_number
+from qavf.numeric import count_input, exact_rational, report_number
 from qavf.rules.helpers import LargestEvidence, plural
 from qavf.spatial.crs import DEFAULT_CRS, is_geographic
 from qavf.spatial.extension import fetch, spatial_connection
@@ -520,8 +520,8 @@ class SpatialLevel(ComparisonLevel):
             data = None
             if whole:
                 data = TestInput(
-                    counts=(float(b or 0), float(c or 0)),
-                    totals=(float(totals[0]), float(totals[1])),
+                    counts=(count_input(b or 0), count_input(c or 0)),
+                    totals=(count_input(totals[0]), count_input(totals[1])),
                     seed=inference.seed + position,
                     max_work=inference.max_work,
                 )

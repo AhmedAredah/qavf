@@ -191,10 +191,23 @@ class ComponentRegistry[C: Component]:
         return self
 
     def refresh(self) -> ComponentRegistry[C]:
-        """Rescan the entry-point group (for example after installing a plugin)."""
-        with self._lock:
-            self._entry_points_loaded = False
-        return self.discover(use_entry_points=True)
+        """Rescan the entry-point group (for example after installing a plugin).
+
+        The installed components and their load statuses are rebuilt from the
+        current entry points in one transaction: a removed entry point's
+        component disappears, a failed replacement leaves its error and no older
+        class standing in, and concurrent lookups see the previous snapshot until
+        the new one is complete. In-code registrations are kept.
+        """
+        with _DISCOVERY_LOCK, self._lock:
+            self.discover()
+            with transaction(installed=True):
+                with LOCK:
+                    mapping(self, "_installed").clear()
+                    mapping(self, "plugins").clear()
+                self._entry_points_loaded = True
+                self._discover_entry_points()
+        return self
 
     def entries(self) -> list[EntryPoint]:
         """The installed entry points of this registry's group."""

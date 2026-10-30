@@ -55,7 +55,7 @@ from qavf.compare.spec import InferenceParams
 from qavf.engine.registry import RuleParams
 from qavf.inference.registry import TESTS, TestInput
 from qavf.inference.results import TestResult
-from qavf.numeric import exact_rational, report_number
+from qavf.numeric import count_input, exact_rational, report_number
 from qavf.statistics.decomposition import (
     DecompositionMethod,
     contributions,
@@ -390,8 +390,8 @@ class ContributionLevel(ComparisonLevel):
         run = None
         if test is not None:
             data = TestInput(
-                counts=(float(sums[0]), float(sums[2])),
-                totals=(float(sums[1]), float(sums[3])),
+                counts=(count_input(sums[0]), count_input(sums[2])),
+                totals=(count_input(sums[1]), count_input(sums[3])),
                 seed=inference.seed,
                 max_work=inference.max_work,
             )

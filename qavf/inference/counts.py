@@ -23,11 +23,36 @@ from qavf.inference.intervals import normal_interval
 from qavf.inference.pvalues import normal_p_value
 from qavf.inference.results import Alternative, TestResult
 
+MAX_EXACT_COUNT = 2**53
+"""Largest event total the exact Poisson test admits: SciPy's binomial
+arithmetic is Float64, which cannot hold every integer above it."""
+
 
 def _whole(value: float, role: str) -> int:
-    if value < 0 or not math.isfinite(value) or value != int(value):
+    """``value`` as an exact count; an integer is never rounded through Float64."""
+    try:
+        exact = Fraction(value)
+    except (TypeError, ValueError, OverflowError):
+        exact = None
+    if exact is None or exact < 0 or exact.denominator != 1:
         raise Unassessable(f"{role} must be a whole non-negative count, got {value!r}")
-    return int(value)
+    return int(exact)
+
+
+def _ratio_bound(share: float, eb: float, ec: float) -> float:
+    """The rate ratio of a bound on the candidate's share of events."""
+    if share >= 1:
+        return math.inf
+    value = rate_ratio(1 - share, eb, share, ec)
+    return math.inf if value is None else value
+
+
+def _probability(value: float, n: dict[str, int], role: str) -> float:
+    """A probability SciPy returned, refused unless it is one."""
+    value = float(value)
+    if not 0 <= value <= 1:
+        raise Unassessable(f"the exact binomial {role} is not a probability ({value!r})", n=n)
+    return value
 
 
 @assessed("two_proportion")
@@ -128,22 +153,21 @@ def poisson_rate(
     total = kb + kc
     if not total:
         return TestResult(statistic=0.0, p_value=1.0, notes=["no events"], **common)
+    if total > MAX_EXACT_COUNT:
+        raise Unassessable(
+            f"{total} events exceed the exact test's supported total of 2**53", n=n
+        )
     stats = require_scipy()
     share = ec / (eb + ec)
     result = stats.binomtest(kc, total, share, alternative=alternative)
     interval = result.proportion_ci(confidence_level=confidence, method="exact")
-
-    def ratio(p: float) -> float:
-        if p >= 1:
-            return math.inf
-        value = rate_ratio(1 - p, eb, p, ec)
-        return math.inf if value is None else value
-
+    low = _probability(interval.low, n, "interval bound")
+    high = _probability(interval.high, n, "interval bound")
     return TestResult(
         statistic=float(kc),
-        p_value=float(result.pvalue),
-        ci_low=ratio(float(interval.low)),
-        ci_high=ratio(float(interval.high)),
+        p_value=_probability(result.pvalue, n, "p-value"),
+        ci_low=_ratio_bound(low, eb, ec),
+        ci_high=_ratio_bound(high, eb, ec),
         confidence=confidence,
         **common,
     )

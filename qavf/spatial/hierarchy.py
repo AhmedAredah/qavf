@@ -8,7 +8,8 @@ zone with ``weight`` shares that must sum to 1 within ``tolerance`` for every
 are validated before anything uses it (:func:`crosswalk_frame`).
 
 Hierarchies (link -> zone -> county -> state) are crosswalks composed with
-:func:`compose` (weights multiply exactly). :func:`aggregate_up` aggregates
+:func:`compose` (each step's weights multiply exactly and are rounded once, so a
+chain of several steps is rounded once per step). :func:`aggregate_up` aggregates
 per-zone values to the parents exactly: unweighted sums with the exact native
 accumulators of :mod:`qavf.aggregation`, split sums as exact rationals of the
 binary values and weights, rounded once.
@@ -153,6 +154,9 @@ def compose(*frames: pl.DataFrame) -> pl.DataFrame:
 
     A child whose parent has no next level is dropped by the chain; validate the
     result with :func:`validate_crosswalk` to prove every split still sums to 1.
+    Each step is a stored Float64 crosswalk: its products and sums are exact and
+    rounded once, so a chain of ``k`` steps is rounded ``k - 1`` times, each within
+    half a unit in the last place.
     """
     if not frames:
         raise ValueError("compose needs at least one crosswalk")
@@ -160,7 +164,8 @@ def compose(*frames: pl.DataFrame) -> pl.DataFrame:
     for following in frames[1:]:
         step = following.rename({SOURCE: TARGET, TARGET: "next", WEIGHT: "next_weight"})
         joined = chained.join(step, on=TARGET, how="inner")
-        # Products, and sums over paths reaching one parent, are exact; rounded once.
+        # This step's products, and sums over paths reaching one parent, are exact;
+        # rounded once per step, so the next step starts from a Float64 crosswalk.
         weights: dict[tuple[Any, Any], Fraction] = {}
         for source, parent, a, b in joined.select(
             SOURCE, "next", WEIGHT, "next_weight"

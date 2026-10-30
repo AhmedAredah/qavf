@@ -289,9 +289,10 @@ class Member:
     run: Callable[[], TestResult] | None = None
 
 
-def _whole(value: Any) -> float | None:
+def _whole(value: Any) -> int | None:
+    """``value`` as an exact whole non-negative count, never rounded through Float64."""
     exact = None if value is None else Fraction(value)
-    return float(exact) if exact is not None and exact.denominator == 1 and exact >= 0 else None
+    return int(exact) if exact is not None and exact.denominator == 1 and exact >= 0 else None
 
 
 def member_input(

@@ -165,7 +165,8 @@ crosswalk: {pairs: [[A, A1, 0.6], [A, A2, 0.4], [B, B, 1.0]]}
 Many-to-one is the common case (weight 1). A split zone's weights must sum to 1 within
 `tolerance` (1e-9), checked exactly; ids must be present, pairs unique and weights in
 (0, 1]. A crosswalk that fails any of this is refused. Hierarchies are crosswalks
-chained with `qavf.spatial.compose` (weights multiply exactly), and
+chained with `qavf.spatial.compose` (each step's weights multiply exactly and are
+rounded once, so a chain of several steps is rounded once per step), and
 `qavf.spatial.aggregate_up` aggregates per-zone values to their parents exactly: sums
 of unsplit zones with the exact native accumulators, split zones as exact rationals
 of the values and weights, rounded once.

@@ -14,6 +14,7 @@ import pytest
 
 from qavf import Dataset, File, ResourceLimits, validate
 from qavf.engine.severity import Status
+from qavf.plugins.registry import Component
 from qavf.rules._declared_types import convert
 from qavf.settings import ColumnSpec
 from qavf.sources.file import FileSource
@@ -372,3 +373,76 @@ def test_f10_distinct_groups_with_equal_labels_stay_distinct_in_charts() -> None
     records = [{"x": 1.0000001}, {"x": 1.0000002}, {"x": None}, {"x": "\u2014"}, {"x": 2.5}]
     labels = [MemberLabels(["x"], records).label(r) for r in records]
     assert len(set(labels)) == 5 and labels[4] == "2.5"
+
+
+# =========================================================================
+# F12: a refresh rebuilds the installed components from the current entry points
+# =========================================================================
+class _InstalledProbe(Component):
+    name = "probe"
+
+
+class _CodedProbe(Component):
+    name = "coded"
+
+
+class _Installed:
+    """Entry points returned by a probe registry; ``current`` is what is installed now."""
+
+    def __init__(self, *current: object) -> None:
+        self.current = list(current)
+
+    def __call__(self) -> list[object]:
+        return self.current
+
+
+class _Entry:
+    def __init__(self, name: str, target: object) -> None:
+        self.name, self.target = name, target
+
+    def load(self) -> object:
+        if isinstance(self.target, Exception):
+            raise self.target
+        return self.target
+
+
+def test_f12_refresh_drops_removed_and_failed_components(monkeypatch) -> None:
+    from qavf.plugins.registry import ComponentRegistry
+    from qavf.plugins.transactions import visibility
+
+    registry: ComponentRegistry = ComponentRegistry("probe", "review.probe", Component, ())
+    installed = _Installed(_Entry("example", _InstalledProbe))
+    monkeypatch.setattr(registry, "entries", installed)
+    registry.register(_CodedProbe)
+    registry.refresh()
+    with visibility(True):
+        assert registry.names() == ["coded", "probe"]
+    assert registry.plugins == {"example": "loaded"}
+
+    installed.current = [_Entry("example", ImportError("replacement is broken"))]
+    registry.refresh()
+    with visibility(True):
+        assert registry.names() == ["coded"]
+    assert registry.plugins["example"].startswith("error: ImportError")
+
+    installed.current = []
+    registry.refresh()
+    with visibility(True):
+        assert registry.names() == ["coded"]
+    assert registry.plugins == {}
+
+
+# =========================================================================
+# F13: whole counts reach tests exactly; an unsupported magnitude is unassessed
+# =========================================================================
+def test_f13_counts_are_never_rounded_and_extremes_are_unassessed() -> None:
+    from qavf.compare.significance import _whole
+    from qavf.inference.counts import poisson_rate
+    from qavf.numeric import count_input
+
+    assert _whole(2**53) != _whole(2**53 + 1) == 2**53 + 1
+    assert count_input(Decimal(2**53 + 1)) == 2**53 + 1 and count_input(2.5) == 2.5
+    extreme = poisson_rate((1, 10**16), (1.0, 1e16))
+    assert not extreme.assessed and "2**53" in (extreme.reason or "")
+    assert poisson_rate((2**53 - 3, 2), (1.0, 1.0)).assessed
+    assert poisson_rate((1, 5), (1.0, 1e300)).assessed
