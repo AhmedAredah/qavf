@@ -13,6 +13,31 @@ from qavf.regression._schema import _type_changed
 _MISSING = object()
 
 
+def _dtype_may_nonfinite(dtype: pl.DataType) -> bool:
+    """Whether a value of ``dtype`` can hold a NaN or an infinity at any depth."""
+    if isinstance(dtype, pl.List | pl.Array):
+        return _dtype_may_nonfinite(cast(pl.DataType, dtype.inner))
+    if isinstance(dtype, pl.Struct):
+        return any(_dtype_may_nonfinite(cast(pl.DataType, field.dtype)) for field in dtype.fields)
+    return dtype.is_float() or isinstance(dtype, pl.Object)
+
+
+def _may_nonfinite(value: Any, dtype: pl.DataType | None = None) -> bool:
+    """Whether ``value`` may contain a nonfinite number.
+
+    A nested Python value is judged by its column's dtype when known, so integer
+    and text structures keep the first-difference early exit; without a dtype it
+    is assumed possible.
+    """
+    if isinstance(value, pl.Series):
+        if value.dtype.is_float():
+            return not bool(value.is_finite().all())
+        return _dtype_may_nonfinite(value.dtype)
+    if isinstance(value, (list, tuple, dict)):
+        return True if dtype is None else _dtype_may_nonfinite(dtype)
+    return _nonfinite(value)
+
+
 def _cell_change(
     before: Any,
     after: Any,
@@ -30,25 +55,7 @@ def _cell_change(
     rtol, atol = tolerance(column)
     first: list[Any] | None = None
     nonfinite = False
-
-    def may_nonfinite(value: Any) -> bool:
-        if isinstance(value, pl.Series):
-
-            def numeric(dtype: pl.DataType) -> bool:
-                if isinstance(dtype, pl.List | pl.Array):
-                    return numeric(cast(pl.DataType, dtype.inner))
-                if isinstance(dtype, pl.Struct):
-                    return any(numeric(cast(pl.DataType, field.dtype)) for field in dtype.fields)
-                return dtype.is_float() or isinstance(dtype, pl.Object)
-
-            if value.dtype.is_float():
-                return not bool(value.is_finite().all())
-            return numeric(value.dtype)
-        if isinstance(value, (list, tuple, dict)):
-            return True
-        return _nonfinite(value)
-
-    inspect_nonfinite = may_nonfinite(before) or may_nonfinite(after)
+    inspect_nonfinite = _may_nonfinite(before, before_dtype) or _may_nonfinite(after, after_dtype)
 
     def visit(
         a: Any,

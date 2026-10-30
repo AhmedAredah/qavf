@@ -584,3 +584,37 @@ def test_f24_integer_tolerances_match_the_exact_rule_without_per_cell_work(
     cand = cells.select(pl.int_range(pl.len()).alias("k"), pl.col("b").alias("v"))
     result = compare_frames(base, cand, "k", rtol=rtol, atol=atol)
     assert result.equal == all(settled.to_series())
+
+
+# =========================================================================
+# F25: a nested integer cell stops at its first difference
+# =========================================================================
+class _CountedClose:
+    """``numbers_close`` that counts the leaves it compares."""
+
+    def __init__(self) -> None:
+        from qavf.regression._numeric import numbers_close
+
+        self.close, self.calls = numbers_close, 0
+
+    def __call__(self, *args: object) -> bool:
+        self.calls += 1
+        return self.close(*args)
+
+
+def test_f25_integer_structs_exit_early_and_float_structs_keep_nonfinite_counts(
+    monkeypatch,
+) -> None:
+    from qavf.regression import _cells
+    from qavf.regression.compare_outputs import compare_frames
+
+    counted = _CountedClose()
+    monkeypatch.setattr(_cells, "numbers_close", counted)
+    values = list(range(10_000))
+    before = pl.DataFrame({"k": [1], "s": [{"v": values}]})
+    after = pl.DataFrame({"k": [1], "s": [{"v": [-1, *values[1:]]}]})
+    assert not compare_frames(before, after, "k").equal
+    assert counted.calls == 1
+    floats = pl.DataFrame({"k": [1], "s": [{"v": [1.0, 2.0, 3.0]}]})
+    later_nan = pl.DataFrame({"k": [1], "s": [{"v": [0.0, 2.0, float("nan")]}]})
+    assert compare_frames(floats, later_nan, "k").nonfinite_changes == 1
