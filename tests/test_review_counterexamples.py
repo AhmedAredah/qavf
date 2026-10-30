@@ -446,3 +446,61 @@ def test_f13_counts_are_never_rounded_and_extremes_are_unassessed() -> None:
     assert not extreme.assessed and "2**53" in (extreme.reason or "")
     assert poisson_rate((2**53 - 3, 2), (1.0, 1.0)).assessed
     assert poisson_rate((1, 5), (1.0, 1e300)).assessed
+
+
+# =========================================================================
+# F22: an induced subgraph reads only the selected rows
+# =========================================================================
+def test_f22_a_small_subgraph_costs_its_own_edges_not_the_graphs() -> None:
+    import tracemalloc
+
+    import numpy as np
+
+    from qavf._adjacency import CompactAdjacency
+
+    n = 500_000
+    ring = np.arange(n)
+    graph = CompactAdjacency.from_edges(
+        n, np.repeat(ring, 2), np.stack([(ring + 1) % n, (ring - 1) % n], 1).ravel()
+    )
+    tracemalloc.start()
+    try:
+        subset = graph.subset([1, 0, 7])
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 100_000
+    assert [dict(subset[i]) for i in range(3)] == [{1: 1.0}, {0: 1.0}, {}]
+    weighted = CompactAdjacency.from_edges(3, np.array([0, 0, 2]), np.array([1, 2, 0]),
+                                           np.array([0.5, 2.0, 3.0]))  # fmt: skip
+    assert [dict(weighted.subset([2, 0])[i]) for i in range(2)] == [{1: 3.0}, {0: 2.0}]
+
+
+# =========================================================================
+# F16: a chart's construction memory is bounded by its marks, not its labels
+# =========================================================================
+def test_f16_a_huge_label_is_cut_before_the_chart_is_built() -> None:
+    import tracemalloc
+
+    from qavf.reports import charts
+
+    label = "x" * 10_000_000
+    tracemalloc.start()
+    try:
+        drawn = [
+            charts.horizontal_bars([charts.BarRow(label, [charts.Segment("s", 1.0, "c")])], label),
+            charts.waterfall([charts.WaterfallStep(label, 1.0, "total")], label),
+            charts.heat_map([label], [label], {(label, label): 0.5}, label),
+            charts.series_lines([label], [1.0], [2.0], label),
+            charts.paired_bars([label], [0.5], [0.5], label),
+            charts.deltas([label], [0.1], label),
+            charts.choropleth(
+                {label: "M0 0 L1 1"}, {label: (0.5, 0.5)}, {label: 0.1}, (10, 10), label
+            ),
+        ]
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000
+    assert all(len(svg) < 10 * charts.MAX_TEXT_CHARS + 5_000 for svg in drawn)
+    assert "+50%" in drawn[2]  # the cell is still found under its full label

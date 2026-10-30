@@ -188,18 +188,31 @@ class CompactAdjacency(Mapping[int, Mapping[int, float]]):
         return CompactAdjacency(offsets, self._indices[retained], scaled[retained])
 
     def subset(self, keep: Sequence[int]) -> CompactAdjacency:
-        """Induced graph in the given unique vertex order, without Python edge objects."""
+        """Induced graph in the given unique vertex order, without Python edge objects.
+
+        Only the selected rows' slices are read and neighbours are matched by
+        binary search over the selection, so the work and transient memory are
+        ``O(k log k + edges of the k rows)``, independent of the rest of the graph.
+        Binary graphs stay binary (no weight array).
+        """
         selected = checked_subset(keep, len(self))
-        inverse = np.full(len(self), -1, dtype=np.int64)
-        inverse[selected] = np.arange(len(selected))
-        rows, columns, values = self.edge_arrays()
-        mapped_rows, mapped_columns = inverse[rows], inverse[columns]
-        retained = (mapped_rows >= 0) & (mapped_columns >= 0)
+        starts = self._offsets[selected]
+        counts = self._offsets[selected + 1] - starts
+        # Positions of every edge of the selected rows, row by row.
+        before = np.concatenate((np.zeros(1, dtype=np.int64), np.cumsum(counts)[:-1]))
+        positions = np.repeat(starts - before, counts) + np.arange(int(counts.sum()))
+        rows = np.repeat(np.arange(len(selected), dtype=np.int64), counts)
+        order = np.argsort(selected, kind="stable")
+        ordered = selected[order]
+        neighbours = self._indices[positions]
+        found = np.searchsorted(ordered, neighbours)
+        inside = found < len(ordered)
+        inside[inside] = ordered[found[inside]] == neighbours[inside]
         return CompactAdjacency.from_edges(
             len(selected),
-            mapped_rows[retained],
-            mapped_columns[retained],
-            None if self._values is None else values[retained],
+            rows[inside],
+            order[found[inside]],
+            None if self._values is None else self._values[positions[inside]],
         )
 
 

@@ -585,11 +585,11 @@ def sequence_positions(
     frame = labels.alias("label").to_frame()
     if bucket is None or not bucket.subday:
         return frame.select(calendar_position(pl.col("label"), labels.dtype, bucket))["label"]
-    present = labels.drop_nulls().sort()
-    if present.is_empty():
+    if labels.null_count() == len(labels):
         return pl.Series("label", [None] * len(labels), dtype=pl.Int64)
-    start = present.head(1) if first is None else first
-    end = present.tail(1) if last is None else last
+    # Typed reductions keep the storage dtype and zone; no label is sorted.
+    start = frame.select(pl.col("label").min())["label"] if first is None else first
+    end = frame.select(pl.col("label").max())["label"] if last is None else last
     dtype = labels.dtype
     if isinstance(dtype, pl.Datetime) and (
         dtype.time_zone is None or ZoneInfo(dtype.time_zone).utcoffset(None) is not None

@@ -26,6 +26,10 @@ _ROW_HEIGHT = 30
 _BAR_HEIGHT = 14
 _SEGMENT_GAP = 2
 _MAX_LABEL_CHARS = 22
+MAX_TEXT_CHARS = 200
+"""Longest label, tooltip part or accessible name a chart repeats. Text is cut to
+this once, before a chart is built, so a chart's size and construction memory are
+bounded by its marks, however long the labels it is given."""
 _UNPLOTTABLE = Markup(
     '<p class="empty">Chart omitted: values exceed the finite plotting range.</p>'
 )
@@ -56,7 +60,16 @@ class BarRow:
 
 
 def _shorten(text: str) -> str:
-    return text if len(text) <= _MAX_LABEL_CHARS else text[: _MAX_LABEL_CHARS - 1] + "…"
+    return _shorten_to(text, _MAX_LABEL_CHARS)
+
+
+def _shorten_to(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def bounded(text: str) -> str:
+    """``text`` cut to :data:`MAX_TEXT_CHARS`, the most a chart displays of it."""
+    return _shorten_to(text, MAX_TEXT_CHARS)
 
 
 def _format(value: float) -> str:
@@ -77,16 +90,17 @@ def horizontal_bars(rows: Sequence[BarRow], aria_label: str) -> Markup:
     height = len(rows) * _ROW_HEIGHT + 6
     parts: list[str] = [
         f'<svg class="chart" viewBox="0 0 {_WIDTH} {height}" role="img" '
-        f'aria-label="{escape(aria_label)}" preserveAspectRatio="xMinYMin meet">',
+        f'aria-label="{escape(bounded(aria_label))}" preserveAspectRatio="xMinYMin meet">',
         f'<line class="axis" x1="{_LABEL_WIDTH}" y1="0" x2="{_LABEL_WIDTH}" y2="{height}"/>',
     ]
     for index, row in enumerate(rows):
         top = index * _ROW_HEIGHT + 3
         middle = top + _ROW_HEIGHT / 2
+        label = bounded(row.label)
         parts.append(
             f'<text class="label" x="{_LABEL_WIDTH - 10}" y="{middle:.1f}" '
             f'text-anchor="end" dominant-baseline="central">'
-            f"<title>{escape(row.label)}</title>{escape(_shorten(row.label))}</text>"
+            f"<title>{escape(label)}</title>{escape(_shorten(label))}</text>"
         )
         x = float(_LABEL_WIDTH)
         visible = [segment for segment in row.segments if segment.value > 0]
@@ -97,14 +111,14 @@ def horizontal_bars(rows: Sequence[BarRow], aria_label: str) -> Markup:
                 f'<rect class="bar {escape(segment.css_class)}" x="{x:.1f}" '
                 f'y="{middle - _BAR_HEIGHT / 2:.1f}" width="{drawn:.1f}" '
                 f'height="{_BAR_HEIGHT}" rx="3">'
-                f"<title>{escape(row.label)} · {escape(segment.name)}: "
+                f"<title>{escape(label)} · {escape(bounded(segment.name))}: "
                 f"{escape(_format(segment.value))}</title></rect>"
             )
             x += width
         parts.append(
             f'<text class="value" x="{x + 8:.1f}" y="{middle:.1f}" '
             f'dominant-baseline="central">'
-            f"{escape(row.value_label or _format(row.total))}</text>"
+            f"{escape(bounded(row.value_label or _format(row.total)))}</text>"
         )
     parts.append("</svg>")
     return Markup("".join(parts))
@@ -146,7 +160,7 @@ def _open(width: float, height: float, aria: str, css: str = "chart cmp") -> tup
     hatch = f"hatch-{next(_ids)}"
     return (
         f'<svg class="{css}" viewBox="0 0 {width:g} {height:g}" role="img" '
-        f'aria-label="{escape(aria)}" preserveAspectRatio="xMinYMin meet">'
+        f'aria-label="{escape(bounded(aria))}" preserveAspectRatio="xMinYMin meet">'
         f'<defs><pattern id="{hatch}" width="6" height="6" patternUnits="userSpaceOnUse" '
         f'patternTransform="rotate(45)"><line class="hatch" x1="0" y1="0" x2="0" y2="6"/>'
         f"</pattern></defs>",
@@ -252,8 +266,9 @@ def waterfall(steps: Sequence[WaterfallStep], aria: str) -> Markup:
         rising = end >= start
         css = "wf-total" if step.kind == "total" else ("wf-up" if rising else "wf-down")
         value = plain(step.value) if step.kind == "total" else signed(step.value)
-        title = f"{step.label}: {value}"
-        parts.append(_text(left - 8, top + 7, _shorten_to(step.label, 26), anchor="end"))
+        label = bounded(step.label)
+        title = f"{label}: {value}"
+        parts.append(_text(left - 8, top + 7, _shorten_to(label, 26), anchor="end"))
         parts.append(
             f'<rect class="bar {css}" x="{x:.1f}" y="{top:.1f}" width="{width:.1f}" '
             f'height="14"><title>{escape(title)}</title></rect>'
@@ -266,10 +281,6 @@ def waterfall(steps: Sequence[WaterfallStep], aria: str) -> Markup:
         parts.append(_text(x + width + 4, top + 7, value, "value"))
     parts.append("</svg>")
     return Markup("".join(parts))
-
-
-def _shorten_to(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def heat_map(
@@ -297,17 +308,19 @@ def heat_map(
     svg, hatch = _open(width, height, aria)
     parts = [svg]
     step = max(1, math.ceil(len(columns) / max(1, (width - left) // 60)))
-    for j, column in enumerate(columns):
+    shown = [bounded(column) for column in columns]
+    for j, column in enumerate(shown):
         if j % step == 0:
             parts.append(_text(left + j * cell + 2, top - 10, _shorten_to(column, 12), "tick"))
     for i, row in enumerate(rows):
         y = top + i * rowh
-        parts.append(_text(left - 6, y + rowh / 2, _shorten_to(row, 16), anchor="end"))
+        name = bounded(row)
+        parts.append(_text(left - 6, y + rowh / 2, _shorten_to(name, 16), anchor="end"))
         for j, column in enumerate(columns):
             value = cells.get((row, column))
             css = diverging_class(value, scale)
             x = left + j * cell
-            title = f"{row} · {column}: {signed(value, percent)}"
+            title = f"{name} · {shown[j]}: {signed(value, percent)}"
             parts.append(
                 f'<rect class="cell {css}" x="{x:.1f}" y="{y:.1f}" width="{cell - 1:.1f}" '
                 f'height="{rowh - 1:.1f}"><title>{escape(title)}</title></rect>'
@@ -337,6 +350,7 @@ def series_lines(
     values = [v for v in (*baseline, *candidate) if v is not None and math.isfinite(v)]
     if not labels or not values:
         return _EMPTY
+    labels = [bounded(label) for label in labels]
     low, high = min(values), max(values)
     span = (high - low) or 1.0
     left, top, plot_h = 60.0, 24.0, 150.0
@@ -419,7 +433,7 @@ def paired_bars(
                  f'y2="{top + plot_h}"/>')  # fmt: skip
     parts.append(_text(left - 6, top, f"{high * 100:.3g}%", "tick", "end"))
     step = max(1, math.ceil(len(labels) / 8))
-    for i, label in enumerate(labels):
+    for i, label in enumerate(map(bounded, labels)):
         x = left + i * group + (group - 2 * bar) / 2
         for k, (value, css) in enumerate(((baseline[i], "bar-base"), (candidate[i], "bar-cand"))):
             h = value / high * plot_h
@@ -456,7 +470,7 @@ def deltas(labels: Sequence[str], values: Sequence[float], aria: str) -> Markup:
     height = len(labels) * 22 + 10
     svg, hatch = _open(_PLOT_WIDTH, height, aria)
     parts = [svg, f'<line class="axis" x1="{middle}" y1="0" x2="{middle}" y2="{height}"/>']
-    for i, (label, value) in enumerate(zip(labels, values, strict=True)):
+    for i, (label, value) in enumerate(zip(map(bounded, labels), values, strict=True)):
         top = i * 22 + 5
         width = max(abs(value) / scale * area / 2, 1.0)
         x = middle if value >= 0 else middle - width
@@ -503,7 +517,7 @@ def choropleth(
     for zone, path in paths.items():
         value = values.get(zone)
         css = diverging_class(value, scale)
-        title = f"{zone}: {signed(value, percent)}"
+        title = f"{bounded(zone)}: {signed(value, percent)}"
         parts.append(
             f'<path class="zone {css}" d="{escape(path)}"><title>{escape(title)}</title></path>'
         )
@@ -511,7 +525,7 @@ def choropleth(
             parts.append(f'<path fill="url(#{hatch})" d="{escape(path)}"/>')
     if labels:
         for zone, (x, y) in centres.items():
-            text = f"{zone} {signed(values.get(zone), percent)}"
+            text = f"{bounded(zone)} {signed(values.get(zone), percent)}"
             parts.append(
                 f'<text class="map-text" x="{x:.1f}" y="{y:.1f}" text-anchor="middle" '
                 f'dominant-baseline="central" font-size="{11 * zoom:.3g}">{escape(text)}</text>'
