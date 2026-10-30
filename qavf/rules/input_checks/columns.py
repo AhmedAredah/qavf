@@ -226,8 +226,12 @@ class ColumnCheckRule(_SelectsDatasets):
                     continue
                 single = item.single_schema()
                 # Unsupported exact operations project only this contract's
-                # dependencies; siblings retain their source-side reductions.
-                dependencies = list(item.dependencies)
+                # dependencies, and the primary key that identifies evidence rows;
+                # siblings retain their source-side reductions.
+                key = [c for c in schema.primary_key or [] if c in actual]
+                if not ctx.evidence_limit:
+                    key = []
+                dependencies = list(dict.fromkeys([*item.dependencies, *key]))
                 projected = (
                     observation.collect(observation.scan().select(dependencies))
                     if observation is not None

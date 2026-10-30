@@ -324,6 +324,11 @@ class DataSource[P: SourceParams](ABC):
         type (they are missing in the data); ``context`` columns accompany the sample."""
         return {}
 
+    def file_rows(self) -> tuple[tuple[str, int], ...] | None:
+        """For a dataset read from several files, each file and its row count, in the
+        order the rows are read; ``None`` for a single input."""
+        return None
+
     def header_problems(self) -> list[dict[str, Any]]:
         """Header names the reader had to change or could not split, as problems
         with ``column`` and ``problem`` keys (duplicate or blank names)."""

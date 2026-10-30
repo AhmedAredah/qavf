@@ -44,6 +44,13 @@ All notable changes to this project are documented here. The format follows
 - A column declared `int` accepts floats that are whole numbers, as spreadsheets store
   every number; INP-002 lists the rows holding a fraction.
 - A text cell in an Excel number or date column names the cell and how to read it.
+- **Every row-level finding locates its rows.** Row expressions (INP-006) list
+  `_row` for their violating rows, found only after an expression fails. Evidence from
+  a dataset read from several files adds `_file` and `_file_row`. A failing
+  `max_null_fraction` lists the missing rows. The README describes how to read
+  evidence.
+- `not_null` in a check makes a field required only in the check's rows, e.g.
+  `{where: "status = 'closed'", not_null: true}`, and lists the rows missing it.
 
 ### Fixed
 

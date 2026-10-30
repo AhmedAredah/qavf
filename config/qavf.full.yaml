@@ -50,6 +50,9 @@ datasets:
             - name: network level
               mean: {ge: 5, le: 60}   # aggregates: min max mean median std sum distinct_count
               severity: INFO
+            - name: valid readings have a value
+              where: "status = 'valid'"
+              not_null: true          # required only in these rows; missing rows are listed
         status:
           dtype: str
           isin: [valid, suspect, invalid]

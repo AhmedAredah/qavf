@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from typing import ClassVar
 
 import polars as pl
@@ -13,9 +14,12 @@ from qavf.engine.observation_sql import sample_observed
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
+from qavf.redaction import exception_details, redact_text
 from qavf.rules.helpers import (
+    fresh_internal,
     outcome,
     plural,
+    present,
 )
 from qavf.settings import (
     QAVFSettings,
@@ -29,6 +33,7 @@ from ._datasets import (
     _SelectsDatasets,
 )
 
+logger = logging.getLogger(__name__)
 
 class ExpressionRule(_SelectsDatasets):
     """Row-level SQL expressions hold for every row."""
@@ -109,10 +114,12 @@ class ExpressionRule(_SelectsDatasets):
         failures: list[Finding] = []
         passed: list[str] = []
         table = quote_identifier(dataset)
+        located = ViolatingRows(ctx, dataset, observed)
         for expression in ctx.specs[dataset].expressions:
             label = expression.name or expression.expr
             fallback = "true" if expression.null_as == "pass" else "false"
-            query = f"SELECT * FROM {table} WHERE NOT coalesce(({expression.expr}), {fallback})"
+            condition = f"NOT coalesce(({expression.expr}), {fallback})"
+            query = f"SELECT * FROM {table} WHERE {condition}"
             try:
                 bad, count = sample_observed(
                     ctx, query, {dataset: observed}, ctx.evidence_limit, normalize_missing=True
@@ -133,6 +140,7 @@ class ExpressionRule(_SelectsDatasets):
             if not count:
                 passed.append(f"{dataset}: {label}")
                 continue
+            bad = located.sample(condition, bad)
             failures.append(
                 Finding.fail(
                     f"{plural(count, 'row')} of {rows:,} in {dataset} "
@@ -147,6 +155,48 @@ class ExpressionRule(_SelectsDatasets):
                 )
             )
         return failures, passed
+
+
+class ViolatingRows:
+    """The first rows violating an expression, with their ``_row`` positions.
+
+    Positions need every row numbered, which holds the scan, so they are looked up
+    only after an expression has failed, on the same observation. A lookup that
+    fails leaves the evidence without positions.
+    """
+
+    def __init__(self, ctx: DataContext, dataset: str, observed: Observation) -> None:
+        self.ctx = ctx
+        self.dataset = dataset
+        self.observed = observed
+
+    def sample(self, condition: str, unlocated: pl.DataFrame) -> pl.DataFrame:
+        try:
+            return self._located(condition)
+        except Exception as exc:
+            logger.warning(
+                "%s",
+                redact_text(
+                    f"Row positions of expression failures in {self.dataset}: "
+                    f"{exception_details(exc)}"
+                ),
+            )
+            return unlocated
+
+    def _located(self, condition: str) -> pl.DataFrame:
+        q = quote_identifier
+        table = q(self.dataset)
+        row = fresh_internal("row", [name.casefold() for name in self.observed.schema()])
+        limit = self.ctx.evidence_limit
+        # The numbered rows keep the dataset's name, so the expression reads unchanged.
+        query = (
+            f"SELECT * FROM (SELECT *, row_number() OVER () - 1 AS {q(row)} FROM {table}) "
+            f"AS {table} WHERE {condition} ORDER BY {q(row)} LIMIT {limit}"
+        )
+        sample, _ = sample_observed(
+            self.ctx, query, {self.dataset: self.observed}, limit, normalize_missing=True
+        )
+        return present(sample, {row: "_row"})
 
 
 def _reason(exc: Exception) -> str:

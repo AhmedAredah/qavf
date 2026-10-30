@@ -47,6 +47,7 @@ from qavf.engine.compilation import (
 from qavf.engine.context import DataContext, DatasetNotAvailableError
 from qavf.engine.registry import Finding, Rule, RuleRegistry
 from qavf.engine.resources import ResourceLimitError, retained_size
+from qavf.engine.row_locator import RowLocator
 from qavf.engine.session import Invocation
 from qavf.engine.severity import Severity, Status
 from qavf.redaction import exception_details, redact, redact_text
@@ -746,6 +747,8 @@ class QARunner:
         elapsed = time.perf_counter() - start
 
         findings = [outcome] if isinstance(outcome, Finding) else list(outcome)
+        locator = RowLocator(ctx)
+        findings = [locator.locate(f) if isinstance(f, Finding) else f for f in findings]
         if not findings:
             return [self._result(rule, Status.SKIPPED, "Rule reported nothing.", elapsed)]
         # Time is measured per rule; attribute it to the first result only.

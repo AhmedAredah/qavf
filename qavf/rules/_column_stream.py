@@ -12,7 +12,7 @@ from qavf._float_accumulator import ExactFloatAccumulator
 from qavf.engine.registry import Finding
 from qavf.engine.sql_read import NativeReadUnavailable
 from qavf.numeric import stable_float_statistic
-from qavf.rules._column_batch import ColumnInputs
+from qavf.rules._column_batch import ColumnInputs, exceeds_missing_fraction
 from qavf.settings import ColumnCheck
 from qavf.sources.sql import quote_identifier
 
@@ -93,10 +93,8 @@ def native_float_statistics(
             problems.append(
                 f"{statistic} {show(value)} outside [{show(bounds.ge)}, {show(bounds.le)}]"
             )
-    if check.max_null_fraction is not None:
-        fraction = (applicable - accumulator.count) / applicable if applicable else 0.0
-        if fraction > check.max_null_fraction:
-            problems.append(f"missing fraction {fraction:.4g} exceeds {check.max_null_fraction:g}")
+    if exceeds_missing_fraction(check, applicable - accumulator.count, applicable):
+        return NotImplemented
     if not problems:
         return None
     dataset = inputs.dataset

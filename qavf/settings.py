@@ -144,6 +144,7 @@ ROW_CONSTRAINTS = (
 #: Column-level (aggregate) constraint fields.
 COLUMN_CONSTRAINTS = (
     "max_null_fraction",
+    "not_null",
     "unique",
     "min",
     "max",
@@ -183,6 +184,9 @@ class ColumnConstraints(_Strict):
     max_null_fraction: float | None = Field(default=None, ge=0, le=1)
     """Largest acceptable share of missing values (requires ``nullable: true``
     on the column to be meaningful; non-nullable columns allow none)."""
+    not_null: bool = False
+    """Every value is present: with ``where``, a field required only in some rows
+    (``{where: "status = 'closed'", not_null: true}``). Missing rows are listed."""
     unique: bool = False
     """No value occurs twice; missing values are exempt."""
     # modifiers
@@ -372,6 +376,11 @@ class ColumnSpec(ColumnConstraints):
     @model_validator(mode="after")
     def _compatible_with_dtype(self) -> ColumnSpec:
         """With a declared ``dtype``, reject limits that cannot apply to it."""
+        if self.not_null:
+            raise ValueError(
+                "'not_null' goes in a check, usually with 'where'; for the whole column "
+                "use 'nullable: false'"
+            )
         if self.format is not None and self.dtype not in ("date", "datetime"):
             raise ValueError("'format' goes with dtype date or datetime")
         words = (self.true_values, self.false_values)

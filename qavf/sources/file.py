@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -25,6 +26,7 @@ from qavf.sources.base import (
     TypeViolations,
 )
 from qavf.sources.csv_probe import (
+    REJECT_OPTIONS,
     REJECTED_SAMPLE,
     CsvProbe,
     CsvRead,
@@ -74,6 +76,8 @@ class FileSource(DataSource[FileParams]):
 
     kind: ClassVar[str] = "file"
     Params: ClassVar[type[SourceParams]] = FileParams
+    _file_rows: tuple[tuple[str, int], ...] | None
+    """Rows per file of a multi-file read, once counted (see :meth:`file_rows`)."""
     @property
     def _identity_session(self) -> IdentitySession:
         with self._state_lock:
@@ -365,6 +369,7 @@ class FileSource(DataSource[FileParams]):
             loaded = set(params.columns)
             typed = TypedColumns({c: t for c, t in typed.columns.items() if c in loaded})
         with self._state_lock:
+            self._planned_read = (fmt, location, dict(options))
             self._typed = typed
             if fmt == "csv":
                 self._probe = self._header_probe(location, options).reading(options)
@@ -440,6 +445,45 @@ class FileSource(DataSource[FileParams]):
             with self._state_lock:
                 self._violations = cached
         return cached
+
+    def file_rows(self) -> tuple[tuple[str, int], ...] | None:
+        """Rows per file of a multi-file read, counted once, in reading order."""
+        files = self._files()
+        if files is None or len(files) < 2:
+            return None
+        with self._state_lock:
+            if hasattr(self, "_file_rows"):
+                return self._file_rows
+        self._plan()
+        with self._state_lock:
+            fmt, location, options = self._planned_read
+        counted = self._count_file_rows(fmt, location, options)
+        by_path = {_same_file(name): rows for name, rows in counted}
+        located = tuple((str(path), by_path.get(_same_file(str(path)), 0)) for path in files)
+        if sum(rows for _, rows in located) != sum(rows for _, rows in counted):
+            located = ()  # names did not match: leave evidence unlocated, never misplaced
+        with self._state_lock:
+            self._file_rows = located or None
+            return self._file_rows
+
+    def _count_file_rows(
+        self, fmt: FileFormat, location: str | list[str], options: dict[str, Any]
+    ) -> list[tuple[str, int]]:
+        probe = {k: v for k, v in options.items() if k not in REJECT_OPTIONS}
+        probe["filename"] = "__qavf_file"
+        args = "".join(f", {quote_identifier(k)} = {sql_literal(v)}" for k, v in probe.items())
+        con = connect(self.env)
+        try:
+            rows = con.execute(
+                f"SELECT __qavf_file, count(*) FROM {READERS[fmt]}($path{args}) "
+                "GROUP BY __qavf_file",
+                {"path": location},
+            ).fetchall()
+        except duckdb.Error as exc:
+            raise redacted_error(exc) from None
+        finally:
+            con.close()
+        return [(str(name), int(count)) for name, count in rows]
 
     def rejected_rows(self) -> RejectedRows | None:
         with self._state_lock:
@@ -627,3 +671,7 @@ class FileSource(DataSource[FileParams]):
             info.update(identity="content", sha256=self._hash_file(path))
         return info
 
+
+def _same_file(path: str) -> str:
+    """A path in one canonical spelling, to match the names a reader reports."""
+    return os.path.normcase(os.path.abspath(path))

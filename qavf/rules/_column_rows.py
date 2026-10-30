@@ -10,7 +10,11 @@ import polars as pl
 
 from qavf.engine.registry import Finding
 from qavf.engine.sql_read import NativeReadUnavailable, SqlReadSession
-from qavf.rules._column_batch import ColumnInputs, independent_scope
+from qavf.rules._column_batch import (
+    ColumnInputs,
+    exceeds_missing_fraction,
+    independent_scope,
+)
 from qavf.rules._predicates import compatibility_error, row_tests
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import present
@@ -106,33 +110,19 @@ def native_row_check(
             f"only {applicable} row(s) match 'where: {check.where}', "
             f"fewer than min_applicable_rows {check.min_applicable_rows}"
         )
-    problems = []
-    if check.max_null_fraction is not None:
-        fraction = missing / applicable if applicable else 0.0
-        if fraction > check.max_null_fraction:
-            problems.append(f"missing fraction {fraction:.4g} exceeds {check.max_null_fraction:g}")
-    if not count and not problems:
+    if exceeds_missing_fraction(check, missing, applicable):
+        return NotImplemented
+    if not count:
         return None
     dataset = inputs.dataset
-    if not count:
-        return Finding.fail(
-            f"{dataset}.{column} fails '{label}': {'; '.join(problems)}.",
-            check=f"{dataset}.{column}: {label}",
-            severity=check.severity,
-            affected=[{"dataset": dataset, "column": column, "problem": p} for p in problems],
-            unit="problems",
-            datasets=(dataset,),
-        )
     return Finding.fail(
         f"{count:,} value{'s' if count != 1 else ''} of {applicable:,} "
-        f"in {dataset}.{column} {'violates' if count == 1 else 'violate'} '{label}'."
-        + (f" Column-level: {'; '.join(problems)}." if problems else ""),
+        f"in {dataset}.{column} {'violates' if count == 1 else 'violate'} '{label}'.",
         check=f"{dataset}.{column}: {label}",
         severity=check.severity,
         affected=samples or None,
         affected_count=count,
         total_records=applicable,
         unit="rows",
-        metrics={"column_problems": problems} if problems else {},
         datasets=(dataset,),
     )

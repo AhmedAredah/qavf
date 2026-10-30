@@ -153,6 +153,15 @@ its verdict remains `incomplete`.
 
 Use `engine.require` to name checks that must be assessed for a run to pass.
 
+### Reading evidence
+
+A failed check lists the first offending rows, up to `engine.max_affected_records`, with
+their values and why each fails (`violates`). `_row` is a row's 0-based position in
+the dataset as read: the first data row of a file with a header is `_row: 0`. A
+dataset read from several files adds `_file` and `_file_row`, the row's position
+within that file. Duplicate keys list their positions in `rows`, and a line the
+reader could not parse is named by its file and 1-based `line`.
+
 ## Rules
 
 | ID | Default | Checks |

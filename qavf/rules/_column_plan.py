@@ -22,6 +22,7 @@ from qavf.rules._column_batch import (
     BATCH_SIZE,
     ColumnInputs,
     ColumnReduction,
+    exceeds_missing_fraction,
     independent_scope,
     reduce_captured_columns,
     reduce_columns,
@@ -53,6 +54,12 @@ class ColumnPlan:
         if self.check is not None and self.check.where:
             columns.extend(pl.sql_expr(self.check.where).meta.root_names())
         return tuple(dict.fromkeys(columns))
+
+    @property
+    def exact_only(self) -> bool:
+        """Whether only the exact kernel assesses this contract: ``not_null`` lists
+        its missing rows, which no reduction here retains."""
+        return self.check is not None and self.check.not_null
 
     def single_schema(self) -> SchemaSpec:
         """Only this contract, for projected fallback through the eager kernel."""
@@ -240,12 +247,8 @@ def _lazy_column_reduction(
                     )
             elif summary.get("stat_" + name) is not None:
                 problems.append(summary["stat_" + name])
-        if check and check.max_null_fraction is not None:
-            fraction = int(summary["missing"] or 0) / applicable if applicable else 0.0
-            if fraction > check.max_null_fraction:
-                problems.append(
-                    f"missing fraction {fraction:.4g} exceeds {check.max_null_fraction:g}"
-                )
+        if exceeds_missing_fraction(check, int(summary.get("missing") or 0), applicable):
+            return NotImplemented
         if summary.get("duplicates", 0):
             # Duplicates are rare and need their rows: the exact kernel lists them.
             return NotImplemented
@@ -482,12 +485,8 @@ def _native_column_reduction(
                 problems.append(
                     f"{name} {show(result)} outside [{show(bound.ge)}, {show(bound.le)}]"
                 )
-        if check and check.max_null_fraction is not None:
-            fraction = int(summary["missing"]) / applicable if applicable else 0.0
-            if fraction > check.max_null_fraction:
-                problems.append(
-                    f"missing fraction {fraction:.4g} exceeds {check.max_null_fraction:g}"
-                )
+        if exceeds_missing_fraction(check, int(summary.get("missing") or 0), applicable):
+            return NotImplemented
         if summary.get("duplicates", 0):
             # Duplicates are rare and need their rows: the exact kernel lists them.
             return NotImplemented
@@ -558,6 +557,9 @@ def column_checks(
     jobs: dict[int, ColumnReduction[Any]] = {}
     results: list[Finding | Exception | NotImplementedType | None] = [None] * len(items)
     for index, item in enumerate(items):
+        if item.exact_only:
+            results[index] = NotImplemented
+            continue
         try:
             prepared = (
                 _lazy_column_reduction(

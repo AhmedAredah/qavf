@@ -16,7 +16,7 @@ from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding
 from qavf.engine.sql import missing_sql
 from qavf.rules.helpers import fresh_internal, missing_expr
-from qavf.settings import SchemaSpec
+from qavf.settings import ColumnCheck, SchemaSpec
 from qavf.sources.sql import quote_identifier
 
 BATCH_SIZE = 64
@@ -32,6 +32,14 @@ _SIMPLE_SCOPE = re.compile(
     rf"(?:(?P<operator>[<>=!]+)\s*(?P<literal>{_LITERAL})|IS\s+(?:NOT\s+)?NULL)",
     re.IGNORECASE,
 )
+
+
+def exceeds_missing_fraction(check: ColumnCheck | None, missing: int, applicable: int) -> bool:
+    """Whether ``check``'s ``max_null_fraction`` fails. A reduction that finds it does
+    defers to the exact kernel, which lists the missing rows as evidence."""
+    if check is None or check.max_null_fraction is None:
+        return False
+    return (missing / applicable if applicable else 0.0) > check.max_null_fraction
 
 
 def independent_scope(where: str | None, actual: dict[str, pl.DataType]) -> bool:

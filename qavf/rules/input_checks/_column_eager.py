@@ -202,10 +202,13 @@ def evaluate_eager(
                             f"fewer than min_applicable_rows {check.min_applicable_rows}"
                         )
             # Column-level limits are evaluated directly, on exact native values.
+            # Missing rows are evidence when values must be present or are too often absent.
+            missing_rows = check.not_null
             try:
                 if check.max_null_fraction is not None:
                     fraction = scope_missing / scope_rows if scope_rows else 0.0
                     if fraction > check.max_null_fraction:
+                        missing_rows = True
                         problems.append(
                             f"missing fraction {fraction:.4g} (null or NaN) exceeds "
                             f"{check.max_null_fraction:g}"
@@ -265,6 +268,8 @@ def evaluate_eager(
                     predicates.append(("unique", _duplicated(column, series.dtype, check)))
                 except Exception as exc:
                     unusable.append(f"unique: {type(exc).__name__}: {exc}")
+            if missing_rows:
+                predicates.append(("missing", pl.lit(missing_mask)))
             if unusable:
                 found = f" Violations found meanwhile: {'; '.join(problems)}." if problems else ""
                 blocked(

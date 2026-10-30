@@ -206,11 +206,13 @@ def test_row_scope_units_and_null_fraction_reuse_canonical_policy():
     assert all(f.assessed for f in found), [f.message for f in found]
     assert [(f.check, f.affected_count) for f in found] == [
         ("d.x: units", 1),
-        ("d.x: missing", None),
+        ("d.x: missing", 2),
         ("d.x: forbidden", 1),
     ]
     assert found[0].affected["_row"].to_list() == [2]
     assert "missing fraction 0.6667" in found[1].message
+    # The marker -99 and NaN are the missing rows within scope.
+    assert found[1].affected["_row"].to_list() == [0, 1]
 
 
 @pytest.mark.parametrize("checks_count,observations", [(64, 0), (65, 1)])
