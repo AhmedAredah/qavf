@@ -526,3 +526,32 @@ def test_f17_an_over_budget_pandas_frame_is_not_converted(monkeypatch) -> None:
     )  # fmt: skip
     [availability] = report.results_for("INP-001")
     assert availability.status is Status.FAIL and "row_budget" in availability.message
+
+
+# =========================================================================
+# F15: series-shape screens are admitted against max_work before they run
+# =========================================================================
+def _no_screen(*_args: object, **_kwargs: object) -> None:
+    raise AssertionError("a screen beyond the work budget must not run")
+
+
+def test_f15_shape_screens_beyond_max_work_are_refused_not_run(monkeypatch) -> None:
+    from datetime import date, timedelta
+
+    from qavf import compare_datasets
+    from qavf.compare.levels import shape
+    from qavf.statistics.series import lag_work, split_work
+
+    days = [date(2026, 1, 1) + timedelta(days=d) for d in range(12)]
+    frame = pl.DataFrame({"t": days, "x": [1.0, 3.0, 2.0, 5.0, 4.0, 6.0] * 2})
+    level = {"level": "series_shape", "time_column": "t", "bucket": "day",
+             "measure": "sum(x)", "max_work": 1}  # fmt: skip
+    monkeypatch.setattr(shape, "best_split", _no_screen)
+    monkeypatch.setattr(shape, "best_lag", _no_screen)
+    result = compare_datasets(frame, frame, levels=[level], entry_points=False)
+    checks = {c.check: c for c in result.level("series_shape").checks}
+    for name in ("lag", "level shift"):
+        refused = checks[f"{name}: resource limit"]
+        assert not refused.assessed and refused.affected_count == 1
+    assert result.verdict == "incomplete"
+    assert split_work(12, 4) == 12 * 5 and lag_work(12, 12, 3) == 7 * 24

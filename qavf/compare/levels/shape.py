@@ -78,11 +78,14 @@ from qavf.numeric import exact_rational, report_number
 from qavf.rules.helpers import BoundedEvidence, fresh_internal, plural
 from qavf.statistics.series import (
     Correlation,
+    WorkBudget,
     best_lag,
     best_split,
+    lag_work,
     normal_equations,
     pearson,
     spearman,
+    split_work,
 )
 from qavf.temporal.buckets import (
     Bucket,
@@ -267,6 +270,32 @@ class _Check:
     results: list[TestResult | None] = field(default_factory=list)
     unassessed: list[dict[str, Any]] = field(default_factory=list)
     """Evidence of the series whose test could not run (bounded like ``evidence``)."""
+    refusals: BoundedEvidence | None = None
+    """Series whose screen needed more than the remaining work budget."""
+
+    @property
+    def refused(self) -> int:
+        return 0 if self.refusals is None else self.refusals.count
+
+    def refuse(self, record: dict[str, Any], work: int) -> None:
+        """A series not screened: its kernel would exceed the work budget."""
+        assert self.refusals is not None
+        self.refusals.append({**record, "work_units": work})
+
+    def refusal(self, max_work: int, total: int) -> CheckResult:
+        assert self.refusals is not None
+        return CheckResult(
+            check=f"{self.name}: resource limit",
+            passed=False,
+            assessed=False,
+            message=f"Not assessed: {self.name}: {plural(self.refused, 'series')} of "
+            f"{total:,} need more work than remains of max_work {max_work:,}.",
+            affected_count=self.refused,
+            total=total,
+            unit="series",
+            affected_records=self.refusals.records,
+            truncated=self.refusals.truncated,
+        )
 
     def record(
         self,
@@ -391,7 +420,7 @@ class SeriesShapeLevel(ComparisonLevel):
             for side in SIDES
         }
         checks = {
-            check: _Check(check, inputs.evidence(), tests)
+            check: _Check(check, inputs.evidence(), tests, refusals=inputs.evidence())
             for check, enabled in (
                 ("correlation", params.correlation),
                 ("trend", params.trend),
@@ -406,7 +435,11 @@ class SeriesShapeLevel(ComparisonLevel):
         only: dict[Side, int] = {"baseline": 0, "candidate": 0}
         shapes: list[SeriesShape] = []
         compared = too_short = 0
+        # The descriptive screens (lag search, level-shift splits) of every series
+        # and side share one budget, admitted before each runs.
+        budget = WorkBudget(inference.max_work)
         for key in groups:
+            inputs.ctx._check_cancelled()
             group = dict(zip(group_by, key, strict=True))
             identity = canonical_key(key)
             on = {side: identity in present[side] for side in SIDES}
@@ -426,7 +459,7 @@ class SeriesShapeLevel(ComparisonLevel):
                 continue
             kept = len(shapes) if len(shapes) < inputs.ctx.evidence_limit else -1
             shape = self._shape(
-                params, group, b, c, common, period, checks, tests, compared - 1, kept
+                params, group, b, c, common, period, checks, budget, tests, compared - 1, kept
             )
             if kept >= 0:
                 shapes.append(shape)
@@ -466,7 +499,11 @@ class SeriesShapeLevel(ComparisonLevel):
                 )
             )
         for check in checks.values():
+            if check.refused:
+                results.append(check.refusal(inference.max_work, compared - too_short))
             if not check.assessed and not check.not_assessed:
+                if check.refused:
+                    continue
                 results.append(
                     not_assessed(check.name, f"no series has {params.needed} buckets on both sides")
                 )
@@ -535,6 +572,7 @@ class SeriesShapeLevel(ComparisonLevel):
         common: list[int],
         period: int | None,
         checks: dict[str, _Check],
+        budget: WorkBudget,
         inference: Inference | None = None,
         ordinal: int = 0,
         position: int = -1,
@@ -544,6 +582,8 @@ class SeriesShapeLevel(ComparisonLevel):
         With ``inference`` each check that has a test records it, to run when the
         family is decided; ``ordinal`` (the series' place) offsets the seed and
         ``position`` is the series' place in the reported metrics (-1: not kept).
+        The lag search and level-shift screens run only when ``budget`` admits
+        their work; a series it cannot admit is refused, never screened in part.
         """
         xb = [b[p].value for p in common]
         xc = [c[p].value for p in common]
@@ -647,7 +687,13 @@ class SeriesShapeLevel(ComparisonLevel):
             checks["peak"].record(
                 abs(shift) > peak.max_shift or higher, {**group, **found}, position, None, name
             )
-        if (lag := params.lag) is not None:
+        lag = params.lag
+        if lag is not None and not budget.admit(
+            cost := lag_work(len(b), len(c), lag.max_lag, period)
+        ):
+            checks["lag"].refuse(dict(group), cost)
+            lag = None
+        if lag is not None:
             values_b = {p: point.value for p, point in b.items()}
             values_c = {p: point.value for p, point in c.items()}
             best = best_lag(values_b, values_c, lag.max_lag, params.min_buckets, period)
@@ -682,7 +728,13 @@ class SeriesShapeLevel(ComparisonLevel):
                     )  # fmt: skip
 
             checks["lag"].record(not agrees, {**group, **found}, position, gain, name)
-        if (screen := params.level_shift) is not None:
+        screen = params.level_shift
+        if screen is not None and not budget.admit(
+            cost := 2 * split_work(len(common), screen.min_segment)
+        ):
+            checks["level shift"].refuse(dict(group), cost)
+            screen = None
+        if screen is not None:
             # TMP-008's screen in binary64 (values rounded once), on the common buckets.
             at: list[int | None] = []
             for values in (xb, xc):

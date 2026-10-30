@@ -80,7 +80,7 @@ from qavf.rules.helpers import (
 from qavf.settings import Bound, NumericBound, QAVFSettings
 from qavf.sources.sql import quote_identifier
 from qavf.statistics.series import best_split as _best_split
-from qavf.statistics.series import normal_equations
+from qavf.statistics.series import normal_equations, split_work
 from qavf.stats import OutlierMethod, checked_float_series, detect_outliers
 from qavf.temporal.buckets import (
     TimeBucketing,
@@ -1843,7 +1843,7 @@ class LevelShiftRule(_TemporalRule):
                         if len(values) < 2 * p.min_segment:
                             too_short += 1
                             continue
-                        work = len(values) * (len(values) - 2 * p.min_segment + 1)
+                        work = split_work(len(values), p.min_segment)
                         if work > remaining_work:
                             blocked.append(
                                 Finding.unassessed(

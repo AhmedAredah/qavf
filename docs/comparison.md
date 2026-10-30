@@ -265,6 +265,12 @@ against a varying one does not. A series without enough common buckets is report
 in a `too short` check that is **not assessed**, never passed; a series on one side
 only fails the `series` check (`missing_series: ignore` to accept).
 
+The `lag` search and `level shift` screens are admitted against `max_work` before
+they run: a lag search costs both series' buckets per candidate lag, a level-shift
+screen `n` per candidate split on each side, and every series charges the same
+budget. A series beyond what remains is reported in a `lag: resource limit` or
+`level shift: resource limit` check that is **not assessed**, never screened in part.
+
 `ShapeResult.series` lists each series' metrics (bounded by the evidence limit) and
 its tests (`SeriesShape.significance`); `TemporalResult.measures` and
 `ShapeResult.assessments` carry each family's `significance`

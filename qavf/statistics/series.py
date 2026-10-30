@@ -139,15 +139,50 @@ def spearman(x: Sequence[Exact], y: Sequence[Exact]) -> Correlation | None:
     return pearson(average_ranks(x), average_ranks(y))
 
 
+class WorkBudget:
+    """A cumulative budget of kernel work units, admitted before each kernel runs.
+
+    Every series and side charges the same budget, so many individually small
+    screens cannot together do unbounded work.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.remaining = limit
+
+    def admit(self, units: int) -> bool:
+        """Charge ``units`` when they fit in what remains; ``False`` (uncharged) otherwise."""
+        if units > self.remaining:
+            return False
+        self.remaining -= units
+        return True
+
+
+def split_work(n: int, min_segment: int) -> int:
+    """Work units of :func:`best_split`: ``n`` per candidate split."""
+    return n * max(0, n - 2 * min_segment + 1)
+
+
+def lag_work(baseline: int, candidate: int, max_lag: int, period: int | None = None) -> int:
+    """Work units of :func:`best_lag`: both series' points once per candidate lag."""
+    limit = max_lag if period is None else min(max_lag, period // 2)
+    return (2 * limit + 1) * (baseline + candidate)
+
+
 def lagged_pairs(
-    baseline: Mapping[int, Exact], candidate: Mapping[int, Exact], lag: int, period: int | None
+    baseline: Mapping[int, Exact],
+    candidate: Mapping[int, Exact],
+    lag: int,
+    period: int | None,
+    positions: Sequence[int] | None = None,
 ) -> tuple[list[Exact], list[Exact]]:
     """Pairs ``(baseline[t], candidate[t + lag])`` over positions present in both.
 
     With a ``period`` (a cyclic profile) positions wrap around the cycle.
+    ``positions`` are the baseline's sorted positions, when already known.
     """
     left, right = [], []
-    for position in sorted(baseline):
+    for position in sorted(baseline) if positions is None else positions:
         other = position + lag
         if period is not None:
             other %= period
@@ -182,8 +217,9 @@ def best_lag(
     best: Lag | None = None
     zero: Correlation | None = None
     limit = max_lag if period is None else min(max_lag, period // 2)
+    positions = sorted(baseline)
     for lag in sorted(range(-limit, limit + 1), key=lambda k: (abs(k), k)):
-        left, right = lagged_pairs(baseline, candidate, lag, period)
+        left, right = lagged_pairs(baseline, candidate, lag, period, positions)
         if len(left) < max(min_pairs, 2):
             continue
         correlation = pearson(left, right)
