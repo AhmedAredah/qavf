@@ -140,7 +140,9 @@ All notable changes to this project are documented here. The format follows
 - Regression comparisons decide 64-bit integer closeness under a tolerance natively
   and exactly, with unchanged results (3.5 to 10 times faster on the measured
   100,000-row changed columns).
-- Nested integer and text cells stop at their first difference.
+- Nested cells are compared field by field from their columns, without decoding a
+  whole Struct value into Python, and integer and text cells stop at their first
+  difference.
 - Agreement and distribution metrics prepare each member's values once.
 - Sub-day sequence positions take typed bounds instead of sorting every label.
 

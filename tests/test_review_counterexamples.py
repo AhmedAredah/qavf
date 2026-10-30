@@ -619,6 +619,18 @@ def test_f25_integer_structs_exit_early_and_float_structs_keep_nonfinite_counts(
     after = pl.DataFrame({"k": [1], "s": [{"v": [-1, *values[1:]]}]})
     assert not compare_frames(before, after, "k").equal
     assert counted.calls == 1
+    import tracemalloc
+
+    big = list(range(200_000))
+    wide_before = pl.DataFrame({"k": [1], "s": [{"v": big, "w": 1}]})
+    wide_after = pl.DataFrame({"k": [1], "s": [{"v": [-1, *big[1:]], "w": 1}]})
+    tracemalloc.start()
+    try:
+        assert not compare_frames(wide_before, wide_after, "k").equal
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 2_000_000  # the 200,000-value cell is never decoded whole
     floats = pl.DataFrame({"k": [1], "s": [{"v": [1.0, 2.0, 3.0]}]})
     later_nan = pl.DataFrame({"k": [1], "s": [{"v": [0.0, 2.0, float("nan")]}]})
     assert compare_frames(floats, later_nan, "k").nonfinite_changes == 1

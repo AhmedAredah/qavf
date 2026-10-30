@@ -8,7 +8,7 @@ from fractions import Fraction
 import polars as pl
 
 from qavf.numeric import tolerance_fraction
-from qavf.regression._cells import _cell_change
+from qavf.regression._cells import _cell_change, cell
 from qavf.regression._evidence import _capture_cells, _capture_native, _Changes
 from qavf.regression._numeric import (
     _difference_size,
@@ -232,7 +232,7 @@ def _compare_batch(
             return pair
 
         for position in positions:
-            before, after = a[position], b[position]
+            before, after = cell(a, position), cell(b, position)
             different, path, changed_nonfinite = _cell_change(
                 before, after, column, exact_tolerance, original_da, original_db
             )

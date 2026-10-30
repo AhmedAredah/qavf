@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any, cast
 
 import polars as pl
@@ -11,6 +11,46 @@ from qavf.regression._numeric import _is_number, _nonfinite, numbers_close
 from qavf.regression._schema import _type_changed
 
 _MISSING = object()
+
+
+class StructCell(Mapping[str, Any]):
+    """One Struct cell, read field by field from its column, never decoded whole.
+
+    ``series[position]`` would convert the complete nested value to Python before
+    the first difference is found. A field here is another view (Struct), the
+    row's list as a Series (List/Array), or a scalar, built only when visited.
+    """
+
+    __slots__ = ("_column", "_fields", "_position")
+
+    def __init__(self, column: pl.Series, position: int) -> None:
+        dtype = column.dtype
+        assert isinstance(dtype, pl.Struct)
+        self._column, self._position = column, position
+        self._fields = tuple(field.name for field in dtype.fields)
+
+    def __getitem__(self, key: str) -> Any:
+        if key not in self._fields:
+            raise KeyError(key)
+        return cell(self._column.struct.field(key), self._position)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._fields
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._fields)
+
+    def __len__(self) -> int:
+        return len(self._fields)
+
+
+def cell(column: pl.Series, position: int) -> Any:
+    """The value at ``position``: a :class:`StructCell` for a non-null Struct."""
+    if isinstance(column.dtype, pl.Struct):
+        if column.slice(position, 1).null_count():
+            return None
+        return StructCell(column, position)
+    return column[position]
 
 
 def _dtype_may_nonfinite(dtype: pl.DataType) -> bool:
@@ -33,7 +73,7 @@ def _may_nonfinite(value: Any, dtype: pl.DataType | None = None) -> bool:
         if value.dtype.is_float():
             return not bool(value.is_finite().all())
         return _dtype_may_nonfinite(value.dtype)
-    if isinstance(value, (list, tuple, dict)):
+    if isinstance(value, (list, tuple, Mapping)):
         return True if dtype is None else _dtype_may_nonfinite(dtype)
     return _nonfinite(value)
 
