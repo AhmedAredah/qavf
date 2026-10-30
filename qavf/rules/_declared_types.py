@@ -3,32 +3,24 @@
 A reader that infers types from a sample leaves a whole column as text when one
 cell is not a value of its type (``12x`` in a count, ``N/A`` in a date). INP-002
 reports exactly those cells, and INP-003 checks its limits on the rest. Both use
-:func:`convert`, so they always agree on which cells are invalid.
+:class:`TextConversion`, so they always agree on which cells are invalid, and
+both evaluate it lazily over one observation rather than a loaded column.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 import polars as pl
 
 from qavf.settings import ColumnSpec
-from qavf.text_types import polars_value
+from qavf.text_types import WHITESPACE, polars_value
 from qavf.value_policy import is_text
 
 CONVERTIBLE = ("int", "float", "decimal", "bool", "date", "datetime")
 """Logical types whose values can be recognized in text."""
-
-_DATETIME_FORMATS = (
-    "%Y-%m-%dT%H:%M:%S%.f",
-    "%Y-%m-%d %H:%M:%S%.f",
-    "%Y-%m-%dT%H:%M",
-    "%Y-%m-%d %H:%M",
-    "%Y-%m-%d",
-)
-_DECIMAL = r"^[+-]?(\d+\.?\d*|\.\d+)$"
-_MAX_DECIMAL_DIGITS = 38
 
 
 def converts_text(spec: ColumnSpec, actual: pl.DataType) -> bool:
@@ -39,6 +31,147 @@ def converts_text(spec: ColumnSpec, actual: pl.DataType) -> bool:
 def described(dtype: str) -> str:
     """``an int``, ``a date``: the declared type as a noun phrase."""
     return f"{'an' if dtype == 'int' else 'a'} {dtype}"
+
+
+def typed_spec(spec: ColumnSpec) -> ColumnSpec:
+    """``spec`` for the converted values: text markers have already been applied."""
+    typed: list[Any] = [value for value in spec.missing_values if not isinstance(value, str)]
+    return spec.model_copy(update={"missing_values": typed, "blank_as_missing": False})
+
+
+class DecimalText:
+    """Decimal text converted exactly at one column scale, never rounded.
+
+    A column holds one Decimal type, so its scale is the most significant
+    fractional digits any value needs (trailing zeros need none). A value whose
+    significant fraction exceeds that scale, or whose integer digits do not fit
+    beside it within :data:`PRECISION` digits, is invalid rather than rounded.
+    """
+
+    PATTERN = r"^[+-]?(\d+\.?\d*|\.\d+)$"
+    PRECISION = 38
+
+    @classmethod
+    def fraction_digits(cls, text: pl.Expr) -> pl.Expr:
+        """Significant fractional digits of each decimal text (0 for none)."""
+        fraction = text.str.extract(r"\.(\d*?)0*$", 1)
+        return fraction.str.len_chars().fill_null(0)
+
+    @classmethod
+    def integer_digits(cls, text: pl.Expr) -> pl.Expr:
+        """Integer digits after leading zeros."""
+        return text.str.extract(r"^[+-]?0*(\d*)", 1).str.len_chars().fill_null(0)
+
+    @classmethod
+    def scale(cls, text: pl.Expr) -> pl.Expr:
+        """The column scale, as a reduction over the decimal texts of ``text``: the
+        widest significant fraction, narrowed so the widest integer part still fits."""
+        decimal = text.str.contains(cls.PATTERN)
+        fraction = pl.when(decimal).then(cls.fraction_digits(text)).max().fill_null(0)
+        integer = pl.when(decimal).then(cls.integer_digits(text)).max().fill_null(0)
+        return pl.min_horizontal(fraction, cls.PRECISION - integer).clip(0, cls.PRECISION)
+
+    @classmethod
+    def value(cls, text: pl.Expr, scale: int) -> pl.Expr:
+        exact = (
+            text.str.contains(cls.PATTERN)
+            & (cls.fraction_digits(text) <= scale)
+            & (cls.integer_digits(text) + scale <= cls.PRECISION)
+        )
+        return pl.when(exact).then(text).cast(pl.Decimal(cls.PRECISION, scale), strict=False)
+
+
+class TextConversion:
+    """How one text column converts to its declared type, as Polars expressions.
+
+    Surrounding spaces are ignored; text ``missing_values`` (and blank text with
+    ``blank_as_missing``) are missing, never invalid. Typed markers such as -999
+    apply afterwards, to the converted values (see :func:`typed_spec`).
+    """
+
+    def __init__(self, column: str, spec: ColumnSpec) -> None:
+        if spec.dtype not in CONVERTIBLE:
+            raise ValueError(f"values cannot be recognized as {spec.dtype} in text")
+        self.column = column
+        self.spec = spec
+
+    def scale(self) -> pl.Expr | None:
+        """A reduction giving the column's decimal scale; ``None`` for other types."""
+        if self.spec.dtype != "decimal":
+            return None
+        return DecimalText.scale(self._present()).alias(self.column)
+
+    def value(self, scale: int | None = None) -> pl.Expr:
+        """The converted value: null where missing or invalid."""
+        return self._converted(scale)[0].alias(self.column)
+
+    def invalid(self, scale: int | None = None) -> pl.Expr:
+        """Whether a cell holds text that is neither missing nor of the declared type."""
+        value, missing = self._converted(scale)
+        return ~missing & value.is_null()
+
+    def _converted(self, scale: int | None) -> tuple[pl.Expr, pl.Expr]:
+        text = pl.col(self.column).cast(pl.String)
+        typed = self.spec.text_type()
+        if typed is not None:
+            return polars_value(text, typed)
+        if scale is None:
+            raise ValueError("a decimal conversion needs its column scale")
+        missing = self._missing(text)
+        value = DecimalText.value(self._present(), scale)
+        return pl.when(missing).then(None).otherwise(value), missing
+
+    def _missing(self, text: pl.Expr) -> pl.Expr:
+        missing = text.is_null()
+        markers = [value for value in self.spec.missing_values if isinstance(value, str)]
+        if markers:
+            missing = missing | text.is_in(pl.lit(pl.Series(markers, dtype=pl.String)).implode())
+        if self.spec.blank_as_missing:
+            missing = missing | (text.str.strip_chars(WHITESPACE) == "")
+        return missing.fill_null(True)
+
+    def _present(self) -> pl.Expr:
+        text = pl.col(self.column).cast(pl.String)
+        return pl.when(self._missing(text)).then(None).otherwise(text.str.strip_chars(WHITESPACE))
+
+
+class ConvertedPlan:
+    """A lazy plan with text columns replaced by their declared-type values."""
+
+    def __init__(self, conversions: Sequence[TextConversion], scales: Mapping[str, int]) -> None:
+        self.conversions = list(conversions)
+        self.scales = dict(scales)
+
+    @classmethod
+    def resolved(
+        cls,
+        conversions: Sequence[TextConversion],
+        reduce: Callable[[Callable[[pl.LazyFrame], pl.LazyFrame]], pl.DataFrame],
+    ) -> ConvertedPlan:
+        """Resolve decimal scales with one reduction; ``reduce`` collects a plan's
+        reduction (an observation's ``reduce``)."""
+        reductions = [r for c in conversions if (r := c.scale()) is not None]
+        scales: dict[str, int] = {}
+        if reductions:
+            row = reduce(ScaleReduction(reductions)).row(0, named=True)
+            scales = {name: int(value) for name, value in row.items()}
+        return cls(conversions, scales)
+
+    def scale(self, column: str) -> int | None:
+        return self.scales.get(column)
+
+    def __call__(self, plan: pl.LazyFrame) -> pl.LazyFrame:
+        return plan.with_columns(c.value(self.scales.get(c.column)) for c in self.conversions)
+
+
+class ScaleReduction:
+    """The plan reducing a source to its decimal columns' scales."""
+
+    def __init__(self, reductions: Sequence[pl.Expr]) -> None:
+        self.reductions = list(reductions)
+
+    def __call__(self, plan: pl.LazyFrame) -> pl.LazyFrame:
+        return plan.select(self.reductions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,63 +187,12 @@ class Converted:
 
 
 def convert(series: pl.Series, spec: ColumnSpec) -> Converted:
-    """Interpret text as ``spec.dtype``; surrounding whitespace is ignored.
-
-    Text markers in ``missing_values`` (and blank text with ``blank_as_missing``)
-    are missing, never invalid. Typed markers such as ``-999`` apply afterwards,
-    to the converted values (see :func:`typed_spec`).
-    """
-    if spec.dtype not in CONVERTIBLE:
-        raise ValueError(f"values cannot be recognized as {spec.dtype} in text")
-    text = series.cast(pl.String)
-    frame = pl.DataFrame({"text": text})
-    typed = spec.text_type()
-    if typed is not None:
-        # The same definition a typed CSV read uses, so both agree on every value.
-        value, missing = polars_value(pl.col("text"), typed)
-        out = frame.select(value.alias("value"), missing.alias("missing"))
-        invalid = ~out["missing"] & out["value"].is_null()
-        return Converted(out["value"].alias(series.name), invalid.alias(series.name))
-    missing = pl.col("text").is_null()
-    markers = [value for value in spec.missing_values if isinstance(value, str)]
-    if markers:
-        missing = missing | pl.col("text").is_in(pl.lit(pl.Series(markers)).implode())
-    stripped = pl.col("text").str.strip_chars()
-    if spec.blank_as_missing:
-        missing = missing | (stripped == "")
-    present = pl.when(missing).then(None).otherwise(stripped)
-    flags = frame.select(missing.alias("missing"), present.alias("present"))
-    values = flags.select(_parse(pl.col("present"), spec.dtype, flags["present"])).to_series()
-    invalid = ~flags["missing"] & values.is_null()
-    return Converted(values.alias(series.name), invalid.alias(series.name))
-
-
-def typed_spec(spec: ColumnSpec) -> ColumnSpec:
-    """``spec`` for the converted values: text markers have already been applied."""
-    typed: list[Any] = [value for value in spec.missing_values if not isinstance(value, str)]
-    return spec.model_copy(update={"missing_values": typed, "blank_as_missing": False})
-
-
-def _parse(text: pl.Expr, dtype: str, values: pl.Series) -> pl.Expr:
-    if dtype == "int":
-        return text.cast(pl.Int64, strict=False)
-    if dtype == "float":
-        return text.cast(pl.Float64, strict=False)
-    if dtype == "decimal":
-        valid = values.str.contains(_DECIMAL)
-        fractions = values.filter(valid).str.split(".").list.get(1, null_on_oob=True)
-        widest = fractions.str.len_chars().max()
-        scale = min(widest if isinstance(widest, int) else 0, _MAX_DECIMAL_DIGITS)
-        return (
-            pl.when(text.str.contains(_DECIMAL))
-            .then(text)
-            .cast(pl.Decimal(_MAX_DECIMAL_DIGITS, scale), strict=False)
-        )
-    if dtype == "bool":
-        lowered = text.str.to_lowercase()
-        return pl.when(lowered == "true").then(True).when(lowered == "false").then(False)
-    if dtype == "date":
-        return text.str.to_date("%Y-%m-%d", strict=False)
-    return pl.coalesce(
-        [text.str.to_datetime(f, strict=False, time_unit="us") for f in _DATETIME_FORMATS]
+    """Convert an in-memory text series with :class:`TextConversion`."""
+    frame = series.rename("text").to_frame()
+    conversion = TextConversion("text", spec)
+    reduction = conversion.scale()
+    scale = int(frame.select(reduction).item()) if reduction is not None else None
+    out = frame.select(
+        conversion.value(scale).alias("value"), conversion.invalid(scale).alias("invalid")
     )
+    return Converted(out["value"].alias(series.name), out["invalid"].alias(series.name))

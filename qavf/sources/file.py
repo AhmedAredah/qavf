@@ -457,7 +457,11 @@ class FileSource(DataSource[FileParams]):
         self._plan()
         with self._state_lock:
             fmt, location, options = self._planned_read
-        counted = self._count_file_rows(fmt, location, options)
+        counted = (
+            self._footer_rows(files)
+            if fmt == "parquet"
+            else self._count_file_rows(fmt, location, options)
+        )
         by_path = {_same_file(name): rows for name, rows in counted}
         located = tuple((str(path), by_path.get(_same_file(str(path)), 0)) for path in files)
         if sum(rows for _, rows in located) != sum(rows for _, rows in counted):
@@ -465,6 +469,13 @@ class FileSource(DataSource[FileParams]):
         with self._state_lock:
             self._file_rows = located or None
             return self._file_rows
+
+    @staticmethod
+    def _footer_rows(files: tuple[Path, ...]) -> list[tuple[str, int]]:
+        """Parquet row counts from each file's footer, without reading any data."""
+        import pyarrow.parquet as pq
+
+        return [(str(path), int(pq.ParquetFile(path).metadata.num_rows)) for path in files]
 
     def _count_file_rows(
         self, fmt: FileFormat, location: str | list[str], options: dict[str, Any]

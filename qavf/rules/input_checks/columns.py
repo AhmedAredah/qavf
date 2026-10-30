@@ -12,7 +12,12 @@ from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
 from qavf.rules._column_plan import coherent_column_checks, column_checks, column_plans
-from qavf.rules._declared_types import converts_text
+from qavf.rules._declared_types import (
+    ConvertedPlan,
+    TextConversion,
+    converts_text,
+    typed_spec,
+)
 from qavf.rules._execution import (
     projected_frame,
 )
@@ -26,7 +31,7 @@ from qavf.settings import (
 )
 
 from . import _column_values as values
-from ._column_eager import evaluate_converted, evaluate_eager
+from ._column_eager import evaluate_eager
 from ._column_simple import evaluate_simple
 from ._datasets import (
     CATEGORY,
@@ -100,7 +105,7 @@ class ColumnCheckRule(_SelectsDatasets):
             else ([], [])
         )
         try:
-            found, good = evaluate_converted(ctx, dataset, schema, text)
+            found, good = ConvertedColumns(self, ctx, dataset, schema, text).assess()
         except Exception as exc:
             found, good = (
                 [
@@ -275,3 +280,69 @@ class ColumnCheckRule(_SelectsDatasets):
                     )
                 )
         return failures, passed
+
+
+class ConvertedColumns:
+    """INP-003 on columns declared another type but read as text, on converted values.
+
+    One observation holds these columns, their check dependencies and the primary
+    key; a derived observation replaces the text with the declared type's values
+    (see :class:`~qavf.rules._declared_types.ConvertedPlan`). The usual planned
+    checks then assess it with bounded reductions. INP-002 lists the values that
+    are not of the type; here they are missing, as in a typed read.
+    """
+
+    def __init__(
+        self,
+        rule: ColumnCheckRule,
+        ctx: DataContext,
+        dataset: str,
+        schema: SchemaSpec,
+        columns: list[str],
+    ) -> None:
+        self.rule = rule
+        self.ctx = ctx
+        self.dataset = dataset
+        self.schema = schema
+        self.columns = columns
+
+    def assess(self) -> tuple[list[Finding], list[str]]:
+        conversions = [TextConversion(c, self.schema.columns[c]) for c in self.columns]
+        with self.ctx.observe(self.dataset, self._needed()) as observed:
+            plan = ConvertedPlan.resolved(conversions, observed.reduce)
+            with observed.derived(plan) as converted:
+                return self.rule._planned_dataset(
+                    self.ctx, self.dataset, self._contract(converted.schema()),
+                    converted.schema(), converted,
+                )
+
+    def _needed(self) -> list[str]:
+        actual = self.ctx.schema(self.dataset)
+        needed: list[str] = [*(self.schema.primary_key or [])]
+        for column in self.columns:
+            spec = self.schema.columns[column]
+            needed.append(column)
+            if spec.unit_column:
+                needed.append(spec.unit_column)
+            for check in spec.all_checks():
+                if check.where:
+                    needed.extend(pl.sql_expr(check.where).meta.root_names())
+        wanted = set(needed)
+        return [name for name in actual if name in wanted]
+
+    def _contract(self, actual: dict[str, pl.DataType]) -> SchemaSpec:
+        """The converted columns' limits; other observed columns keep only their
+        missing-value policy, for ``where`` conditions and evidence."""
+        columns: dict[str, ColumnSpec] = {}
+        for name in actual:
+            if name in self.columns:
+                columns[name] = typed_spec(self.schema.columns[name])
+            elif name in self.schema.columns:
+                dependency = self.schema.columns[name]
+                columns[name] = ColumnSpec(
+                    nullable=True,
+                    allow_infinite=True,
+                    missing_values=dependency.missing_values,
+                    blank_as_missing=dependency.blank_as_missing,
+                )
+        return self.schema.model_copy(update={"columns": columns})

@@ -252,15 +252,23 @@ class HeaderReview:
         self.names = list(names)
 
     def problems(self, probe: CsvProbe) -> list[dict[str, Any]]:
-        if not self.names:
+        """Problems the raw first line confirms. A name pattern alone never decides:
+        ``column0`` and a quoted ``"rate,count"`` are legitimate names."""
+        if not self.names or not self._suspicious():
             return []
+        raw = probe.raw_header()
+        if raw == self.names:
+            return []  # the reader kept the names exactly as written
         if len(self.names) == 1 and any(mark in self.names[0] for mark in self._DELIMITERS):
             return [self._unsplit()]
         if all(self._GENERIC.fullmatch(name) for name in self.names):
             return [self._unrecognized()]
-        if not self._synthesized():
-            return []
-        return self._renamed(probe.raw_header())
+        return self._renamed(raw)
+
+    def _suspicious(self) -> bool:
+        """Whether a name looks invented by the reader, so the raw line is worth reading."""
+        unsplit = len(self.names) == 1 and any(m in self.names[0] for m in self._DELIMITERS)
+        return unsplit or self._synthesized()
 
     def _synthesized(self) -> bool:
         folded = {name.casefold() for name in self.names}

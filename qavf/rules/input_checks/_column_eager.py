@@ -10,7 +10,6 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
 from qavf.redaction import exception_details, redact_text
-from qavf.rules._declared_types import convert, typed_spec
 from qavf.rules._predicates import (
     compatibility_error,
     is_nan,
@@ -23,7 +22,6 @@ from qavf.rules.helpers import (
 from qavf.settings import (
     ROW_CONSTRAINTS,
     ColumnCheck,
-    ColumnSpec,
     SchemaSpec,
 )
 from qavf.value_policy import normalized_text
@@ -322,43 +320,6 @@ def evaluate_eager(
             else:
                 passed.append(f"{dataset}.{column}: {label}")
     return failures, passed
-
-
-def evaluate_converted(
-    ctx: DataContext, dataset: str, schema: SchemaSpec, columns: list[str]
-) -> tuple[list[Finding], list[str]]:
-    """Assess text ``columns`` on the values of their declared types.
-
-    INP-002 lists the values that are not of the declared type; here they are
-    missing, as in a typed read of the same data. The projection holds these
-    columns, their check dependencies and the primary key for evidence.
-    """
-    actual = ctx.schema(dataset)
-    needed = [*(schema.primary_key or [])]
-    for column in columns:
-        spec = schema.columns[column]
-        needed.append(column)
-        if spec.unit_column:
-            needed.append(spec.unit_column)
-        for check in spec.all_checks():
-            if check.where:
-                needed.extend(pl.sql_expr(check.where).meta.root_names())
-    frame = ctx.project(dataset, [name for name in actual if name in set(needed)])
-    contract: dict[str, ColumnSpec] = {}
-    for name in frame.columns:
-        if name in columns:
-            frame = frame.with_columns(convert(frame[name], schema.columns[name]).values)
-            contract[name] = typed_spec(schema.columns[name])
-        elif name in schema.columns:
-            # Dependencies keep their missing-value policy and carry no limits.
-            dependency = schema.columns[name]
-            contract[name] = ColumnSpec(
-                nullable=True,
-                allow_infinite=True,
-                missing_values=dependency.missing_values,
-                blank_as_missing=dependency.blank_as_missing,
-            )
-    return evaluate_eager(ctx, dataset, schema.model_copy(update={"columns": contract}), frame)
 
 
 def _duplicated(column: str, dtype: pl.DataType, check: ColumnCheck) -> pl.Expr:

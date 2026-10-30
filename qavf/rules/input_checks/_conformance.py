@@ -11,7 +11,7 @@ header names it had to invent.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -19,15 +19,18 @@ import polars as pl
 
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
-from qavf.rules._declared_types import convert, converts_text, described
+from qavf.rules._declared_types import (
+    ConvertedPlan,
+    TextConversion,
+    converts_text,
+    described,
+)
 from qavf.rules._row_summary import RowSummary, row_aliases, summarize_rows
 from qavf.rules._temporal import temporal_evidence
-from qavf.rules.helpers import plural, present
+from qavf.rules.helpers import fresh_internal, plural, present
 from qavf.settings import ColumnSpec, SchemaSpec
 from qavf.sources.base import DataSource, TypeViolations
 from qavf.sources.sql import quote_identifier, sql_literal
-
-from . import _column_values as values
 
 
 @dataclass(frozen=True)
@@ -92,23 +95,69 @@ class TextValues(ColumnConformance):
         return converts_text(spec, actual)
 
     def _assess(self) -> Finding | None:
+        """One streaming reduction over an observation of the column and its key:
+        the row count, the invalid count and the first invalid rows."""
         view, column = self.view, self.column
-        frame = view.ctx.project(view.name, [*view.context(column), column])
-        invalid = convert(frame[column], self.spec).invalid
-        count = int(invalid.sum())
+        kind = described(str(self.spec.dtype))
+        conversion = TextConversion(column, self.spec)
+        context = view.context(column)
+        with view.ctx.observe(view.name, [*context, column]) as observed:
+            scale = ConvertedPlan.resolved([conversion], observed.reduce).scale(column)
+            cells = InvalidCells(conversion, scale, context, view.ctx.evidence_limit)
+            rows, count, sample = cells.summarize(observed.reduce)
         if not count:
             return None
-        kind = described(str(self.spec.dtype))
         return Finding.fail(
-            f"{plural(count, 'value')} of {frame.height:,} in {view.name}.{column} "
+            f"{plural(count, 'value')} of {rows:,} in {view.name}.{column} "
             f"{'is' if count == 1 else 'are'} not {kind}, so the column was read as "
             f"{view.actual[column]}.",
             check=self.check,
-            affected=values._rows(frame, invalid, f"not {kind}", view.ctx.evidence_limit),
+            affected=temporal_evidence(cells.evidence(sample, f"not {kind}")),
             affected_count=count,
-            total_records=frame.height,
+            total_records=rows,
             unit="rows",
             datasets=(view.name,),
+        )
+
+
+class InvalidCells:
+    """The reduction counting a text column's invalid cells, keeping the first few."""
+
+    def __init__(
+        self, conversion: TextConversion, scale: int | None, context: list[str], limit: int
+    ) -> None:
+        self.conversion = conversion
+        self.scale = scale
+        self.context = context
+        self.limit = limit
+        names = [*context, conversion.column]
+        self.row = fresh_internal("row", names)
+        taken = [*names, self.row]
+        self.reduced = [fresh_internal(role, taken) for role in ("rows", "bad", "first")]
+
+    def summarize(
+        self, reduce: Callable[[Callable[[pl.LazyFrame], pl.LazyFrame]], pl.DataFrame]
+    ) -> tuple[int, int, pl.DataFrame]:
+        result = reduce(self)
+        rows, bad, first = self.reduced
+        sample = result[first][0]
+        frame = sample.struct.unnest() if sample is not None else pl.DataFrame()
+        return int(result[rows][0]), int(result[bad][0] or 0), frame
+
+    def evidence(self, sample: pl.DataFrame, violates: str) -> pl.DataFrame:
+        reason = fresh_internal("violates", [*sample.columns])
+        return present(sample.with_columns(pl.lit(violates).alias(reason)), {
+            self.row: "_row", reason: "violates"
+        })
+
+    def __call__(self, plan: pl.LazyFrame) -> pl.LazyFrame:
+        rows, bad, first = self.reduced
+        invalid = self.conversion.invalid(self.scale)
+        columns = [*self.context, self.conversion.column, self.row]
+        return plan.with_row_index(self.row).select(
+            pl.len().alias(rows),
+            invalid.sum().alias(bad),
+            pl.struct(columns).filter(invalid).head(self.limit).implode().alias(first),
         )
 
 
