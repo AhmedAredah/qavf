@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-30
+
 ### Added
 
 - **Stray values no longer hide a column's limits.** When a column declared `int`,
@@ -33,7 +35,6 @@ All notable changes to this project are documented here. The format follows
   them by file and line.
 - INP-002 reports duplicate and blank CSV header names that the reader renamed (`v_1`,
   `column3`), and a header row the reader did not recognize.
-
 - **Declared types are read, not guessed.** In a CSV, a column declared `int`, `float`,
   `bool` or `date` (or `datetime` with a `format`) is read as text and converted in the
   same scan, so the reader's sample of the first rows never decides its type. A value
@@ -57,6 +58,45 @@ All notable changes to this project are documented here. The format follows
 - A CSV value past the reader's type sample could be silently changed: in a column typed
   as an integer from its first rows, `2.5` was read as 3, `0x10` as 16 and `1e3` as 1000,
   and every check passed. Declared columns are now converted strictly (see above).
+- **Decimal text is converted exactly.** A `decimal` column read from text takes the
+  scale its values need (up to 38 digits); a value that does not fit is invalid and
+  listed by INP-002, never rounded into the limits.
+- Header names that only look generated (`column0`) or hold a delimiter (`"rate,count"`)
+  are no longer reported as renamed when the file really spells them that way.
+- A metric normalized by its own dataset (`normalize_by` on the same dataset) reads its
+  numerator and denominator from one snapshot of a changing source.
+- **Comparison error limits are hard limits.** `max_rmse`, `max_mae`, bias, agreement,
+  concordance and R² limits fail on their value under every decision policy; the
+  identity-line test decides only the slope and intercept limits. Previously an
+  exceeded error limit could pass when the fitted line stayed on the identity.
+- A comparison whose requested columns cannot all be compared (a type change, say) is
+  `incomplete` with a "values not compared" check, instead of passing on the rest.
+- **A report never replaces an input.** `qavf run` and `qavf compare-datasets` refuse a
+  report path naming one of the run's data or configuration files, including through
+  a link, before anything is written.
+- Configuration that reuses one object in many places is no longer expanded into a
+  tree: shared parts stay shared, a configuration expanding past 1,000,000 values is
+  refused, and a cyclic one is reported instead of overflowing the stack.
+- Streamed JSON reports equal Pydantic's own output for plugin result models,
+  including their extra fields and custom serializers.
+- Layers, crosswalks and weight tables treat a NaN identifier as missing, as every
+  other check does.
+- Comparison charts keep groups apart whose labels look alike (`('a, b', 'c')` and
+  `('a', 'b, c')`, floats equal to six digits, a null and the text `—`), and maps find
+  float zone ids.
+- A temporary file whose removal fails (a Windows sharing lock) stays charged to the
+  spill budget and is removed by the next cleanup; run cleanup attempts every step and
+  reports what failed.
+- **A rule calling `sys.exit` no longer ends the host program.** It is reported as an
+  ERROR (not assessed) in sequential, thread-pool and timed execution alike, including
+  a generator rule failing while its findings are read. `KeyboardInterrupt` still
+  stops the run.
+- `refresh()` of a component registry rebuilds its installed components: one whose
+  entry point was removed, or whose replacement failed to load, is no longer
+  available.
+- Whole counts reach statistical tests as exact integers (`2**53 + 1` is no longer
+  `2**53`). The exact Poisson test reports totals above `2**53`, and SciPy results that
+  are not probabilities, as not assessed instead of raising.
 
 ### Changed
 
@@ -68,6 +108,27 @@ All notable changes to this project are documented here. The format follows
 - INP-004 duplicate-key evidence lists the first row positions of each key (`rows`).
 - A column's `unique` limit reports the rows holding repeated values, like other row
   limits, instead of only stating that values repeat.
+- `qavf.spatial.compose` documents its exactness per step: each step's weights are
+  exact and rounded once, so a chain of several steps is rounded once per step.
+
+### Performance
+
+- Declared-text checks convert columns in the same batched scan as the other checks,
+  without loading a converted copy of the column.
+- Parquet file row positions in evidence come from the file footers, not a scan.
+- `series_shape` lag searches and level-shift screens are admitted against `max_work`
+  before they run, with TMP-008's cost function, across every series and side; a
+  series beyond the budget is a not-assessed `resource limit` check.
+- A pandas frame or Arrow table that states more rows than its `row_budget` is
+  refused before it is converted.
+- Charts cut labels and tooltips to 200 characters before they are built.
+- An induced subgraph of a spatial weights graph reads only the selected rows.
+- Regression comparisons decide 64-bit integer closeness under a tolerance natively
+  and exactly, with unchanged results (3.5 to 10 times faster on the measured
+  100,000-row changed columns).
+- Nested integer and text cells stop at their first difference.
+- Agreement and distribution metrics prepare each member's values once.
+- Sub-day sequence positions take typed bounds instead of sorting every label.
 
 ## [0.5.0] - 2026-10-23
 
