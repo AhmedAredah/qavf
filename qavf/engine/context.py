@@ -1397,13 +1397,17 @@ class DataContext:
     def _cached(self, name: str) -> pl.DataFrame | None:
         """The loaded frame (as a clone), ``None`` if not loaded; raises for a recorded failure."""
         with self._lock:
-            if name in self._frames:
-                # FrameStore returns a distinct wrapper over its owned buffers,
-                # including on spill promotion. No second clone is necessary.
-                return self._frames[name]
-            if self._catalog.failure(name) is not None:
-                raise DatasetNotAvailableError(str(self._catalog.failure(name)))
-        return None
+            if name not in self._frames:
+                if self._catalog.failure(name) is not None:
+                    raise DatasetNotAvailableError(str(self._catalog.failure(name)))
+                return None
+        # Read outside the metadata lock: a spilled frame's read must not stall
+        # unrelated context operations. FrameStore returns a distinct wrapper over
+        # its owned buffers, including on promotion; no second clone is necessary.
+        try:
+            return self._frames[name]
+        except KeyError:
+            return None  # released meanwhile: loaded again by the caller
 
     def _connection(
         self,

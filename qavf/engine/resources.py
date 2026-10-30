@@ -24,9 +24,9 @@ from qavf.engine.cache_ownership import (
     compact_polars_with_size,
     retained_size,
 )
-from qavf.engine.owned_ipc import project_ipc, reduce_ipc
+from qavf.engine.owned_ipc import project_ipc, read_owned_ipc, reduce_ipc
 from qavf.engine.retention import RetainedBudget, RetainedLease
-from qavf.engine.session import RunSession
+from qavf.engine.session import KeyedLocks, RunSession
 from qavf.engine.spill import SpillBudget, SpillFile, SpillLease
 
 
@@ -136,6 +136,8 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         retained_budget: RetainedBudget | None = None,
     ) -> None:
         self.lock = threading.RLock()
+        self._reads = KeyedLocks()
+        """One reader per spilled key at a time, so parallel hits read it once."""
         self.limit = cache_bytes
         self.spill_limit = spill_bytes
         self.spill_budget = spill_budget or SpillBudget(spill_bytes)
@@ -153,35 +155,63 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         self.spill_write_count = self.spill_write_bytes = 0
         self.spill_project_count = self.spill_reduce_count = 0
 
-    @_locked
     def __getitem__(self, key: str) -> pl.DataFrame:
-        if key in self.data:
-            self.data.move_to_end(key)
-            return self.data[key].clone()
-        # Read owned bytes: native IPC preserves Int128/Enum, and no file mapping
-        # can outlive cleanup. Count the actual bytes read, including IPC metadata.
-        with self.paths[key].open("rb") as handle:
-            payload = handle.read()
-        self.spill_read_count += 1
-        self.spill_read_bytes += len(payload)
-        frame = pl.read_ipc(payload)
-        # Promote only into existing free space. A hit must not trigger eviction,
-        # extra writes or ping-pong between two frames larger than the allocation.
-        if self.sizes[key] <= self.limit - self.bytes:
-            compacted, size = compact_polars_with_size(frame)
-            owned = cast(pl.DataFrame, compacted)
-            if size <= self.limit - self.bytes and self.retained_budget.reserve(size):
-                self.data[key] = owned
-                self._memory_leases[key] = RetainedLease(self.retained_budget, size)
-                self.sizes[key] = size
-                self.bytes += size
-                self.peak_bytes = max(self.peak_bytes, self.bytes)
-                path = self.paths.pop(key)
-                self.spill_bytes -= path.stat().st_size
-                self._spill_files.pop(key).close()
-                self.spill_promotions += 1
-                return owned.clone()
-        return frame
+        """The frame, from memory or read from its spill outside the cache lock.
+
+        A spill is leased under the lock, then read natively (preserving Int128 and
+        Enum, detached from the file, with no Python copy of it) while other keys
+        and cache operations proceed; readers of one key take turns, so a key read
+        and promoted by one is found in memory by the next. A promotion is published
+        under the lock only if the entry is still the spill that was read.
+        """
+        with self.lock:
+            if key in self.data:
+                self.data.move_to_end(key)
+                return self.data[key].clone()
+            if key not in self._spill_files:
+                raise KeyError(key)
+        with self._reads.hold(key):
+            with self.lock:
+                if key in self.data:
+                    self.data.move_to_end(key)
+                    return self.data[key].clone()
+                spill = self._spill_files[key]
+                lease = spill.borrow()
+                self.spill_read_count += 1
+                self.spill_read_bytes += lease.path.stat().st_size
+            try:
+                frame = read_owned_ipc(lease.path)
+            finally:
+                lease.close()
+            with self.lock:
+                if self._spill_files.get(key) is spill:
+                    promoted = self._promote(key, frame)
+                    if promoted is not None:
+                        return promoted
+            return frame
+
+    def _promote(self, key: str, frame: pl.DataFrame) -> pl.DataFrame | None:
+        """Keep a read spill in memory when it fits existing free space (lock held).
+
+        A hit must not trigger eviction, extra writes or ping-pong between two
+        frames larger than the allocation.
+        """
+        if self.sizes[key] > self.limit - self.bytes:
+            return None
+        compacted, size = compact_polars_with_size(frame)
+        owned = cast(pl.DataFrame, compacted)
+        if size > self.limit - self.bytes or not self.retained_budget.reserve(size):
+            return None
+        self.data[key] = owned
+        self._memory_leases[key] = RetainedLease(self.retained_budget, size)
+        self.sizes[key] = size
+        self.bytes += size
+        self.peak_bytes = max(self.peak_bytes, self.bytes)
+        path = self.paths.pop(key)
+        self.spill_bytes -= path.stat().st_size
+        self._spill_files.pop(key).close()
+        self.spill_promotions += 1
+        return owned.clone()
 
     @_locked
     def project(self, key: str, columns: Iterable[str]) -> pl.DataFrame:

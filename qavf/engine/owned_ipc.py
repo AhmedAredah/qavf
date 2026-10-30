@@ -19,6 +19,15 @@ _SCAN_OPTIONS: dict[str, Any] = (
 )
 
 
+def read_owned_ipc(path: Path) -> pl.DataFrame:
+    """Every column of an IPC file, read natively and detached from the file.
+
+    No Python copy of the file is made; the owner may unlink it once this returns.
+    """
+    frame = pl.read_ipc(path, **_READ_OPTIONS)
+    return frame if _READ_OPTIONS else cast(pl.DataFrame, compact_polars(frame))
+
+
 def project_ipc(path: Path, columns: list[str]) -> pl.DataFrame:
     frame = pl.read_ipc(path, columns=columns, **_READ_OPTIONS)
     # Newer Polars removed the mapping switch. Detach only the selected result

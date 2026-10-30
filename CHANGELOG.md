@@ -127,6 +127,9 @@ All notable changes to this project are documented here. The format follows
 - A pandas frame or Arrow table that states more rows than its `row_budget` is
   refused before it is converted.
 - Charts cut labels and tooltips to 200 characters before they are built.
+- A spilled dataset is read natively, without a Python copy of its file, and outside
+  the cache and context locks, so other datasets and operations do not wait for it;
+  parallel readers of one dataset still read it once.
 - Unordered evidence samples of SQL queries (row expressions) count and keep their
   first rows in one streamed pass instead of staging the whole result in a
   materialized CTE; ordered samples (SQL assertions) keep the CTE.

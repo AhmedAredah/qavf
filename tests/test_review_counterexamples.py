@@ -760,3 +760,57 @@ def test_f20_unordered_samples_stream_and_count_exactly(monkeypatch) -> None:
 
 def _ignore() -> None:
     """A cancellation check that never cancels."""
+
+
+# =========================================================================
+# F21: a spilled frame is read natively, outside the cache lock
+# =========================================================================
+class _ReadWithLockFree:
+    """``read_owned_ipc`` that records whether another thread could take the lock."""
+
+    def __init__(self, store: object) -> None:
+        from qavf.engine import resources
+
+        self.store, self.read, self.free = store, resources.read_owned_ipc, []
+
+    def __call__(self, path: Path) -> pl.DataFrame:
+        import threading
+
+        attempt = threading.Thread(target=self._try_lock)
+        attempt.start()
+        attempt.join()
+        return self.read(path)
+
+    def _try_lock(self) -> None:
+        lock = self.store.lock  # type: ignore[attr-defined]
+        acquired = lock.acquire(blocking=False)
+        self.free.append(acquired)
+        if acquired:
+            lock.release()
+
+
+def test_f21_spill_reads_are_native_and_do_not_hold_the_cache_lock(tmp_path, monkeypatch):
+    import tracemalloc
+
+    from qavf.engine import resources
+    from qavf.engine.resources import FrameStore
+
+    frame = pl.DataFrame({"x": range(1_000_000)})
+    store = FrameStore(0, 64_000_000, tmp_path)
+    store["d"] = frame  # larger than the memory allocation: spilled
+    reader = _ReadWithLockFree(store)
+    monkeypatch.setattr(resources, "read_owned_ipc", reader)
+    tracemalloc.start()
+    try:
+        read = store["d"]
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert read.equals(frame) and reader.free == [True]
+    assert peak < 1_000_000  # no Python copy of the 8 MB file
+    roomy = FrameStore(10_000_000, 64_000_000, tmp_path / "roomy")
+    roomy["d"] = frame
+    roomy["other"] = frame  # evicts "d" to its spill
+    assert "d" not in roomy.data
+    del roomy["other"]
+    assert roomy["d"].equals(frame) and "d" in roomy.data  # promoted into free space
