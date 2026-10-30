@@ -33,6 +33,7 @@ the unreleased package does not retain aliases for former private locations.
 | Native binding | `engine/relations.py` | Preserve verified local file-reader pushdown; retain existing binding semantics for other native source kinds. |
 | Rule compilation | `engine/compilation.py` | Discovery, configuration and required-plugin validation, rule construction, and complete planning diagnostics. |
 | Scheduling | `engine/runner.py`, `planning.py` | Rule execution, deadlines, actual consumer completion, resource release, and report admission. |
+| Evidence locations | `engine/row_locator.py` | The file and row within it of evidence rows from multi-file inputs, mapped after each rule from one cached per-file count. |
 | Input checks | `rules/input_checks/` | Separate availability, columns, keys, references and expressions; private helpers own eager/lazy execution and evidence. `_conformance.py` holds INP-002's value-level checks, one class each. |
 | Duplicate rows | `rules/_duplicate_rows.py` | Row positions of sampled duplicated keys, with native and lazy strategies matching the key summary. |
 | Rule failures | `rules/_contracts.py` | Consistent unassessed findings and exception isolation for independent contracts. |
