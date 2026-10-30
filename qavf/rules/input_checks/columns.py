@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import NotImplementedType
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import polars as pl
 
@@ -39,6 +39,11 @@ from ._datasets import (
     _schemas,
     _SelectsDatasets,
 )
+
+
+def _item_label(item: Any) -> str:
+    """A planned column check's label: its configured check, or its kind."""
+    return values._check_name(item.check) if item.check else item.kind
 
 
 class ColumnCheckRule(_SelectsDatasets):
@@ -136,7 +141,7 @@ class ColumnCheckRule(_SelectsDatasets):
                     schema,
                     actual,
                     items,
-                    lambda item: values._check_name(item.check) if item.check else item.kind,
+                    _item_label,
                     values._statistic,
                     values._within,
                     values._show,

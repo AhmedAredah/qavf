@@ -6,13 +6,16 @@ overwritten input or a silent omission must fail here before any fix is trusted.
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 import polars as pl
 import pytest
+from pydantic import field_serializer
 
 from qavf import Dataset, File, ResourceLimits, validate
+from qavf.compare.results import LevelResult
 from qavf.engine.severity import Status
 from qavf.plugins.registry import Component
 from qavf.rules._declared_types import convert
@@ -246,27 +249,27 @@ def test_f06_shared_configuration_parts_stay_shared_and_bounded() -> None:
 # =========================================================================
 # F07: streamed JSON equals Pydantic's, for plugin result models too
 # =========================================================================
+class _PluginResult(LevelResult):
+    """A plugin's level result with extra rich fields and a custom serializer."""
+
+    day: date
+    amount: Decimal
+    code: int
+
+    @field_serializer("code")
+    def _code(self, value: int) -> str:
+        return f"code-{value}"
+
+
 def test_f07_streamed_json_honours_plugin_fields_and_serializers() -> None:
     import json
-    from datetime import date
 
-    from pydantic import field_serializer
-
-    from qavf.compare.results import DatasetComparison, LevelResult
-
-    class PluginResult(LevelResult):
-        day: date
-        amount: Decimal
-        code: int
-
-        @field_serializer("code")
-        def _code(self, value: int) -> str:
-            return f"code-{value}"
+    from qavf.compare.results import DatasetComparison
 
     comparison = DatasetComparison(
         name="p", baseline="a", candidate="b",
-        levels=[PluginResult(level="custom", name="p", day=date(2026, 10, 30),
-                             amount=Decimal("1.23"), code=12)],
+        levels=[_PluginResult(level="custom", name="p", day=date(2026, 10, 30),
+                              amount=Decimal("1.23"), code=12)],
     )
     streamed = json.loads(b"".join(comparison.iter_json_chunks()))
     assert streamed == json.loads(comparison.model_dump_json())
