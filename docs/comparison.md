@@ -376,9 +376,11 @@ levels=[{"level": "relationships", "group_by": ["county"],
   line `candidate = intercept + slope * baseline` (OLS, or Deming with
   `error_ratio`). Thresholds per metric (`max_abs_bias`, `max_loa`, `min_ccc` 0.99,
   `max_mae`, `max_rmse`, `max_mape`, `max_smape`, `min_r_squared`,
-  `max_slope_deviation` 0.05, `max_abs_intercept`) decide materiality, and the joint
-  F test of `slope = 1, intercept = 0` (jackknife covariance for Deming)
-  significance.
+  `max_slope_deviation` 0.05, `max_abs_intercept`) decide materiality. The joint
+  F test of `slope = 1, intercept = 0` (jackknife covariance for Deming) decides the
+  significance of slope and intercept limits only: it says nothing about the size of
+  the errors. Every other limit is a hard limit, so a member exceeding an error, bias,
+  agreement, concordance or R² limit fails on its value, whatever the decision policy.
 
 These tests have no equivalence form: under `decision: equivalence` the checks are not
 assessed. A member without enough complete rows, a constant column or a zero

@@ -9,8 +9,10 @@ compared. Nothing is examined until metrics are configured.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
+from collections.abc import Iterator
 from fractions import Fraction
 from heapq import nsmallest
 from typing import Any, ClassVar
@@ -19,6 +21,7 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
@@ -154,6 +157,48 @@ def _entity_metric(
 def _build_entity_metric(
     ctx: DataContext, spec: SpatialMetric, blocked: list[Finding]
 ) -> pl.DataFrame | None:
+    """One row per group and entity with a usable ``metric`` value, from one
+    snapshot of the data when numerator and denominator share it."""
+    with _metric_snapshot(ctx, spec) as within:
+        return _metric_from(ctx, spec, blocked, within)
+
+
+@contextlib.contextmanager
+def _metric_snapshot(ctx: DataContext, spec: SpatialMetric) -> Iterator[Observation | None]:
+    """One observation of a dataset normalized by itself, when it cannot be read
+    again identically (a changing lazy plan): two reads could otherwise combine a
+    numerator and a denominator from different data. Repeatable inputs keep their
+    native reductions and yield ``None``."""
+    norm = spec.normalize_by
+    if (
+        norm is None
+        or norm.dataset != spec.dataset
+        or ctx.is_materialized(spec.dataset)
+        or ctx.repeatable_scan(spec.dataset)
+    ):
+        yield None
+        return
+    wanted = {
+        *spec.group_by,
+        spec.entity_column,
+        spec.value,
+        *spec.aggregation_columns,
+        norm.value,
+        *(norm.on or ()),
+        *([norm.weight] if norm.weight is not None else []),
+        *ordering_columns(norm.order_by),
+    }
+    columns = [name for name in ctx.schema(spec.dataset) if name in wanted]
+    with ctx.observe(spec.dataset, columns) as observation:
+        yield observation
+
+
+def _metric_from(
+    ctx: DataContext,
+    spec: SpatialMetric,
+    blocked: list[Finding],
+    within: Observation | None,
+) -> pl.DataFrame | None:
     """One row per group and entity with a usable ``metric`` value.
 
     Returns ``None`` when the data cannot serve ``spec`` at all. Entities whose
@@ -187,6 +232,7 @@ def _build_entity_metric(
         spec.weight,
         spec.order_by,
         exclude_missing_keys=True,
+        within=within,
     )
     missing_count = prepared.missing_keys
     if missing_count:
@@ -252,6 +298,7 @@ def _build_entity_metric(
             norm.aggregate,
             norm.weight,
             norm.order_by,
+            within=within,
         )
         if repeated := prepared_denominator.repeated_groups:
             blocked.append(

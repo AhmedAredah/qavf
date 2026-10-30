@@ -188,6 +188,11 @@ class RelationshipsParams(InferenceParams):
         return self
 
 
+_FIT_LIMITS = frozenset({"slope", "intercept"})
+"""Agreement limits the identity-line test addresses. Every other agreement limit
+(errors, bias, limits of agreement, concordance, R squared) is a hard limit."""
+
+
 @dataclass
 class _Family:
     """One check's members: their materiality, evidence and tests."""
@@ -614,7 +619,13 @@ class RelationshipsLevel(ComparisonLevel):
 
                 name = member_label(members, list(key)) if members else column
                 magnitude = abs(measured.bias or 0.0)
-                family.add(bool(measured.material), name, record, magnitude, run)
+                # The identity-line test speaks to slope and intercept only. Any other
+                # exceeded limit (an error, bias, agreement or concordance limit) is a
+                # hard limit: the member fails on its value, untested.
+                hard = [metric for metric in measured.material if metric not in _FIT_LIMITS]
+                if hard:
+                    record["hard_limits"] = ", ".join(hard)
+                family.add(bool(measured.material), name, record, magnitude, None if hard else run)
                 found.append(measured)
             plan = MeasureTest("identity_fit", None)
             what = f"Agreement of {column}"

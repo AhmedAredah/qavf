@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import glob
 import gzip
 import logging
 import os
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from io import IOBase
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import TYPE_CHECKING, BinaryIO, cast
 
 import polars as pl
 
@@ -19,6 +20,9 @@ from qavf.redaction import redact_text
 from qavf.sources.base import SourceEnvironment
 from qavf.sources.file import FileSource
 from qavf.sources.parameters import FileParams
+
+if TYPE_CHECKING:
+    from qavf.settings import QAVFSettings
 
 logger = logging.getLogger(__name__)
 
@@ -107,3 +111,67 @@ def write_table(frame: pl.DataFrame, path: str | Path, fmt: str | None = None) -
             write(stream)
     logger.debug("Wrote %d rows to %s", frame.height, redact_text(str(target)))
     return target
+
+
+class ProtectedInputs:
+    """The local files a run reads; a report destination may never replace one.
+
+    Report publication replaces its target atomically, so a destination that names
+    an input would destroy that input completely. Destinations are compared after
+    resolving symbolic links, and with ``samefile`` where both exist (hard links,
+    case-insensitive file systems). SQL queries may read further files that are not
+    known here; only declared file sources, database files and named inputs are.
+    """
+
+    def __init__(self, paths: Iterable[str | Path | None]) -> None:
+        self.paths = [path for given in paths if given is not None for path in _local(given)]
+
+    @classmethod
+    def of_settings(cls, settings: QAVFSettings, config: Path | None) -> ProtectedInputs:
+        """The configuration file, its file datasets and its database files."""
+        found: list[str | Path | None] = [config]
+        for spec in settings.datasets.values():
+            source = spec.source_config()
+            if source is not None and source.get("type") == "file":
+                found.append(_resolved(settings, str(source["path"])))
+        for connection in settings.connections.values():
+            if connection.file_based and connection.path:
+                found.append(_resolved(settings, connection.path))
+        return cls(found)
+
+    def check(self, *destinations: Path | None) -> None:
+        """Refuse a destination that is one of the inputs."""
+        for destination in destinations:
+            if destination is None:
+                continue
+            for source in self.paths:
+                if _same_file(destination, source):
+                    raise ValueError(
+                        f"report path {destination} would replace the input {source}; "
+                        "choose another output path"
+                    )
+
+
+def _resolved(settings: QAVFSettings, path: str) -> str:
+    return path if "://" in path else str(settings.resolve(path))
+
+
+def _local(path: str | Path) -> list[Path]:
+    """The local files ``path`` names: none for a URL, every match for a glob."""
+    text = str(path)
+    if "://" in text:
+        return []
+    if any(mark in text for mark in "*?["):
+        return [Path(match) for match in glob.glob(text, recursive=True)]
+    return [Path(text)]
+
+
+def _same_file(destination: Path, source: Path) -> bool:
+    try:
+        if os.path.normcase(str(destination.resolve())) == os.path.normcase(
+            str(source.resolve())
+        ):
+            return True
+        return destination.exists() and source.exists() and os.path.samefile(destination, source)
+    except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python 3.12
+        return False

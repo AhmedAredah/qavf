@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import polars as pl
 
 from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
 from qavf.rules._exact_grouped import exact_grouped, supports_exact
 from qavf.rules._execution import projected_frame
 from qavf.rules._grouped import (
@@ -49,11 +50,16 @@ def spatial_aggregate(
     order_by: OrderBy,
     *,
     exclude_missing_keys: bool = False,
+    within: Observation | None = None,
 ) -> SpatialAggregate:
-    """Keep metric and denominator preparation consistent across execution backends."""
+    """Keep metric and denominator preparation consistent across execution backends.
+
+    ``within`` is an observation of the dataset that every path reads from instead
+    of the source, so aggregates sharing it describe the same data.
+    """
     columns = (*keys, value, *([weight] if weight is not None else []), *ordering_columns(order_by))
     if how in {"first", "last"} or supports_exact(ctx.schema(dataset)[value], how):
-        with scoped_relation(ctx, dataset, columns) as scoped:
+        with scoped_relation(ctx, dataset, columns, within=within) as scoped:
             missing_count, missing_sample = 0, pl.DataFrame()
             missing = pl.any_horizontal(pl.col(key).is_null() for key in keys)
             if exclude_missing_keys:
@@ -75,7 +81,7 @@ def spatial_aggregate(
                 return SpatialAggregate(exact_values, missing_count, missing_sample, 0)
             except Exception as exc:
                 return SpatialAggregate(None, missing_count, missing_sample, 0, exc)
-    relation = normalized_relation(ctx, dataset, columns)
+    relation = None if within is not None else normalized_relation(ctx, dataset, columns)
     missing_count = repeated = 0
     missing_sample = pl.DataFrame()
     missing = pl.any_horizontal(pl.col(key).is_null() for key in keys)
@@ -103,7 +109,12 @@ def spatial_aggregate(
     else:
         # Unsupported typed kernels retain the exact projected reference path;
         # a supported sibling never inherits this materialization.
-        source = normalize_missing(ctx, dataset, projected_frame(ctx, dataset, columns))
+        projected = (
+            within.collect(within.scan().select(columns))
+            if within is not None
+            else projected_frame(ctx, dataset, columns)
+        )
+        source = normalize_missing(ctx, dataset, projected)
         if exclude_missing_keys:
             missing_count = int(source.select(missing.sum()).item())
             if missing_count:

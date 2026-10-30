@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Iterator, Mapping
 from datetime import datetime
@@ -14,6 +15,7 @@ from pydantic import (
     computed_field,
     model_validator,
 )
+from pydantic_core import to_json
 
 from qavf.audit_codec import (
     evidence_json_size as evidence_json_size,
@@ -55,22 +57,47 @@ _AUDIT_JSON_FIELDS = frozenset(
 )
 
 
+@functools.cache
+def _serialized_fields(model: type[SnapshotModel]) -> frozenset[str]:
+    """Fields of ``model`` with a declared field serializer, built-in or a plugin's."""
+    decorators = model.__pydantic_decorators__.field_serializers.values()
+    return frozenset(name for decorator in decorators for name in decorator.info.fields)
+
+
+@functools.cache
+def _excluded_fields(model: type[SnapshotModel]) -> frozenset[str]:
+    return frozenset(name for name, field in model.model_fields.items() if field.exclude)
+
+
 def _iter_snapshot_json(value: Any) -> Iterator[bytes]:
-    """Serialize one validated snapshot without copying its complete object graph."""
+    """Serialize one validated snapshot without copying its complete object graph.
+
+    The output equals Pydantic's ``model_dump_json``. Audit fields stream through
+    their bounded encoders; any other field with a declared serializer (including
+    a plugin result's) is serialized by Pydantic, for that field alone.
+    """
     if isinstance(value, SnapshotModel):
+        model = type(value)
+        audited = model.audit_fields
+        serialized = _serialized_fields(model)
+        excluded = _excluded_fields(model)
+        names = [
+            name
+            for name in (*model.model_fields, *model.model_computed_fields)
+            if name not in excluded
+        ]
         yield b"{"
-        names = (*type(value).model_fields, *type(value).model_computed_fields)
-        audited = type(value).audit_fields
         for index, name in enumerate(names):
             if index:
                 yield b","
             yield from iter_json_string(name)
             yield b":"
-            child = getattr(value, name)
             if name in _AUDIT_JSON_FIELDS or name in audited:
-                yield from iter_audit_json(child)
+                yield from iter_audit_json(getattr(value, name))
+            elif name in serialized:
+                yield _json(value.model_dump(mode="json", include={name})[name])
             else:
-                yield from _iter_snapshot_json(child)
+                yield from _iter_snapshot_json(getattr(value, name))
         yield b"}"
     elif isinstance(value, Enum):
         yield from _iter_snapshot_json(value.value)
@@ -92,14 +119,18 @@ def _iter_snapshot_json(value: Any) -> Iterator[bytes]:
         yield b"]"
     elif isinstance(value, str):
         yield from iter_json_string(value)
-    elif isinstance(value, datetime):
-        from pydantic_core import to_json
-
-        yield to_json(value)
+    elif value is None or isinstance(value, bool | int | float):
+        yield _json(value)
     else:
-        yield json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
-            "utf-8"
-        )
+        # Dates, times, Decimals, UUIDs and other scalars, written as Pydantic writes them.
+        yield to_json(value)
+
+
+def _json(value: Any) -> bytes:
+    """Compact JSON; a non-finite float is refused, never written as invalid JSON."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode(
+        "utf-8"
+    )
 
 
 class RuleResult(SnapshotModel):

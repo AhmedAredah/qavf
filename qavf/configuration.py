@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import BaseModel
 
 _ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _YAML_MERGE_KEY = object()
@@ -172,3 +173,92 @@ def read_config_mapping(path: str | Path) -> tuple[dict[str, Any], Path]:
         raise ValueError(f"{source}: top level of the configuration must be a mapping")
     raw.pop("$schema", None)
     return expand_env(raw), source
+
+
+MAX_CONFIGURATION_VALUES = 1_000_000
+"""Values a configuration may hold once shared parts (YAML anchors) are repeated."""
+
+
+class ConfigurationGraph:
+    """Measures and copies a configuration graph, visiting each shared part once.
+
+    A small document can share one part many times (YAML aliases, or the same
+    Python list placed in several places). Copying or serializing it occurrence
+    by occurrence grows exponentially, so the expanded size is measured first, by
+    memoized counting, and copies keep the sharing. Cycles are rejected.
+    """
+
+    def __init__(self, limit: int = MAX_CONFIGURATION_VALUES) -> None:
+        self.limit = limit
+
+    def check(self, value: Any) -> None:
+        """Reject a configuration that cycles or expands beyond :attr:`limit` values."""
+        try:
+            size = self._size(value, {}, set())
+        except RecursionError as exc:
+            raise ValueError("configuration is nested too deeply") from exc
+        if size > self.limit:
+            raise ValueError(
+                f"configuration expands to {size:,} values once its shared parts are "
+                f"repeated, more than {self.limit:,}; reduce the repeated YAML anchors"
+            )
+
+    def plain(self, value: Any) -> Any:
+        """A copy with models serialized to mappings, keeping shared parts shared."""
+        try:
+            return self._plain(value, {}, set())
+        except RecursionError as exc:
+            raise ValueError("configuration is nested too deeply") from exc
+
+    def _size(self, value: Any, memo: dict[int, int], active: set[int]) -> int:
+        children = _children(value)
+        if children is None:
+            return 1
+        identity = id(value)
+        if identity in memo:
+            return memo[identity]
+        if identity in active:
+            raise ValueError("configuration contains a cyclic reference")
+        active.add(identity)
+        total = 1
+        for child in children:
+            total += self._size(child, memo, active)
+            if total > self.limit:
+                break  # the exact excess does not matter; stop counting it
+        active.remove(identity)
+        memo[identity] = total
+        return total
+
+    def _plain(self, value: Any, memo: dict[int, Any], active: set[int]) -> Any:
+        if isinstance(value, BaseModel):
+            return value.model_dump(by_alias=True)
+        if not isinstance(value, Mapping | list | tuple):
+            return value
+        identity = id(value)
+        if identity in memo:
+            return memo[identity]
+        if identity in active:
+            raise ValueError("configuration contains a cyclic reference")
+        active.add(identity)
+        try:
+            if isinstance(value, Mapping):
+                copied: Any = {k: self._plain(v, memo, active) for k, v in value.items()}
+            elif isinstance(value, list):
+                copied = [self._plain(child, memo, active) for child in value]
+            else:
+                copied = tuple(self._plain(child, memo, active) for child in value)
+        finally:
+            active.remove(identity)
+        memo[identity] = copied
+        return copied
+
+
+def _children(value: Any) -> Iterable[Any] | None:
+    """The values directly inside a configuration value; ``None`` for a leaf."""
+    if isinstance(value, BaseModel):
+        return [getattr(value, name) for name in type(value).model_fields]
+    if isinstance(value, Mapping):
+        return value.values()
+    if isinstance(value, list | tuple):
+        return value
+    return None

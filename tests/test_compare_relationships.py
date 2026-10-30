@@ -155,7 +155,8 @@ def test_every_policy_and_a_json_round_trip():
     rng = np.random.default_rng(5)
     base = pl.DataFrame({"k": range(50), "x": rng.normal(10, 1, 50)})
     cand = base.with_columns(x=pl.col("x") * 1.5)
-    level = {"level": "relationships", "agreement": {"columns": ["x"]}}
+    # Only the slope limit is exceeded: the identity-line test decides it.
+    level = {"level": "relationships", "agreement": {"columns": ["x"], "min_ccc": None}}
     outcomes = {}
     for decision in ("material_and_significant", "material", "significant", "equivalence"):
         result = compare_datasets(base, cand, keys=["k"], levels=[level], decision=decision)
@@ -168,3 +169,9 @@ def test_every_policy_and_a_json_round_trip():
         "significant": (False, True),
         "equivalence": (False, False),
     }
+    # A concordance limit is a hard limit: exceeded, it fails under every policy.
+    hard = {"level": "relationships", "agreement": {"columns": ["x"], "min_ccc": 0.99}}
+    for decision in ("material_and_significant", "significant", "equivalence"):
+        result = compare_datasets(base, cand, keys=["k"], levels=[hard], decision=decision)
+        check = _check(result, "agreement: x")
+        assert (check.passed, check.assessed) == (False, True), decision

@@ -24,7 +24,7 @@ from qavf.configuration import read_config_mapping
 from qavf.engine.resources import ResourceLimitError
 from qavf.engine.runner import ConfigurationError, QARunner, build_registry, build_source_registry
 from qavf.engine.severity import Severity
-from qavf.io import atomic_write
+from qavf.io import ProtectedInputs, atomic_write
 from qavf.profiling import profile_input
 from qavf.redaction import exception_details
 from qavf.regression.compare_outputs import compare_outputs
@@ -215,6 +215,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if json_path is None and settings.report.json_:
         json_path = output_dir / "qa_report.json"
     _check_report_destinations(html_path, json_path)
+    ProtectedInputs.of_settings(settings, args.config).check(html_path, json_path)
     report = QARunner(settings).run()
     fail_on = settings.engine.fail_on
     written = []
@@ -436,6 +437,7 @@ def _cmd_compare_datasets(args: argparse.Namespace) -> int:
     from qavf.compare.api import compare_datasets
 
     _check_report_destinations(args.html, args.json)
+    ProtectedInputs([args.config, args.baseline, args.candidate]).check(args.html, args.json)
     options = _comparison_spec(args.config)
     for argument in (args.baseline, args.candidate):
         local = "://" not in argument and not any(c in argument for c in "*?[")

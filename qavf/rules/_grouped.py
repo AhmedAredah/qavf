@@ -137,10 +137,19 @@ class ProjectedRelation:
 
 @contextmanager
 def scoped_relation(
-    ctx: DataContext, dataset: str, columns: Iterable[str]
+    ctx: DataContext,
+    dataset: str,
+    columns: Iterable[str],
+    *,
+    within: Observation | None = None,
 ) -> Iterator[ProjectedRelation]:
-    """A coherent, normalized projected relation for exact multipass kernels."""
-    with ctx.observe(dataset, columns) as observation:
+    """A coherent, normalized projected relation for exact multipass kernels.
+
+    ``within`` borrows the columns from an observation the caller already holds,
+    so several relations describe one snapshot instead of separate reads.
+    """
+    source = within.borrow(columns) if within is not None else ctx.observe(dataset, columns)
+    with source as observation:
         plan = normalized_plan(ctx, dataset, observation.scan())
         yield ProjectedRelation(
             ctx,

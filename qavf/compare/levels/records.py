@@ -664,6 +664,23 @@ class RecordsLevel(ComparisonLevel):
             ).model_copy(
                 update={"metrics": {"not_compared": not_compared}, "total": 0, "unit": "values"}
             )
+        elif not_compared:
+            # The comparable columns stay assessed; the others are reported, never
+            # silently left out. ignore_columns excludes a column deliberately.
+            checks.append(
+                not_assessed(
+                    "values not compared",
+                    f"{plural(len(not_compared), 'column')} of incompatible types cannot be "
+                    f"compared: {', '.join(not_compared)}; map or convert them in the "
+                    "comparison, or list them in ignore_columns",
+                ).model_copy(
+                    update={
+                        "metrics": {"not_compared": not_compared},
+                        "total": len(not_compared),
+                        "unit": "columns",
+                    }
+                )
+            )
         inference = Inference.of(spec, params)
         shift = _shift(inputs, plan, params, inference, matched) if inference.tests else None
         if shift is not None:

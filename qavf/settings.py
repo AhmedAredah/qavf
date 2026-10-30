@@ -33,6 +33,7 @@ from pydantic import (
     model_validator,
 )
 
+from qavf.configuration import ConfigurationGraph
 from qavf.configuration import expand_env as expand_env
 from qavf.configuration import read_config_mapping as _read_config_mapping
 from qavf.engine.severity import Severity
@@ -1124,6 +1125,7 @@ def load_settings(path: str | Path) -> QAVFSettings:
         pydantic.ValidationError: if the content violates the schema.
     """
     raw, source = _read_config_mapping(path)
+    ConfigurationGraph().check(raw)
     settings = QAVFSettings.model_validate(raw)
     settings.source_path = source
     logger.info("Loaded configuration from %s", source)

@@ -10,8 +10,8 @@ from typing import Any
 
 import duckdb
 import polars as pl
-from pydantic import BaseModel
 
+from qavf.configuration import ConfigurationGraph
 from qavf.settings import (
     DatasetSpec,
     QAVFSettings,
@@ -30,19 +30,6 @@ from .descriptors import Dataset, File, Loader, Query
 from .resources import ResourceLimits
 
 Configuration = QAVFSettings | Mapping[str, Any] | str | os.PathLike[str] | None
-
-
-def _plain(value: Any) -> Any:
-    """Revalidate mutated model instances while retaining their omission serializers."""
-    if isinstance(value, BaseModel):
-        return value.model_dump(by_alias=True)
-    if isinstance(value, Mapping):
-        return {key: _plain(child) for key, child in value.items()}
-    if isinstance(value, list):
-        return [_plain(child) for child in value]
-    if isinstance(value, tuple):
-        return tuple(_plain(child) for child in value)
-    return value
 
 
 def _configuration(config: Configuration) -> tuple[dict[str, Any], Path | None]:
@@ -224,6 +211,8 @@ def prepare(
     """Normalize once, retaining caller ownership and validating before adaptation."""
     raw, source_path = _configuration(config)
     validate_config_mapping_keys(raw)
+    graph = ConfigurationGraph()
+    graph.check(raw)
     configured = raw.get("datasets", {})
     if not isinstance(configured, Mapping):
         raise TypeError("config.datasets must be a mapping of named dataset specifications")
@@ -274,7 +263,7 @@ def prepare(
         if not isinstance(engine, Mapping):
             raise TypeError("config.engine must be a mapping or EngineSettings")
         raw["engine"] = {**engine, **resources.engine_overrides()}
-    settings = QAVFSettings.model_validate(_plain(raw))
+    settings = QAVFSettings.model_validate(graph.plain(raw))
     if source_path is not None:
         settings.source_path = source_path
     for spec in settings.datasets.values():
