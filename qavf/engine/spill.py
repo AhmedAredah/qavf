@@ -41,7 +41,12 @@ class SpillBudget:
 
 
 class SpillFile:
-    """One sequential output with reservation-before-write and exactly-once cleanup."""
+    """One sequential output with reservation-before-write and exactly-once cleanup.
+
+    Releasing the last reference and removing the file are separate steps: a
+    removal that fails (a transient Windows sharing lock) keeps the file pending,
+    with its bytes still charged, and any later ``close`` retries it.
+    """
 
     def __init__(self, path: Path, budget: SpillBudget) -> None:
         self.path = path
@@ -49,6 +54,7 @@ class SpillFile:
         self.size = 0
         self._closed = False
         self._references = 1
+        self._pending_removal = False
         self._error: BaseException | None = None
 
     @contextlib.contextmanager
@@ -84,10 +90,27 @@ class SpillFile:
 
     def close(self) -> None:
         with self.budget.lock:
-            if self._closed:
+            if not self._closed:
+                self._closed = True
+                self._release_reference()
+            else:
+                self.remove_pending()
+
+    @property
+    def pending_removal(self) -> bool:
+        """Whether every reference has ended but the file could not yet be removed."""
+        with self.budget.lock:
+            return self._pending_removal
+
+    def remove_pending(self) -> None:
+        """Retry a removal that failed; release the bytes once the file is gone."""
+        with self.budget.lock:
+            if not self._pending_removal:
                 return
-            self._closed = True
-            self._release_reference()
+            self.path.unlink(missing_ok=True)
+            self._pending_removal = False
+            self.budget.release(self.size)
+            self.size = 0
 
     def borrow(self) -> SpillLease:
         with self.budget.lock:
@@ -100,9 +123,8 @@ class SpillFile:
         with self.budget.lock:
             self._references -= 1
             if self._references == 0:
-                self.path.unlink(missing_ok=True)
-                self.budget.release(self.size)
-                self.size = 0
+                self._pending_removal = True
+                self.remove_pending()
 
     def __enter__(self) -> SpillFile:
         return self
@@ -134,3 +156,5 @@ class SpillLease:
             if not self._closed:
                 self._closed = True
                 self._owner._release_reference()
+            else:
+                self._owner.remove_pending()

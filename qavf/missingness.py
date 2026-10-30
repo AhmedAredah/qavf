@@ -28,6 +28,22 @@ def missing_expr(frame: pl.DataFrame, column: str, spec: Any = None) -> pl.Expr:
     return expr
 
 
+def missing_count(values: pl.Series) -> int:
+    """Null or NaN entries of a series, the same missing values as ``missing_expr``."""
+    count = values.null_count()
+    if values.dtype.is_float():
+        count += int(values.is_nan().sum())
+    return count
+
+
+def missing_rows(frame: pl.DataFrame) -> int:
+    """Rows of ``frame`` with a null or NaN in any column."""
+    if not frame.columns:
+        return 0
+    flags = pl.any_horizontal(missing_expr(frame, column) for column in frame.columns)
+    return int(frame.select(flags.sum()).item())
+
+
 def normalize_frame(
     frame: pl.DataFrame,
     specs: Mapping[str, Any],

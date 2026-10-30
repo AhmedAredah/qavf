@@ -476,15 +476,37 @@ class RunResources:
         return dict(result)
 
     def close(self) -> None:
+        """Attempt every cleanup step even when one fails, then raise the failures.
+
+        A run directory that could not be removed is retried by the next ``close``.
+        """
         with self.lock:
-            if self.closed:
-                return
+            first = not self.closed
             self.closed = True
         # Native close may call release(); never hold the resource lock while
         # waiting on a handle another thread may already be closing.
-        self.session.request_close()
-        self.session.close_connections()
-        self.frames.clear()
-        self.pandas.clear()
-        self.memo.clear()
-        shutil.rmtree(self.directory, ignore_errors=True)
+        steps = (
+            [
+                self.session.request_close,
+                self.session.close_connections,
+                self.frames.clear,
+                self.pandas.clear,
+                self.memo.clear,
+            ]
+            if first
+            else []
+        )
+        failures: list[Exception] = []
+        for step in [*steps, self._remove_directory]:
+            try:
+                step()
+            except Exception as exc:
+                failures.append(exc)
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup("run resources could not be fully released", failures)
+
+    def _remove_directory(self) -> None:
+        if self.directory.exists():
+            shutil.rmtree(self.directory)

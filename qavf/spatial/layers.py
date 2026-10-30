@@ -30,6 +30,7 @@ import polars as pl
 from pydantic import model_validator
 
 from qavf.engine.registry import RuleParams
+from qavf.missingness import missing_count
 from qavf.rules.helpers import plural
 from qavf.sources.sql import quote_identifier, sql_literal
 from qavf.spatial.crs import DEFAULT_CRS, Crs, check_declared, normalize_crs, projjson_crs
@@ -152,7 +153,7 @@ def _checked_ids(frame: pl.DataFrame, layer: ZoneLayer) -> pl.DataFrame:
     if absent := [c for c in (layer.id,) if c not in frame.columns]:
         raise ValueError(f"zone layer {layer.label()!r} lacks column(s) {', '.join(absent)}")
     ids = frame[layer.id]
-    if missing := ids.null_count():
+    if missing := missing_count(ids):
         raise ValueError(f"zone layer {layer.label()!r}: {plural(missing, 'zone')} without an id")
     if repeated := ids.len() - ids.n_unique():
         raise ValueError(

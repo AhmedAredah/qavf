@@ -84,6 +84,47 @@ def test_malformed_plugin_counts_cannot_be_rounded_or_enter_the_ledger(field, va
     assert f"Finding.{field}" in report.get("ASSURANCE-PROBE").message
 
 
+class _Exiting:
+    """A plugin that calls ``sys.exit``, directly or while its findings are read."""
+
+    def __init__(self, lazily: bool) -> None:
+        self.lazily = lazily
+
+    def __call__(self, ctx: object) -> Any:
+        return self._findings() if self.lazily else self._exit()
+
+    def _findings(self) -> Any:
+        yield Finding.ok("first check completed", check="first")
+        self._exit()
+
+    @staticmethod
+    def _exit() -> None:
+        raise SystemExit(3)
+
+
+class _Interrupting:
+    """A plugin interrupted by its caller."""
+
+    def __call__(self, ctx: object) -> Any:
+        raise KeyboardInterrupt
+
+
+@pytest.mark.parametrize("lazily", [False, True])
+@pytest.mark.parametrize(
+    "engine", [{}, {"parallel": True, "max_workers": 2}, {"rule_timeout_s": 30}]
+)
+def test_a_plugin_exit_is_an_unassessed_rule_in_every_execution_mode(lazily, engine):
+    report = _runner(_Exiting(lazily), **engine).run()
+    _assert_incomplete(report)
+    assert "SystemExit" in report.get("ASSURANCE-PROBE").message
+    assert report.get("ASSURANCE-HEALTHY").status is Status.PASS
+
+
+def test_a_callers_interrupt_still_stops_the_run():
+    with pytest.raises(KeyboardInterrupt):
+        _runner(_Interrupting()).run()
+
+
 @pytest.mark.parametrize("parallel", [False, True])
 @pytest.mark.parametrize("failure", ["raise", "iterator", "malformed", "unassessed", "empty"])
 def test_partial_plugin_execution_never_certifies_a_required_assessment(failure, parallel):

@@ -117,12 +117,18 @@ class Store:
         return self._run(sql, chain((first,), iterator), many=True)
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self.connection.close()
-        finally:
-            self.path.unlink(missing_ok=True)
-            self.resources.spill_budget.release(self._charged)
-            self._charged = 0
+        """Close and remove the store; a removal that fails stays charged and is
+        retried by the next ``close``."""
+        if not self._closed:
+            self._closed = True
+            try:
+                self.connection.close()
+            finally:
+                self._remove()
+        elif self._charged or self.path.exists():
+            self._remove()
+
+    def _remove(self) -> None:
+        self.path.unlink(missing_ok=True)
+        self.resources.spill_budget.release(self._charged)
+        self._charged = 0

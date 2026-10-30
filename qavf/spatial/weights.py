@@ -36,6 +36,7 @@ from pydantic import Field, model_validator
 from qavf._adjacency import CompactAdjacency, checked_subset, normalized_weights
 from qavf.engine.registry import RuleParams
 from qavf.keys import cast_key
+from qavf.missingness import missing_count
 from qavf.rules.helpers import plural
 from qavf.sources.sql import quote_identifier
 from qavf.spatial._neighbours import (
@@ -358,7 +359,7 @@ def from_table(
     """
     admission = _Admission(max_work, max_edges)
     admission.add_work(len(ids) + table.height)
-    if ids.null_count() or ids.n_unique() != len(ids):
+    if missing_count(ids) or ids.n_unique() != len(ids):
         raise ValueError("weight table location ids must be present and unique")
     index = pl.DataFrame({"id": ids, "i": pl.int_range(0, ids.len(), eager=True)})
     try:

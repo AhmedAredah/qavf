@@ -270,3 +270,105 @@ def test_f07_streamed_json_honours_plugin_fields_and_serializers() -> None:
     streamed = json.loads(b"".join(comparison.iter_json_chunks()))
     assert streamed == json.loads(comparison.model_dump_json())
     assert streamed["levels"][0]["code"] == "code-12"
+
+
+# =========================================================================
+# F11: a removal that fails is retried, its bytes stay charged until then
+# =========================================================================
+class _LockedOnce(type(Path())):  # type: ignore[misc]
+    """A path whose first removal fails, as a Windows sharing lock does."""
+
+    failed = False
+
+    def unlink(self, missing_ok: bool = False) -> None:
+        if not type(self).failed:
+            type(self).failed = True
+            raise PermissionError("the file is in use")
+        super().unlink(missing_ok=missing_ok)
+
+
+def test_f11_a_spill_removal_that_fails_is_retried(tmp_path) -> None:
+    from qavf.engine.spill import SpillBudget, SpillFile
+
+    budget = SpillBudget(1024)
+    spill = SpillFile(_LockedOnce(tmp_path / "spill.bin"), budget)
+    with spill.writer() as handle:
+        handle.write(b"x" * 100)
+    lease = spill.borrow()
+    spill.close()
+    with pytest.raises(PermissionError):
+        lease.close()
+    assert spill.pending_removal and spill.path.exists() and budget.used == 100
+    lease.close()
+    assert not spill.pending_removal and not spill.path.exists() and budget.used == 0
+
+
+def test_f11_run_cleanup_reports_and_retries_a_directory_it_cannot_remove(
+    tmp_path, monkeypatch
+) -> None:
+    import shutil
+
+    from qavf.engine.resources import RunResources
+
+    resources = RunResources(1024, 10_000, None, tmp_path)
+    rmtree = shutil.rmtree
+    monkeypatch.setattr(shutil, "rmtree", _refuse_removal)
+    with pytest.raises(PermissionError):
+        resources.close()
+    assert resources.directory.exists()
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+    resources.close()
+    assert not resources.directory.exists()
+
+
+def _refuse_removal(*_args: object, **_kwargs: object) -> None:
+    raise PermissionError("the directory is in use")
+
+
+# =========================================================================
+# F09: a NaN identifier is a missing identifier on every spatial entry point
+# =========================================================================
+def test_f09_nan_ids_are_missing_in_layers_crosswalks_and_weights(tmp_path) -> None:
+    import math
+
+    from qavf.spatial.hierarchy import Crosswalk, crosswalk_frame
+    from qavf.spatial.layers import ZoneLayer, zone_ids
+    from qavf.spatial.weights import from_table
+
+    with pytest.raises(ValueError, match="missing value"):
+        crosswalk_frame(None, Crosswalk(pairs=((math.nan, "c"),)))
+    with pytest.raises(ValueError, match="present and unique"):
+        from_table(
+            pl.Series([math.nan, 1.0]),
+            pl.DataFrame({"from": [math.nan], "to": [1.0], "weight": [1.0]}),
+        )
+    path = tmp_path / "zones.parquet"
+    pl.DataFrame({"zone": [math.nan, 1.0]}).write_parquet(path)
+    with pytest.raises(ValueError, match="without an id"):
+        zone_ids(None, ZoneLayer(path=str(path)))
+    pl.DataFrame({"zone": [2.0, 1.0]}).write_parquet(path)
+    assert zone_ids(None, ZoneLayer(path=str(path))).to_list() == [1.0, 2.0]
+
+
+# =========================================================================
+# F10: charts index members by typed identity, never by their display label
+# =========================================================================
+def test_f10_distinct_groups_with_equal_labels_stay_distinct_in_charts() -> None:
+    from types import SimpleNamespace
+
+    from qavf.compare.results import MemberValues
+    from qavf.reports.comparison import ChartBudget, MemberLabels, _series_charts
+    from qavf.reports.presentation import HtmlLimits
+
+    points = [
+        {"g": "a, b", "h": "c", "t": 1, "baseline": 10.0, "candidate": 20.0},
+        {"g": "a", "h": "b, c", "t": 1, "baseline": 100.0, "candidate": 110.0},
+    ]
+    level = SimpleNamespace(values=[MemberValues(measure="m", keys=["g", "h", "t"], points=points)])
+    heat, *lines = _series_charts(level, ChartBudget(HtmlLimits()))
+    assert len(lines) == 2 and len({view.title for view in lines}) == 2
+    assert "+100%" in str(heat.svg) and "+10%" in str(heat.svg)
+
+    records = [{"x": 1.0000001}, {"x": 1.0000002}, {"x": None}, {"x": "\u2014"}, {"x": 2.5}]
+    labels = [MemberLabels(["x"], records).label(r) for r in records]
+    assert len(set(labels)) == 5 and labels[4] == "2.5"

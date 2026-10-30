@@ -68,6 +68,11 @@ class HeavyShareRule(Rule):
 
 Rules must not mutate the frames they read: rules run concurrently on threads.
 
+A rule that raises an exception, or calls `sys.exit`, is reported as an ERROR
+(not assessed) and the run continues; this holds for a generator rule failing
+while its findings are read, sequentially, on the thread pool and under
+`engine.rule_timeout_s` alike. A `KeyboardInterrupt` still stops the run.
+
 ### What the context offers
 
 | Call | Returns |

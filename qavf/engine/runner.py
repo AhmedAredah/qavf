@@ -65,6 +65,9 @@ from qavf.sources.base import SourceRegistry
 logger = logging.getLogger(__name__)
 
 _MAX_DEFAULT_WORKERS = 8
+#: What a rule may raise and still be reported as unassessed. A plugin calling
+#: ``sys.exit`` must not end the host process; a caller's KeyboardInterrupt does.
+RULE_FAILURES: tuple[type[BaseException], ...] = (Exception, SystemExit)
 # Stuck daemon tasks retain capacity across repeated calls in the same process.
 _STRANDED_THREADS: set[threading.Thread] = set()
 _STRANDED_LOCK = threading.Lock()
@@ -719,6 +722,8 @@ class QARunner:
         start = time.perf_counter()
         try:
             outcome = rule.evaluate(ctx)
+            # A generator rule runs while it is consumed: keep that inside the guard.
+            findings = [outcome] if isinstance(outcome, Finding) else list(outcome)
         except DatasetNotAvailableError as exc:
             # The rule needed data it could not get: not assessed, never a silent skip.
             return [
@@ -730,7 +735,7 @@ class QARunner:
                     severity=max(rule.severity, Severity.ERROR),
                 )
             ]
-        except Exception as exc:
+        except RULE_FAILURES as exc:
             logger.error(
                 "Rule %s raised: %s: %s", rule.rule_id, type(exc).__name__, exception_details(exc)
             )
@@ -746,7 +751,6 @@ class QARunner:
             ]
         elapsed = time.perf_counter() - start
 
-        findings = [outcome] if isinstance(outcome, Finding) else list(outcome)
         locator = RowLocator(ctx)
         findings = [locator.locate(f) if isinstance(f, Finding) else f for f in findings]
         if not findings:

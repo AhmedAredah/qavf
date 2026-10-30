@@ -271,13 +271,78 @@ def _member(group: Mapping[str, Any], keys: Sequence[str]) -> str:
     return ", ".join(_text(group.get(key)) for key in keys) or "all"
 
 
+def _precise(value: Any) -> str:
+    """A display form that keeps distinct values of a column distinct."""
+    if value is None:
+        return "null"
+    return repr(value) if isinstance(value, str | float) else _text(value)
+
+
+Identity = tuple[tuple[str, str], ...]
+"""A member by the type and exact value of each key."""
+
+
+class MemberLabels:
+    """The members of a set of records, each with a unique display label.
+
+    Charts group and index by typed identity, never by label: formatted labels
+    can coincide (``('a, b', 'c')`` and ``('a', 'b, c')``; floats equal to six
+    digits; a null and the text ``"—"``). Coinciding labels are spelled out
+    precisely, and numbered if they still coincide. Labels are resolved once,
+    from every record, so a member's label never depends on reading order.
+    """
+
+    def __init__(self, keys: Sequence[str], records: Iterable[Mapping[str, Any]]) -> None:
+        self.keys = tuple(keys)
+        values: dict[Identity, tuple[Any, ...]] = {}
+        for record in records:
+            member = tuple(record.get(key) for key in self.keys)
+            values.setdefault(_member_identity(member), member)
+        self._labels = _labels(values)
+
+    def identity(self, record: Mapping[str, Any]) -> Identity:
+        return _member_identity(tuple(record.get(key) for key in self.keys))
+
+    def label(self, record: Mapping[str, Any]) -> str:
+        return self._labels[self.identity(record)]
+
+    def named(self, identity: Identity) -> str:
+        return self._labels[identity]
+
+
+def _member_identity(member: tuple[Any, ...]) -> Identity:
+    return tuple((type(value).__name__, repr(value)) for value in member)
+
+
+def _labels(values: Mapping[Identity, tuple[Any, ...]]) -> dict[Identity, str]:
+    labels = {
+        identity: ", ".join(_text(value) for value in member) or "all"
+        for identity, member in values.items()
+    }
+    for identity in _coinciding(labels):
+        labels[identity] = ", ".join(_precise(value) for value in values[identity])
+    numbers: dict[str, int] = {}
+    for identity in _coinciding(labels):
+        number = numbers[labels[identity]] = numbers.get(labels[identity], 0) + 1
+        labels[identity] = f"{labels[identity]} [{number}]"
+    return labels
+
+
+def _coinciding(labels: Mapping[Identity, str]) -> list[Identity]:
+    counts: dict[str, int] = {}
+    for label in labels.values():
+        counts[label] = counts.get(label, 0) + 1
+    return [identity for identity, label in labels.items() if counts[label] > 1]
+
+
 def _contribution_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
     views = []
     for dimension in level.dimensions:
         shown = dimension.contributions[:_WATERFALL_MEMBERS]
         if not shown or level.baseline_total is None or level.candidate_total is None:
             continue
-        changes = [(_member(c.group, dimension.keys), float(c.change)) for c in shown]
+        members = MemberLabels(dimension.keys, (c.group for c in shown))
+        changes = [(members.label(c.group), float(c.change)) for c in shown]
         rest = float(dimension.total_change) - sum(value for _, value in changes)
         others = dimension.members - len(shown)
         if others:
@@ -293,12 +358,10 @@ def _contribution_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
         views.append(_waterfall(budget, title, start, end, changes, note))
         if len(dimension.keys) == 2:
             rows, columns = dimension.keys
-            cells = {
-                (_text(c.group.get(rows)), _text(c.group.get(columns))): _relative(
-                    c.baseline, c.candidate
-                )
-                for c in dimension.contributions
-            }
+            groups = [c.group for c in dimension.contributions]
+            cells = HeatCells(MemberLabels([rows], groups), MemberLabels([columns], groups))
+            for c in dimension.contributions:
+                cells.add(c.group, _relative(c.baseline, c.candidate))
             partial = (
                 f"Shows the {len(dimension.contributions):,} largest of "
                 f"{dimension.members:,} members."
@@ -317,13 +380,27 @@ def _contribution_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
     return views
 
 
-def _heat(
-    budget: ChartBudget, title: str, cells: Mapping[tuple[str, str], float | None],
-    note: str | None,
-) -> ChartView:  # fmt: skip
-    rows = list(dict.fromkeys(row for row, _ in cells))
+class HeatCells:
+    """Heat-map cells indexed by typed row and column identity, displayed by label."""
+
+    def __init__(self, rows: MemberLabels, columns: MemberLabels) -> None:
+        self.rows, self.columns = rows, columns
+        self._cells: dict[tuple[Identity, Identity], float | None] = {}
+
+    def add(self, record: Mapping[str, Any], value: float | None) -> None:
+        self._cells[self.rows.identity(record), self.columns.identity(record)] = value
+
+    def labelled(self) -> dict[tuple[str, str], float | None]:
+        return {
+            (self.rows.named(row), self.columns.named(column)): value
+            for (row, column), value in self._cells.items()
+        }
+
+
+def _heat(budget: ChartBudget, title: str, heat: HeatCells, note: str | None) -> ChartView:
+    cells = heat.labelled()
+    rows = sorted(dict.fromkeys(row for row, _ in cells))
     columns = sorted(dict.fromkeys(column for _, column in cells))
-    rows.sort()
     labels = len(rows) * len(columns) <= 300
     return budget.chart(
         title, len(rows) * len(columns),
@@ -342,18 +419,20 @@ def _series_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
             if values.truncated
             else None
         )
-        series: dict[str, list[dict[str, Any]]] = {}
+        members = MemberLabels(groups, values.points)
+        buckets = MemberLabels([bucket], values.points)
+        series: dict[Identity, list[dict[str, Any]]] = {}
         for record in values.points:
-            series.setdefault(_member(record, groups), []).append(record)
+            series.setdefault(members.identity(record), []).append(record)
         if groups:
-            cells = {
-                (_member(r, groups), _text(r.get(bucket))): _relative(r["baseline"], r["candidate"])
-                for r in values.points
-            }
+            cells = HeatCells(members, buckets)
+            for r in values.points:
+                cells.add(r, _relative(r["baseline"], r["candidate"]))
             title = f"{values.measure}: relative change by {', '.join(groups)} and {bucket}"
             views.append(_heat(budget, title, cells, partial))
-        for name, records in list(series.items())[:_SERIES_GROUPS]:
-            labels = [_text(r.get(bucket)) for r in records]
+        for identity, records in list(series.items())[:_SERIES_GROUPS]:
+            name = members.named(identity)
+            labels = [buckets.label(r) for r in records]
             b = [_number(r["baseline"]) for r in records]
             c = [_number(r["candidate"]) for r in records]
             title = f"{values.measure} per {bucket}" + (f" ({name})" if groups else "")
@@ -383,7 +462,8 @@ def _spatial_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
     if outlines.note is not None or not outlines.paths:
         return [ChartView(title, note=f"Map omitted: {outlines.note or 'no zone outlines'}.")]
     column = chosen.keys[0]
-    values = {_text(r.get(column)): _relative(r["baseline"], r["candidate"]) for r in chosen.points}
+    # Outline paths are keyed by ``str(zone)``: a display label would miss float ids.
+    values = {str(r.get(column)): _relative(r["baseline"], r["candidate"]) for r in chosen.points}
     labels = len(outlines.paths) <= 40
     marks = outlines.vertices + len(outlines.paths)
     note = (

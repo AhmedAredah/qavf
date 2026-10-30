@@ -27,6 +27,7 @@ from pydantic import Field, model_validator
 from qavf.aggregation import exact_sum_expr, narrow_integer
 from qavf.engine.registry import RuleParams
 from qavf.keys import cast_key
+from qavf.missingness import missing_rows
 from qavf.numeric import exact_rational, report_number
 from qavf.rules.helpers import fresh_internal, plural
 
@@ -108,7 +109,7 @@ def validate_crosswalk(frame: pl.DataFrame, tolerance: float, label: str) -> pl.
         ValueError: for missing ids or weights, repeated pairs, weights outside
             (0, 1], or a ``from`` zone whose weights do not sum to 1.
     """
-    if missing := frame.select(pl.any_horizontal(pl.all().is_null()).sum()).item():
+    if missing := missing_rows(frame):
         raise ValueError(f"crosswalk {label!r}: {plural(missing, 'pair')} with a missing value")
     if repeated := frame.height - frame.select(SOURCE, TARGET).n_unique():
         raise ValueError(f"crosswalk {label!r}: {plural(repeated, 'pair')} repeated")
