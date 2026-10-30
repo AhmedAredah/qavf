@@ -23,6 +23,7 @@ from qavf.rules._key_summary import KeySelection
 from qavf.rules._row_summary import row_aliases, summarize_rows
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import (
+    absent_column_hint,
     fresh_internal,
     outcome,
     plural,
@@ -323,7 +324,8 @@ class DuplicateKeyRule(_SelectsDatasets):
         if absent:
             failures.append(
                 Finding.fail(
-                    f"{what} of {dataset} names column(s) that do not exist: {', '.join(absent)}.",
+                    f"{what} of {dataset} names column(s) that do not exist: {', '.join(absent)}"
+                    f"{''.join(absent_column_hint(c, frame.columns) for c in absent)}.",
                     check=dataset
                     if what == "Primary key"
                     else f"{dataset}: unique ({', '.join(columns)})",

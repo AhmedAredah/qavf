@@ -33,7 +33,7 @@ from qavf.rules._regex import sql_compatible
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import present
 from qavf.settings import COLUMN_CONSTRAINTS, ROW_CONSTRAINTS, ColumnCheck, ColumnSpec, SchemaSpec
-from qavf.value_policy import is_text
+from qavf.value_policy import is_text, normalized_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +58,7 @@ class ColumnPlan:
         """Only this contract, for projected fallback through the eager kernel."""
         raw = self.spec.model_dump()
         defaults = ColumnSpec().model_dump()
-        for name in (*ROW_CONSTRAINTS, *COLUMN_CONSTRAINTS, "ignore_case"):
+        for name in (*ROW_CONSTRAINTS, *COLUMN_CONSTRAINTS, "normalize"):
             raw[name] = defaults[name]
         raw.update(
             checks=[],
@@ -148,7 +148,7 @@ def _lazy_column_reduction(
             error = compatibility_error(name, raw, actual[column])
             if error:
                 raise ValueError(error)
-            tests = row_tests({name: raw}, actual[column], ignore_case=check.ignore_case)
+            tests = row_tests({name: raw}, actual[column], normalize=check.normalize)
             row_label, test = tests[name]
             predicates.append(
                 (row_label, scope & pl.col(column).is_not_null() & ~test(column).fill_null(True))
@@ -157,10 +157,8 @@ def _lazy_column_reduction(
             predicates.append(("notin NaN", scope & pl.col(saved[column]).is_nan()))
         if check.max_null_fraction is not None:
             reducers["missing"] = value.is_null().sum()
-        if check.ignore_case and not is_text(actual[column]):
-            raise ValueError(f"ignore_case applies to text columns, not {actual[column]}")
         if check.unique:
-            distinct = value.cast(pl.String).str.to_lowercase() if check.ignore_case else value
+            distinct = normalized_text(value, check.normalize, actual[column])
             reducers["duplicates"] = distinct.drop_nulls().len() - distinct.drop_nulls().n_unique()
         for name in COLUMN_CONSTRAINTS:
             if name not in constraints or name in ("unique", "max_null_fraction"):
@@ -345,8 +343,8 @@ def _native_column_reduction(
         return NotImplemented
     if check is not None and check.regex is not None and not sql_compatible(check.regex):
         return NotImplemented
-    if check is not None and check.ignore_case:
-        return NotImplemented  # SQL folds case differently from the reference kernel
+    if check is not None and check.normalize:
+        return NotImplemented  # SQL folds case and trims differently from the reference
     statistics = {
         k: v
         for k, v in constraints.items()

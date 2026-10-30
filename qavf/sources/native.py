@@ -166,6 +166,9 @@ def connect(
         raise
     con = OwnedConnection(native, owner, token) if owner else native
     try:
+        # Zoned timestamps reach every check in UTC on every machine, never in the
+        # host's zone, so results do not depend on where QA runs.
+        con.execute("SET TimeZone = 'UTC'")
         if env.threads:
             con.execute(f"SET threads = {int(env.threads)}")
         # Validate the explicit setting with DuckDB itself, including its native

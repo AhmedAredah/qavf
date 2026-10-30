@@ -53,7 +53,7 @@ datasets:
         status:
           dtype: str
           isin: [valid, suspect, invalid]
-          ignore_case: true           # Valid and valid are the same (isin, notin, unique)
+          normalize: [case, trim]     # compare ' Valid' as 'valid' (isin, notin, unique)
         serial:
           dtype: int
           unique: true

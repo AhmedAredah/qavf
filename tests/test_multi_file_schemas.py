@@ -128,6 +128,8 @@ def test_attachment_errors_keep_native_retry_classification(status, expected_att
             created.append(self)
 
         def execute(self, sql):
+            if sql.startswith("SET "):
+                return self  # session settings such as the UTC time zone
             assert sql.startswith("ATTACH ")
             if len(created) < 3:
                 raise duckdb.HTTPException(f"HTTP Error: {status} attachment failure")

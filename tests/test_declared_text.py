@@ -186,24 +186,36 @@ def test_a_unique_column_lists_its_duplicated_rows(tmp_path) -> None:
 
 
 # =========================================================================
-# Allowed values and uniqueness can ignore case
+# Allowed values and uniqueness can ignore case and surrounding whitespace
 # =========================================================================
 @pytest.mark.parametrize("kind", ["csv", "frame"])
-def test_ignore_case_applies_to_allowed_values_and_uniqueness(tmp_path, kind) -> None:
+def test_normalize_applies_to_allowed_values_and_uniqueness(tmp_path, kind) -> None:
     path = _csv(tmp_path, "s\nValid\nINVALID\nvalid\nmaybe\n")
     source = path if kind == "csv" else pl.read_csv(path)
-    allowed = {"isin": ["valid", "invalid"], "ignore_case": True}
+    allowed = {"isin": ["valid", "invalid"], "normalize": ["case"]}
     [isin] = _failed(source, {"columns": {"s": allowed}}, "INP-003")
     assert [r["s"] for r in isin.affected_records] == ["maybe"]
 
-    unique = {"unique": True, "ignore_case": True}
+    unique = {"unique": True, "normalize": ["case"]}
     [repeat] = _failed(source, {"columns": {"s": unique}}, "INP-003")
     assert [r["_row"] for r in repeat.affected_records] == [0, 2]
     assert _failed(source, {"columns": {"s": {"unique": True}}}, "INP-003") == []
 
 
-def test_ignore_case_needs_text_membership_limits() -> None:
+def test_trim_ignores_surrounding_whitespace(tmp_path) -> None:
+    frame = pl.DataFrame({"s": ["abc ", " xyz", "ab c", " abc"]})
+    allowed = {"isin": ["abc", "xyz"], "normalize": ["trim"]}
+    [isin] = _failed(frame, {"columns": {"s": allowed}}, "INP-003")
+    assert [r["s"] for r in isin.affected_records] == ["ab c"]
+    unique = {"unique": True, "normalize": ["trim"]}
+    [repeat] = _failed(frame, {"columns": {"s": unique}}, "INP-003")
+    assert [r["_row"] for r in repeat.affected_records] == [0, 3]
+
+
+def test_normalize_needs_text_membership_limits() -> None:
     with pytest.raises(ValidationError, match="goes with 'isin'"):
-        ColumnSpec(ignore_case=True, regex="a")
+        ColumnSpec(normalize=["case"], regex="a")
     with pytest.raises(ValidationError, match="applies to str columns"):
-        ColumnSpec(dtype="int", isin=[1], ignore_case=True)
+        ColumnSpec(dtype="int", isin=[1], normalize=["case"])
+    with pytest.raises(ValidationError, match="twice"):
+        ColumnSpec(isin=["a"], normalize=["case", "case"])

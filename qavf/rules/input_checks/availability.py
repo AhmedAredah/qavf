@@ -15,6 +15,7 @@ from qavf.rules._predicates import (
     is_temporal,
 )
 from qavf.rules.helpers import (
+    absent_column_hint,
     outcome,
     plural,
 )
@@ -155,7 +156,11 @@ class SchemaConformanceRule(_SelectsDatasets):
             for column, spec in schema.columns.items():
                 if column not in actual_schema:
                     if spec.required:
-                        problems.append({"column": column, "problem": "missing required column"})
+                        problem = {"column": column, "problem": "missing required column"}
+                        hint = absent_column_hint(column, actual_schema)
+                        if hint:
+                            problem["hint"] = hint.removeprefix("; ")
+                        problems.append(problem)
                     continue
                 actual = actual_schema[column]
                 if spec.dtype is None or _matches(actual, spec.dtype):

@@ -181,26 +181,48 @@ def missing_markers(spec: Any, dtype: pl.DataType) -> list[Any]:
     return values
 
 
+TextNormalization = Literal["case", "trim"]
+"""How text is compared: ``case`` ignores letter case, ``trim`` surrounding whitespace."""
+
+
+def normalized_text(
+    expr: pl.Expr, normalize: Sequence[TextNormalization], dtype: pl.DataType
+) -> pl.Expr:
+    """``expr`` as text, compared under ``normalize`` (unchanged when it is empty)."""
+    if not normalize:
+        return expr
+    if not is_text(dtype):
+        raise ValueError(f"normalize applies to text columns, not {dtype}")
+    text = expr.cast(pl.String)
+    if "trim" in normalize:
+        text = text.str.strip_chars()
+    if "case" in normalize:
+        text = text.str.to_lowercase()
+    return text
+
+
 def membership(
-    values: list[Any], dtype: pl.DataType, negate: bool = False, *, ignore_case: bool = False
+    values: list[Any],
+    dtype: pl.DataType,
+    negate: bool = False,
+    *,
+    normalize: Sequence[TextNormalization] = (),
 ) -> RowTest:
     """Exact, typed membership. Values are already converted to ``dtype``
     (:func:`members`), so no comparison mixes types, which Polars 2 rejects and
-    which could otherwise round large integers. ``ignore_case`` compares text in
-    lower case."""
-    folded = ignore_case and is_text(dtype)
-    if folded and values:
+    which could otherwise round large integers. ``normalize`` applies the same
+    text normalization to the values and the column."""
+    if normalize and values:
         values = (
-            pl.Series(values, dtype=pl.String)
-            .str.to_lowercase()
-            .unique(maintain_order=True)
+            pl.DataFrame({"v": pl.Series(values, dtype=pl.String)})
+            .select(normalized_text(pl.col("v"), normalize, dtype).unique(maintain_order=True))
+            .to_series()
             .to_list()
         )
 
     def test(column: str) -> pl.Expr:
         expr = _text(column) if is_text(dtype) else pl.col(column)
-        if folded:
-            expr = expr.str.to_lowercase()
+        expr = normalized_text(expr, normalize, dtype)
         if not values:
             inside = pl.lit(False)
         elif is_temporal(dtype):

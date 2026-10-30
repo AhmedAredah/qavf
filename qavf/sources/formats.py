@@ -22,6 +22,14 @@ _SUFFIX_FORMATS: dict[str, FileFormat] = {
     ".ndjson": "ndjson",
     ".jsonl": "ndjson",
     ".xlsx": "excel",
+    ".xlsm": "excel",
+}
+#: Formats recognized by name that no reader supports, and what to do instead.
+_UNSUPPORTED_SUFFIXES = {
+    ".xls": (
+        "legacy Excel (.xls) workbooks cannot be read; save the workbook as .xlsx, or "
+        "load it with a python source"
+    ),
 }
 READERS: dict[FileFormat, str] = {
     "csv": "read_csv",
@@ -76,6 +84,8 @@ def infer_format(path: str | Path) -> FileFormat:
     suffixes, compression = suffixes_of(path)
     compressed = compression is not None
     fmt = _SUFFIX_FORMATS.get(suffixes[-1]) if suffixes else None
+    if fmt is None and suffixes and suffixes[-1] in _UNSUPPORTED_SUFFIXES:
+        raise ValueError(f"{name!r}: {_UNSUPPORTED_SUFFIXES[suffixes[-1]]}")
     if fmt is None:
         raise ValueError(
             f"cannot infer the data format of {name!r}; set 'format' ({', '.join(READERS)})"

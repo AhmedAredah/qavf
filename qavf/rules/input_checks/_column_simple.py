@@ -138,7 +138,7 @@ def evaluate_simple(
     for column, spec in schema.columns.items():
         if column not in actual:
             if spec.required:
-                failures.append(values._missing_column(dataset, column))
+                failures.append(values._missing_column(dataset, column, actual))
             continue
         quoted = quote_identifier(column)
         floating = actual[column].is_float()
@@ -262,7 +262,7 @@ def _lazy_dataset(
     for column, spec in schema.columns.items():
         if column not in actual:
             if spec.required:
-                failures.append(values._missing_column(dataset, column))
+                failures.append(values._missing_column(dataset, column, actual))
             continue
         missing = missing_expr(typed, column)
         if not spec.nullable:

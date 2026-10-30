@@ -159,7 +159,7 @@ class ColumnCheckRule(_SelectsDatasets):
                         return self._planned_dataset(ctx, dataset, schema, actual, observed)
                 except Exception as exc:
                     failures = [
-                        values._missing_column(dataset, column)
+                        values._missing_column(dataset, column, actual)
                         for column, spec in schema.columns.items()
                         if column not in actual and spec.required
                     ]
@@ -196,7 +196,7 @@ class ColumnCheckRule(_SelectsDatasets):
         passed: list[str] = []
         for column, spec in schema.columns.items():
             if column not in actual and spec.required:
-                failures.append(values._missing_column(dataset, column))
+                failures.append(values._missing_column(dataset, column, actual))
         items = column_plans(schema, actual)
         if assessed is None:
             assessed = column_checks(

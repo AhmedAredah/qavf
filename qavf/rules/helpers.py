@@ -5,8 +5,10 @@ Public API for rule authors; the built-in rules use the same functions.
 
 from __future__ import annotations
 
+import difflib
 import heapq
 import math
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
@@ -505,3 +507,24 @@ class BoundedEvidence:
             if not self._admit(record):
                 break
             self.records.append(record)
+
+
+def _folded_name(name: str) -> str:
+    """A column name without case, spaces, hyphens or dots: ``Site ID`` is ``siteid``."""
+    return re.sub(r"[\s_.\-]+", "", name).casefold()
+
+
+def absent_column_hint(column: str, available: Iterable[str]) -> str:
+    """How the data probably spells an absent column, as a clause to append; or ``""``.
+
+    The same name in another case or separator style comes first; otherwise the
+    closest spellings, if any are close.
+    """
+    names = list(available)
+    same = [name for name in names if _folded_name(name) == _folded_name(column)]
+    if same:
+        return f"; the data has {same[0]!r}: map it with 'rename'"
+    close = difflib.get_close_matches(column, names, n=3, cutoff=0.75)
+    if close:
+        return f"; did you mean {' or '.join(repr(name) for name in close)}? Map it with 'rename'"
+    return ""

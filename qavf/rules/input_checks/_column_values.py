@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from decimal import Decimal
 from fractions import Fraction
 from typing import Any, cast
@@ -17,6 +18,7 @@ from qavf.rules._predicates import (
 )
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import (
+    absent_column_hint,
     fresh_internal,
     present,
 )
@@ -183,10 +185,11 @@ def _rows(
     )
 
 
-def _missing_column(dataset: str, column: str) -> Finding:
+def _missing_column(dataset: str, column: str, available: Iterable[str] = ()) -> Finding:
     """An absent required column leaves its limits unassessed on every backend."""
+    hint = absent_column_hint(column, available)
     return Finding.unassessed(
-        f"Not assessed: required column {dataset}.{column} is absent.",
+        f"Not assessed: required column {dataset}.{column} is absent{hint}.",
         check=f"{dataset}.{column}",
         datasets=(dataset,),
     )

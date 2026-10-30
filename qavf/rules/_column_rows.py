@@ -48,7 +48,7 @@ def native_row_check(
     scope = pl.sql_expr(check.where).fill_null(False) if check.where else pl.lit(True)
     predicates = [
         (name, scope & pl.col(column).is_not_null() & ~predicate(column).fill_null(True))
-        for name, predicate in row_tests(constraints, dtype, ignore_case=check.ignore_case).values()
+        for name, predicate in row_tests(constraints, dtype, normalize=check.normalize).values()
     ]
     bad = pl.any_horizontal(predicate for _, predicate in predicates).fill_null(False)
     reasons = pl.concat_str(

@@ -27,7 +27,7 @@ from qavf.settings import (
     ColumnSpec,
     SchemaSpec,
 )
-from qavf.value_policy import is_text
+from qavf.value_policy import normalized_text
 
 from . import _column_values as values
 
@@ -104,7 +104,7 @@ def evaluate_eager(
     for column, spec in schema.columns.items():
         if column not in frame.columns:
             if spec.required:
-                failures.append(values._missing_column(dataset, column))
+                failures.append(values._missing_column(dataset, column, frame.columns))
             continue
         if column in blocked_columns:
             failures.append(
@@ -265,7 +265,7 @@ def evaluate_eager(
                         unusable.append(error)
                         continue
                     row_label, test = row_tests(
-                        {name: raw}, series.dtype, ignore_case=check.ignore_case
+                        {name: raw}, series.dtype, normalize=check.normalize
                     )[name]
                     bad = pl.col(column).is_not_null() & ~test(column).fill_null(True)
                     predicates.append((row_label, bad))
@@ -378,11 +378,7 @@ def _duplicated(column: str, dtype: pl.DataType, check: ColumnCheck) -> pl.Expr:
     Callers restrict the result to the check's ``where`` rows, so only values in
     scope are compared with each other.
     """
-    value = pl.col(column)
-    if check.ignore_case:
-        if not is_text(dtype):
-            raise ValueError(f"ignore_case applies to text columns, not {dtype}")
-        value = value.cast(pl.String).str.to_lowercase()
+    value = normalized_text(pl.col(column), check.normalize, dtype)
     if check.where is not None:
         value = pl.when(pl.sql_expr(check.where).fill_null(False)).then(value)
     return value.is_not_null() & value.is_duplicated()

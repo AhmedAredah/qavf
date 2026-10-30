@@ -18,10 +18,17 @@ All notable changes to this project are documented here. The format follows
   and identifiers that look numeric keep their leading zeros. Columns declared
   `dtype: str` are added automatically. `qavf init` drafts integer columns written
   with leading zeros (`007`) as text.
-- **`ignore_case`** compares text case-insensitively in `isin`, `notin` and `unique`.
+- **`normalize`** compares text in `isin`, `notin` and `unique` after normalizing it:
+  `case` ignores letter case and `trim` ignores surrounding whitespace.
+- An absent column names its likely spelling in the data (`ID` for `id`, `Site ID` for
+  `site_id`, a close misspelling) in INP-002, INP-003 and INP-004.
+- `.xlsm` workbooks are read as Excel; a legacy `.xls` workbook explains how to read it.
 
 ### Changed
 
+- Zoned timestamps load and compare in UTC on every machine. They previously took the
+  host's time zone, so the same file and bounds could pass on one machine and fail on
+  another.
 - INP-004 duplicate-key evidence lists the first row positions of each key (`rows`).
 - A column's `unique` limit reports the rows holding repeated values, like other row
   limits, instead of only stating that values repeat.

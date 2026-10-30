@@ -36,6 +36,7 @@ from pydantic import (
 from qavf.configuration import expand_env as expand_env
 from qavf.configuration import read_config_mapping as _read_config_mapping
 from qavf.engine.severity import Severity
+from qavf.value_policy import TextNormalization
 
 if TYPE_CHECKING:
     from qavf.sources.base import SourceEnvironment
@@ -184,9 +185,10 @@ class ColumnConstraints(_Strict):
     unique: bool = False
     """No value occurs twice; missing values are exempt."""
     # modifiers
-    ignore_case: bool = False
-    """Compare text case-insensitively in ``isin``, ``notin`` and ``unique`` (``Valid``
-    and ``valid`` are the same value). Applies to the limits set alongside it."""
+    normalize: list[TextNormalization] = Field(default_factory=list)
+    """Compare text in ``isin``, ``notin`` and ``unique`` after normalizing it:
+    ``case`` ignores letter case (``Valid`` is ``valid``), ``trim`` ignores
+    surrounding whitespace. Applies to the limits set alongside it."""
     min: Bounds | None = None
     """Bounds on the column minimum."""
     max: Bounds | None = None
@@ -232,8 +234,10 @@ class ColumnConstraints(_Strict):
             )
         if self.isin is not None and not self.isin:
             raise ValueError("'isin: []' allows no value at all; list the allowed values")
-        if self.ignore_case and self.isin is None and self.notin is None and not self.unique:
-            raise ValueError("'ignore_case' goes with 'isin', 'notin' or 'unique'")
+        if self.normalize and self.isin is None and self.notin is None and not self.unique:
+            raise ValueError("'normalize' goes with 'isin', 'notin' or 'unique'")
+        if len(set(self.normalize)) != len(self.normalize):
+            raise ValueError("'normalize' lists a normalization twice")
         if self.regex is not None:
             _check_regex(self.regex)
         for name in ("std", "distinct_count"):
@@ -334,8 +338,8 @@ class ColumnSpec(ColumnConstraints):
     def all_checks(self) -> list[ColumnCheck]:
         """The implicit check (if any limits are set inline) followed by ``checks``."""
         inline = self.constraints()
-        if inline and self.ignore_case:
-            inline["ignore_case"] = True
+        if inline and self.normalize:
+            inline["normalize"] = list(self.normalize)
         implicit = [ColumnCheck.model_validate(inline)] if inline else []
         return implicit + list(self.checks)
 
@@ -366,8 +370,8 @@ class ColumnSpec(ColumnConstraints):
             for name in ("regex", "min_length", "max_length"):
                 if name in limits and self.dtype != "str":
                     raise ValueError(f"'{name}' applies to str columns, not {self.dtype}")
-            if check.ignore_case and self.dtype != "str":
-                raise ValueError(f"'ignore_case' applies to str columns, not {self.dtype}")
+            if check.normalize and self.dtype != "str":
+                raise ValueError(f"'normalize' applies to str columns, not {self.dtype}")
             for name in ("integral", "max_decimals"):
                 if name in limits and not numeric:
                     raise ValueError(f"'{name}' applies to numeric columns, not {self.dtype}")

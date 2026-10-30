@@ -7,7 +7,7 @@ No all-failure table or third-party schema engine is required.
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal, localcontext
 from fractions import Fraction
@@ -16,6 +16,7 @@ from typing import Any
 import polars as pl
 
 from qavf.value_policy import _SHORT_LIST as _SHORT_LIST
+from qavf.value_policy import TextNormalization, temporal_ticks
 from qavf.value_policy import _fits as _fits
 from qavf.value_policy import _text as _text
 from qavf.value_policy import is_nan as is_nan
@@ -23,7 +24,6 @@ from qavf.value_policy import is_temporal as is_temporal
 from qavf.value_policy import is_text as is_text
 from qavf.value_policy import members as members
 from qavf.value_policy import membership as membership
-from qavf.value_policy import temporal_ticks
 
 RowTest = Callable[[str], pl.Expr]
 """Builds a boolean expression (``True`` = valid) for the named column."""
@@ -89,16 +89,19 @@ def _temporal_compare(operator: str, value: Any, dtype: pl.DataType) -> RowTest:
 
 
 def row_tests(
-    constraints: Mapping[str, Any], dtype: pl.DataType, *, ignore_case: bool = False
+    constraints: Mapping[str, Any],
+    dtype: pl.DataType,
+    *,
+    normalize: Sequence[TextNormalization] = (),
 ) -> dict[str, tuple[str, RowTest]]:
     """Polars predicates (``True`` = valid) for the row-level limits in ``constraints``.
 
     NaN values in ``isin``/``notin`` lists are ignored here: NaN counts as
     missing, and an explicitly forbidden NaN is enforced by the caller.
-    ``ignore_case`` compares text case-insensitively in ``isin``/``notin``.
+    ``normalize`` compares text in ``isin``/``notin`` after normalizing it.
     """
-    if ignore_case and not is_text(dtype):
-        raise ValueError(f"ignore_case applies to text columns, not {dtype}")
+    if normalize and not is_text(dtype):
+        raise ValueError(f"normalize applies to text columns, not {dtype}")
     tests: dict[str, tuple[str, RowTest]] = {}
     for name, raw in constraints.items():
         label = f"{name} {format_value(raw)}"
@@ -132,7 +135,7 @@ def row_tests(
             values, _ = members(raw, dtype)
             tests[name] = (
                 label,
-                membership(values, dtype, negate=name == "notin", ignore_case=ignore_case),
+                membership(values, dtype, negate=name == "notin", normalize=normalize),
             )
         elif name == "regex":
             tests[name] = (f"regex {raw}", _full_match(raw))
