@@ -89,7 +89,7 @@ def test_missing_regex_where_membership_and_aggregate_semantics(kind, tmp_path):
     results = rule_results("INP-003", frames, datasets=datasets)
     assert not any(r.status is Status.ERROR for r in results), [r.message for r in results]
     assert [(r.check, r.affected_count) for r in results if r.status is Status.FAIL] == [
-        ("d.x: unique", 1)
+        ("d.x: unique", 2)  # both rows holding the repeated 3
     ]
 
 

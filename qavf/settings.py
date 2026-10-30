@@ -182,6 +182,11 @@ class ColumnConstraints(_Strict):
     """Largest acceptable share of missing values (requires ``nullable: true``
     on the column to be meaningful; non-nullable columns allow none)."""
     unique: bool = False
+    """No value occurs twice; missing values are exempt."""
+    # modifiers
+    ignore_case: bool = False
+    """Compare text case-insensitively in ``isin``, ``notin`` and ``unique`` (``Valid``
+    and ``valid`` are the same value). Applies to the limits set alongside it."""
     min: Bounds | None = None
     """Bounds on the column minimum."""
     max: Bounds | None = None
@@ -227,6 +232,8 @@ class ColumnConstraints(_Strict):
             )
         if self.isin is not None and not self.isin:
             raise ValueError("'isin: []' allows no value at all; list the allowed values")
+        if self.ignore_case and self.isin is None and self.notin is None and not self.unique:
+            raise ValueError("'ignore_case' goes with 'isin', 'notin' or 'unique'")
         if self.regex is not None:
             _check_regex(self.regex)
         for name in ("std", "distinct_count"):
@@ -311,7 +318,9 @@ class ColumnSpec(ColumnConstraints):
     QA consumer, including statistics, reconciliation, keys and expressions;
     each check then applies its documented null policy."""
     blank_as_missing: bool = False
-    """Normalize empty and whitespace-only text to missing for every QA consumer."""
+    """Normalize empty and whitespace-only text to missing for every QA consumer. With
+    a non-text ``dtype``, this applies while a column read as text is checked against
+    that type."""
     unit: str | None = None
     """The column's unit (``kg``, ``vehicle-miles``). Recorded in reports; ``REC-001``
     refuses to reconcile columns declared in different units."""
@@ -325,14 +334,14 @@ class ColumnSpec(ColumnConstraints):
     def all_checks(self) -> list[ColumnCheck]:
         """The implicit check (if any limits are set inline) followed by ``checks``."""
         inline = self.constraints()
+        if inline and self.ignore_case:
+            inline["ignore_case"] = True
         implicit = [ColumnCheck.model_validate(inline)] if inline else []
         return implicit + list(self.checks)
 
     @model_validator(mode="after")
     def _compatible_with_dtype(self) -> ColumnSpec:
         """With a declared ``dtype``, reject limits that cannot apply to it."""
-        if self.blank_as_missing and self.dtype not in (None, "str"):
-            raise ValueError(f"'blank_as_missing' applies to str columns, not {self.dtype}")
         if self.allowed_units is not None and not self.allowed_units:
             raise ValueError("'allowed_units' must not be empty")
         if self.unit_column is not None and self.unit is None and self.allowed_units is None:
@@ -357,6 +366,8 @@ class ColumnSpec(ColumnConstraints):
             for name in ("regex", "min_length", "max_length"):
                 if name in limits and self.dtype != "str":
                     raise ValueError(f"'{name}' applies to str columns, not {self.dtype}")
+            if check.ignore_case and self.dtype != "str":
+                raise ValueError(f"'ignore_case' applies to str columns, not {self.dtype}")
             for name in ("integral", "max_decimals"):
                 if name in limits and not numeric:
                     raise ValueError(f"'{name}' applies to numeric columns, not {self.dtype}")
@@ -555,7 +566,33 @@ class DatasetSpec(_Strict):
         else:
             return None
         config.update(self.effective_load_policy().model_dump(exclude_unset=True))
+        text = self._declared_text(config)
+        if text:
+            config["text_columns"] = list(dict.fromkeys([*config.get("text_columns", []), *text]))
         return config
+
+    def _declared_text(self, config: Mapping[str, Any]) -> list[str]:
+        """Source names of the columns declared ``dtype: str`` in a CSV file source.
+
+        A type sniffed from a sample would turn codes such as ``007`` into numbers
+        and drop their leading zeros before any check could see them.
+        """
+        if config.get("type") != "file" or self.schema_spec is None:
+            return []
+        from qavf.sources.formats import infer_format
+
+        try:
+            fmt = config.get("format") or infer_format(str(config.get("path", "")))
+        except ValueError:
+            return []  # the source's own validation reports an unknown format
+        if fmt != "csv":
+            return []
+        original = {new: old for old, new in self.rename.items()}
+        return [
+            original.get(column, column)
+            for column, spec in self.schema_spec.columns.items()
+            if spec.dtype == "str"
+        ]
 
     def effective_load_policy(self) -> SourcePolicy:
         """Combine legacy source policy with explicit dataset-level safeguards."""

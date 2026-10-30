@@ -74,9 +74,9 @@ def test_blank_text_can_be_missing() -> None:
     assert _checks(report)["t.s: not null"].affected_count == 3
 
 
-def test_blank_as_missing_needs_text() -> None:
-    with pytest.raises(ValidationError, match="blank_as_missing"):
-        ColumnSpec(dtype="int", blank_as_missing=True)
+def test_blank_as_missing_applies_while_any_type_is_read_as_text() -> None:
+    # Blank cells can leave a number column as text; they are missing, not invalid.
+    assert ColumnSpec(dtype="int", blank_as_missing=True).blank_as_missing
 
 
 # ------------------------------------------------------------------ decimal places

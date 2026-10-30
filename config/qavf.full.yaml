@@ -39,6 +39,8 @@ datasets:
           dtype: float
           nullable: true              # nulls allowed ...
           max_null_fraction: 0.02     # ... but at most 2 %
+          missing_values: ['N/A']     # placeholders that mean missing; text ones also
+                                      # apply when a stray value leaves the column as text
           ge: 0                       # inline limits: graded at INP-003's severity
           notin: [-999, -9999]        # sentinel values
           checks:                     # extra checks, each with its own severity
@@ -51,6 +53,7 @@ datasets:
         status:
           dtype: str
           isin: [valid, suspect, invalid]
+          ignore_case: true           # Valid and valid are the same (isin, notin, unique)
         serial:
           dtype: int
           unique: true
@@ -114,6 +117,8 @@ datasets:
       path: data/calibrations.csv
       options: {delim: ';', header: true}
       columns: [station, calibrated_on, factor]
+      text_columns: [station]         # read as written (leading zeros kept); columns
+                                      # declared dtype: str are added automatically
     required: false                   # absent is fine; failing to load is a WARNING
 
   # Anything else: a Python function returning a DataFrame.

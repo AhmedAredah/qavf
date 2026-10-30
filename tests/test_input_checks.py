@@ -71,19 +71,33 @@ def test_schema_conformance(small, registry) -> None:
     child = (
         small["child"]
         .drop("year")
-        .with_columns(pl.col("value").cast(pl.String), pl.lit(1).alias("surprise"))
+        .with_columns(
+            pl.col("value").cast(pl.String).replace("20.0", "n/a"),
+            pl.col("id").cast(pl.Boolean),
+            pl.lit(1).alias("surprise"),
+        )
     )
     datasets = {
         **SCHEMAS,
         "child": {"schema": {**SCHEMAS["child"]["schema"], "strict": True, "min_rows": 10}},
     }
-    result = run_rule("INP-002", {**small, "child": child}, datasets=datasets, registry=registry)
-    assert result.status is Status.FAIL and result.check == "child"
-    problems = {(r["column"], r["problem"]) for r in result.affected_records}
+    frames = {**small, "child": child}
+    results = {
+        r.check: r
+        for r in rule_results("INP-002", frames, datasets=datasets, registry=registry)
+        if r.status is Status.FAIL
+    }
+    problems = {(r["column"], r["problem"]) for r in results["child"].affected_records}
     assert ("year", "missing required column") in problems
     assert ("surprise", "undeclared column") in problems
-    assert ("value", "expected float, found String") in problems
+    assert ("id", "expected int, found Boolean") in problems
     assert (None, "4 rows, expected at least 10") in problems
+    # Text holding the declared type is checked cell by cell; only "n/a" is not a float.
+    text = results["child.value: dtype float"]
+    assert text.affected_count == 1
+    assert text.affected_records == [
+        {"id": True, "value": "n/a", "_row": 2, "violates": "not a float"}
+    ]
 
 
 def test_logical_types_including_dates() -> None:
@@ -247,7 +261,8 @@ def test_aggregate_limits_and_uniqueness() -> None:
     }
     assert set(failed) == {"t.x: max too high", "t.x: sum too low", "t.x: unique"}
     assert "max 3 outside [, 2.5]" in failed["t.x: max too high"].message
-    assert "2 values are not unique" in failed["t.x: unique"].message
+    assert failed["t.x: unique"].affected_count == 2
+    assert [r["_row"] for r in failed["t.x: unique"].affected_records] == [2, 3]
     # A statistic that needs numbers, on text, cannot be assessed: not a data violation.
     results = {r.check: r for r in rule_results("INP-003", {"t": frame}, datasets=datasets)}
     assert results["t.s: bad"].status is Status.ERROR

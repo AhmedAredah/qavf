@@ -93,14 +93,20 @@ def missing_sql(column: str, dtype: pl.DataType, spec: Any = None) -> str:
     Raw column validation can reuse this predicate while retaining original
     NaN/sentinel representations for explicit forbidden-value checks/evidence.
     """
-    from qavf.value_policy import is_temporal, is_text, members, temporal_ticks
+    from qavf.value_policy import (
+        is_temporal,
+        is_text,
+        members,
+        missing_markers,
+        temporal_ticks,
+    )
 
     quoted = quote_identifier(column)
     conditions = [f"{quoted} IS NULL"]
     if dtype.is_float():
         conditions.append(f"isnan({quoted})")
     if spec is not None:
-        values, foreign = members(spec.missing_values, dtype)
+        values, foreign = members(missing_markers(spec, dtype), dtype)
         if foreign:
             raise ValueError(f"missing markers for {column!r} have incompatible types")
         if is_temporal(dtype):

@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Stray values no longer hide a column's limits.** When a column declared `int`,
+  `float`, `decimal`, `bool`, `date` or `datetime` is read as text because of a few
+  cells, INP-002 reports exactly those cells with their rows and values, and INP-003
+  checks every limit on the remaining values instead of reporting them not assessed.
+  Text `missing_values` such as `N/A` now also work on these columns, and
+  `blank_as_missing` is accepted with any `dtype`.
+- **`text_columns`** for CSV file sources reads the named columns as written, so codes
+  and identifiers that look numeric keep their leading zeros. Columns declared
+  `dtype: str` are added automatically. `qavf init` drafts integer columns written
+  with leading zeros (`007`) as text.
+- **`ignore_case`** compares text case-insensitively in `isin`, `notin` and `unique`.
+
+### Changed
+
+- INP-004 duplicate-key evidence lists the first row positions of each key (`rows`).
+- A column's `unique` limit reports the rows holding repeated values, like other row
+  limits, instead of only stating that values repeat.
+
 ## [0.5.0] - 2026-10-23
 
 ### Added

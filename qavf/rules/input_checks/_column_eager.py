@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import polars as pl
@@ -10,6 +11,7 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
 from qavf.redaction import exception_details, redact_text
+from qavf.rules._declared_types import convert, typed_spec
 from qavf.rules._predicates import (
     compatibility_error,
     is_nan,
@@ -22,8 +24,10 @@ from qavf.rules.helpers import (
 from qavf.settings import (
     ROW_CONSTRAINTS,
     ColumnCheck,
+    ColumnSpec,
     SchemaSpec,
 )
+from qavf.value_policy import is_text
 
 from . import _column_values as values
 
@@ -35,7 +39,14 @@ def evaluate_eager(
     dataset: str,
     schema: SchemaSpec,
     frame: pl.DataFrame | None = None,
+    invalid: Mapping[str, pl.Series] | None = None,
 ) -> tuple[list[Finding], list[str]]:
+    """Assess ``schema`` on ``frame`` (by default the whole dataset).
+
+    ``invalid`` marks, per column, cells that are null in ``frame`` because they
+    were not values of the declared type. INP-002 reports them, so they are
+    neither missing values nor values to check here.
+    """
     frame = ctx.get(dataset) if frame is None else frame
     rows = frame.height
     failures: list[Finding] = []
@@ -109,6 +120,10 @@ def evaluate_eager(
         missing = series.null_count()
         nans = int(frame[column].is_nan().sum()) if is_float else 0
         missing_mask = series.is_null()  # null, NaN, configured sentinels and blanks
+        excluded = invalid.get(column) if invalid else None
+        if excluded is not None:
+            missing_mask = missing_mask & ~excluded
+            missing = int(missing_mask.sum())
 
         if not spec.nullable:
             if missing:
@@ -187,7 +202,8 @@ def evaluate_eager(
                         pl.sql_expr(check.where).fill_null(False).alias("m")
                     )["m"]
                     scope = series.filter(applicable)
-                    scope_missing, scope_rows = scope.null_count(), scope.len()
+                    scope_missing = int(missing_mask.filter(applicable).sum())
+                    scope_rows = scope.len()
                 except Exception as exc:
                     unusable.append(f"where condition failed: {type(exc).__name__}: {exc}")
                 else:
@@ -205,10 +221,6 @@ def evaluate_eager(
                             f"missing fraction {fraction:.4g} (null or NaN) exceeds "
                             f"{check.max_null_fraction:g}"
                         )
-                if check.unique:
-                    duplicated = scope.drop_nulls().is_duplicated().sum()
-                    if duplicated:
-                        problems.append(f"{duplicated} values are not unique")
                 for statistic in (
                     "min",
                     "max",
@@ -252,11 +264,18 @@ def evaluate_eager(
                     if error:
                         unusable.append(error)
                         continue
-                    row_label, test = row_tests({name: raw}, series.dtype)[name]
+                    row_label, test = row_tests(
+                        {name: raw}, series.dtype, ignore_case=check.ignore_case
+                    )[name]
                     bad = pl.col(column).is_not_null() & ~test(column).fill_null(True)
                     predicates.append((row_label, bad))
                 except Exception as exc:
                     unusable.append(f"{name}: {type(exc).__name__}: {exc}")
+            if check.unique:
+                try:
+                    predicates.append(("unique", _duplicated(column, series.dtype, check)))
+                except Exception as exc:
+                    unusable.append(f"unique: {type(exc).__name__}: {exc}")
             if unusable:
                 found = f" Violations found meanwhile: {'; '.join(problems)}." if problems else ""
                 blocked(
@@ -309,6 +328,64 @@ def evaluate_eager(
             else:
                 passed.append(f"{dataset}.{column}: {label}")
     return failures, passed
+
+
+def evaluate_converted(
+    ctx: DataContext, dataset: str, schema: SchemaSpec, columns: list[str]
+) -> tuple[list[Finding], list[str]]:
+    """Assess text ``columns`` on the values of their declared types.
+
+    Cells that are not values of the declared type are INP-002 failures; every
+    limit here is assessed on the remaining values. The projection holds these
+    columns, their check dependencies and the primary key for evidence.
+    """
+    actual = ctx.schema(dataset)
+    needed = [*(schema.primary_key or [])]
+    for column in columns:
+        spec = schema.columns[column]
+        needed.append(column)
+        if spec.unit_column:
+            needed.append(spec.unit_column)
+        for check in spec.all_checks():
+            if check.where:
+                needed.extend(pl.sql_expr(check.where).meta.root_names())
+    frame = ctx.project(dataset, [name for name in actual if name in set(needed)])
+    contract: dict[str, ColumnSpec] = {}
+    invalid: dict[str, pl.Series] = {}
+    for name in frame.columns:
+        if name in columns:
+            converted = convert(frame[name], schema.columns[name])
+            frame = frame.with_columns(converted.values)
+            invalid[name] = converted.invalid
+            contract[name] = typed_spec(schema.columns[name])
+        elif name in schema.columns:
+            # Dependencies keep their missing-value policy and carry no limits.
+            dependency = schema.columns[name]
+            contract[name] = ColumnSpec(
+                nullable=True,
+                allow_infinite=True,
+                missing_values=dependency.missing_values,
+                blank_as_missing=dependency.blank_as_missing,
+            )
+    return evaluate_eager(
+        ctx, dataset, schema.model_copy(update={"columns": contract}), frame, invalid
+    )
+
+
+def _duplicated(column: str, dtype: pl.DataType, check: ColumnCheck) -> pl.Expr:
+    """Rows whose value occurs more than once; missing values are never duplicates.
+
+    Callers restrict the result to the check's ``where`` rows, so only values in
+    scope are compared with each other.
+    """
+    value = pl.col(column)
+    if check.ignore_case:
+        if not is_text(dtype):
+            raise ValueError(f"ignore_case applies to text columns, not {dtype}")
+        value = value.cast(pl.String).str.to_lowercase()
+    if check.where is not None:
+        value = pl.when(pl.sql_expr(check.where).fill_null(False)).then(value)
+    return value.is_not_null() & value.is_duplicated()
 
 
 def _units(

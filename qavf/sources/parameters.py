@@ -31,6 +31,11 @@ class FileParams(SourceParams):
     CSV or ``{sheet: Counts}`` for Excel."""
     columns: list[str] | None = Field(default=None, min_length=1)
     """Only load these columns (the report discloses the projection)."""
+    text_columns: list[NonBlank] = Field(default_factory=list)
+    """CSV columns to read as text, exactly as written: codes and identifiers that
+    look numeric keep their leading zeros and width. Names match the header
+    case-insensitively; names the file lacks are ignored. A dataset's columns
+    declared ``dtype: str`` are added automatically."""
     min_files: int | None = Field(default=None, ge=1)
     """With a local glob: fewer matching files than this fails the load (a glob alone
     only proves that some files matched)."""
@@ -89,8 +94,9 @@ class FileParams(SourceParams):
     @model_validator(mode="after")
     def _known_format(self) -> FileParams:
         # An unknown suffix is a configuration error, reported before any loading.
-        if self.format is None:
-            infer_format(self.path)
+        inferred = infer_format(self.path) if self.format is None else self.format
+        if self.text_columns and inferred != "csv":
+            raise ValueError(f"'text_columns' applies to CSV files, not {inferred}")
         if self.min_files is not None and (
             is_remote(self.path) or not GLOB_PATTERN.search(self.path)
         ):

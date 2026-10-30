@@ -89,7 +89,7 @@ def test_snapshot_fallback_still_observes_volatile_source_once(unsupported, monk
             assert len(found) == 65
             assert all(f.affected_count == 2 for f in found)
         elif unsupported == "global":
-            assert len(found) == 2 and "not unique" in found[1].message
+            assert len(found) == 2 and "violate 'unique'" in found[1].message
 
 
 @pytest.mark.parametrize("size", [0, 4])

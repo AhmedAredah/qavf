@@ -179,7 +179,7 @@ def test_uppercase_private_frequency_name_cannot_hide_duplicate_primary_keys(tmp
     assert calls == [1]
     assert len(results) == 1 and results[0].status is Status.FAIL
     assert (results[0].affected_count, results[0].affected_rows) == (1, 3)
-    assert results[0].affected_records == [{column: 0, "occurrences": 3}]
+    assert results[0].affected_records == [{column: 0, "occurrences": 3, "rows": [0, 1, 2]}]
 
 
 @pytest.mark.parametrize("backend", ["lazy", "native"])

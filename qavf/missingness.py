@@ -7,7 +7,7 @@ from typing import Any
 
 import polars as pl
 
-from qavf.value_policy import is_text, members, membership
+from qavf.value_policy import is_text, members, membership, missing_markers
 
 
 def missing_expr(frame: pl.DataFrame, column: str, spec: Any = None) -> pl.Expr:
@@ -17,7 +17,8 @@ def missing_expr(frame: pl.DataFrame, column: str, spec: Any = None) -> pl.Expr:
         expr = expr | pl.col(column).is_nan()
     if spec is not None:
         if spec.missing_values:
-            values, foreign = members(spec.missing_values, frame.schema[column])
+            dtype = frame.schema[column]
+            values, foreign = members(missing_markers(spec, dtype), dtype)
             if foreign:
                 raise ValueError(f"missing markers for {column!r} have incompatible types")
             if values:

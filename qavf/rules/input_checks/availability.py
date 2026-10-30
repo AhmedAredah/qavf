@@ -10,6 +10,7 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
+from qavf.rules._declared_types import convert, converts_text, described
 from qavf.rules._predicates import (
     is_temporal,
 )
@@ -18,11 +19,14 @@ from qavf.rules.helpers import (
     plural,
 )
 from qavf.settings import (
+    ColumnSpec,
     DType,
     QAVFSettings,
+    SchemaSpec,
 )
 from qavf.sources.base import SourceNotFoundError
 
+from . import _column_values as values
 from ._datasets import (
     CATEGORY,
     DatasetSelection,
@@ -122,14 +126,18 @@ class SchemaConformanceRule(_SelectsDatasets):
     default_severity: ClassVar[Severity] = Severity.CRITICAL
     recommendation: ClassVar[str] = (
         "Fix the step that produced the dataset so column names and types match the schema, "
-        "or update the schema if the layout changed intentionally. A numeric column read as "
-        "text usually contains a stray non-numeric value."
+        "or update the schema if the layout changed intentionally. A column read as text "
+        "when another type is declared usually holds a few stray values: the listed rows "
+        "show them. Declare placeholders such as 'N/A' in the column's missing_values. A "
+        "code declared str but read as a number has lost its leading zeros: read it as "
+        "text at the source ('text_columns' for CSV files)."
     )
     Params: ClassVar[type[RuleParams]] = DatasetSelection
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         schemas, blocked = _schemas(ctx, self.params.datasets, "schema check")
         failures: list[Finding] = list(blocked)
+        failing: set[str] = {dataset for finding in blocked for dataset in finding.datasets}
         for dataset, schema in schemas.items():
             try:
                 actual_schema = ctx.schema(dataset)
@@ -150,10 +158,17 @@ class SchemaConformanceRule(_SelectsDatasets):
                         problems.append({"column": column, "problem": "missing required column"})
                     continue
                 actual = actual_schema[column]
-                if spec.dtype is not None and not _matches(actual, spec.dtype):
-                    problems.append(
-                        {"column": column, "problem": f"expected {spec.dtype}, found {actual}"}
-                    )
+                if spec.dtype is None or _matches(actual, spec.dtype):
+                    continue
+                if converts_text(spec, actual):
+                    finding = _invalid_values(ctx, dataset, schema, actual_schema, column, spec)
+                    if finding is not None:
+                        failures.append(finding)
+                        failing.add(dataset)
+                    continue
+                problems.append(
+                    {"column": column, "problem": f"expected {spec.dtype}, found {actual}"}
+                )
             if schema.strict:
                 for column in actual_schema:
                     if column not in schema.columns:
@@ -173,6 +188,7 @@ class SchemaConformanceRule(_SelectsDatasets):
                     }
                 )
             if problems:
+                failing.add(dataset)
                 failures.append(
                     Finding.fail(
                         f"{plural(len(problems), 'schema violation')} in {dataset}.",
@@ -182,7 +198,7 @@ class SchemaConformanceRule(_SelectsDatasets):
                         datasets=(dataset,),
                     )
                 )
-        failing = {finding.check for finding in failures}
+        failing.update(finding.check for finding in failures if finding.check)
         passed = [dataset for dataset in schemas if dataset not in failing]
         return outcome(
             failures,
@@ -190,3 +206,45 @@ class SchemaConformanceRule(_SelectsDatasets):
             f"{plural(len(passed), 'dataset')} conform to their schemas.",
             "No available dataset has a schema configured.",
         )
+
+
+def _invalid_values(
+    ctx: DataContext,
+    dataset: str,
+    schema: SchemaSpec,
+    actual_schema: dict[str, pl.DataType],
+    column: str,
+    spec: ColumnSpec,
+) -> Finding | None:
+    """The cells of a text column that are neither missing nor of its declared type.
+
+    A column whose every value is of the declared type conforms: it is text only
+    because of declared missing markers, and INP-003 checks the converted values.
+    """
+    assert spec.dtype is not None
+    check = f"{dataset}.{column}: dtype {spec.dtype}"
+    actual = actual_schema[column]
+    context = [c for c in schema.primary_key or [] if c != column and c in actual_schema]
+    try:
+        frame = ctx.project(dataset, [*context, column])
+        invalid = convert(frame[column], spec).invalid
+        count = int(invalid.sum())
+    except Exception as exc:
+        return Finding.unassessed(
+            f"Not assessed: {check}: {type(exc).__name__}: {exc}.",
+            check=check,
+            datasets=(dataset,),
+        )
+    if not count:
+        return None
+    kind = described(spec.dtype)
+    return Finding.fail(
+        f"{plural(count, 'value')} of {frame.height:,} in {dataset}.{column} "
+        f"{'is' if count == 1 else 'are'} not {kind}, so the column was read as {actual}.",
+        check=check,
+        affected=values._rows(frame, invalid, f"not {kind}", ctx.evidence_limit),
+        affected_count=count,
+        total_records=frame.height,
+        unit="rows",
+        datasets=(dataset,),
+    )

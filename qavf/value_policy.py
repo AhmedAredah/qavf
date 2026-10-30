@@ -168,13 +168,39 @@ def members(values: Sequence[Any], dtype: pl.DataType) -> tuple[list[Any], list[
     return usable, foreign
 
 
-def membership(values: list[Any], dtype: pl.DataType, negate: bool = False) -> RowTest:
+def missing_markers(spec: Any, dtype: pl.DataType) -> list[Any]:
+    """The ``missing_values`` of ``spec`` that a ``dtype`` column can hold.
+
+    Text markers on a column declared with another type (``N/A`` in a number
+    column) stand for placeholders while the column is read as text. Once the
+    column holds that type, they cannot occur and are not compared.
+    """
+    values = list(spec.missing_values)
+    if getattr(spec, "dtype", None) not in (None, "str") and not is_text(dtype):
+        values = [value for value in values if not isinstance(value, str)]
+    return values
+
+
+def membership(
+    values: list[Any], dtype: pl.DataType, negate: bool = False, *, ignore_case: bool = False
+) -> RowTest:
     """Exact, typed membership. Values are already converted to ``dtype``
     (:func:`members`), so no comparison mixes types, which Polars 2 rejects and
-    which could otherwise round large integers."""
+    which could otherwise round large integers. ``ignore_case`` compares text in
+    lower case."""
+    folded = ignore_case and is_text(dtype)
+    if folded and values:
+        values = (
+            pl.Series(values, dtype=pl.String)
+            .str.to_lowercase()
+            .unique(maintain_order=True)
+            .to_list()
+        )
 
     def test(column: str) -> pl.Expr:
         expr = _text(column) if is_text(dtype) else pl.col(column)
+        if folded:
+            expr = expr.str.to_lowercase()
         if not values:
             inside = pl.lit(False)
         elif is_temporal(dtype):

@@ -63,6 +63,8 @@ class FileSource(DataSource[FileParams]):
 
     kind: ClassVar[str] = "file"
     Params: ClassVar[type[SourceParams]] = FileParams
+    _header: list[str]
+    """CSV column names, read once when ``text_columns`` are typed."""
 
     @property
     def _identity_session(self) -> IdentitySession:
@@ -327,6 +329,8 @@ class FileSource(DataSource[FileParams]):
         trim_excel = fmt == "excel" and not ({"stop_at_empty", "range"} & set(options))
         if trim_excel:
             options["stop_at_empty"] = False
+        if fmt == "csv" and params.text_columns:
+            self._read_as_text(location, options, notes)
         if params.options:
             notes["reader_options"] = redact(dict(params.options))
         if options != params.options:
@@ -357,6 +361,59 @@ class FileSource(DataSource[FileParams]):
             sql = f"SELECT {select} FROM {READERS[fmt]}($path{args})"
             plan = ScanPlan(sql, {"path": location})
         return plan, notes, count_rejects, trim_excel
+
+    def _read_as_text(
+        self, location: str | list[str], options: dict[str, Any], notes: dict[str, Any]
+    ) -> None:
+        """Type ``text_columns`` as VARCHAR in ``options`` unless the reader is told
+        the types another way (``all_varchar``, explicit ``columns``, positional
+        ``types``). Explicit per-column types take precedence."""
+        key = next((k for k in ("types", "dtypes", "column_types") if k in options), "types")
+        given = options.get(key) or {}
+        if options.get("all_varchar") is True or "columns" in options or not isinstance(
+            given, dict
+        ):
+            return
+        wanted = {name.casefold() for name in self.params.text_columns}
+        taken = {str(name).casefold() for name in given}
+        matched = [
+            name
+            for name in self._csv_header(location, options)
+            if name.casefold() in wanted and name.casefold() not in taken
+        ]
+        if matched:
+            options[key] = {**dict.fromkeys(matched, "VARCHAR"), **given}
+            notes["text_columns"] = matched
+
+    def _csv_header(self, location: str | list[str], options: dict[str, Any]) -> list[str]:
+        """Column names under the reader options, read once without any rows.
+
+        DuckDB rejects types for absent columns, so only present names are typed.
+        A header that cannot be read leaves the types alone: the read itself then
+        reports the problem.
+        """
+        with self._state_lock:
+            if hasattr(self, "_header"):
+                return list(self._header)
+        rejects = {"ignore_errors", "store_rejects", "rejects_table", "rejects_scan"}
+        args = "".join(
+            f", {quote_identifier(key)} = {sql_literal(value)}"
+            for key, value in options.items()
+            if key not in rejects and key != "rejects_limit"
+        )
+        try:
+            con = connect(self.env)
+            try:
+                probe = f"SELECT * FROM {READERS['csv']}($path{args}) LIMIT 0"
+                con.execute(probe, {"path": location})
+                header = [str(column[0]) for column in con.description or ()]
+            finally:
+                con.close()
+        except duckdb.Error:
+            header = []
+        with self._state_lock:
+            self._header = header
+        return list(header)
 
     def scan(self) -> ScanPlan | None:
         self.verify_identity()

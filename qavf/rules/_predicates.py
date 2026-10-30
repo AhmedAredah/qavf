@@ -88,12 +88,17 @@ def _temporal_compare(operator: str, value: Any, dtype: pl.DataType) -> RowTest:
     return test
 
 
-def row_tests(constraints: Mapping[str, Any], dtype: pl.DataType) -> dict[str, tuple[str, RowTest]]:
+def row_tests(
+    constraints: Mapping[str, Any], dtype: pl.DataType, *, ignore_case: bool = False
+) -> dict[str, tuple[str, RowTest]]:
     """Polars predicates (``True`` = valid) for the row-level limits in ``constraints``.
 
     NaN values in ``isin``/``notin`` lists are ignored here: NaN counts as
     missing, and an explicitly forbidden NaN is enforced by the caller.
+    ``ignore_case`` compares text case-insensitively in ``isin``/``notin``.
     """
+    if ignore_case and not is_text(dtype):
+        raise ValueError(f"ignore_case applies to text columns, not {dtype}")
     tests: dict[str, tuple[str, RowTest]] = {}
     for name, raw in constraints.items():
         label = f"{name} {format_value(raw)}"
@@ -125,7 +130,10 @@ def row_tests(constraints: Mapping[str, Any], dtype: pl.DataType) -> dict[str, t
                 tests[name] = (label, _compare(name, bound))
         elif name in ("isin", "notin"):
             values, _ = members(raw, dtype)
-            tests[name] = (label, membership(values, dtype, negate=name == "notin"))
+            tests[name] = (
+                label,
+                membership(values, dtype, negate=name == "notin", ignore_case=ignore_case),
+            )
         elif name == "regex":
             tests[name] = (f"regex {raw}", _full_match(raw))
         elif name in ("min_length", "max_length"):

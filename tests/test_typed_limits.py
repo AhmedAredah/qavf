@@ -159,8 +159,8 @@ def test_runtime_failure_of_a_column_statistic_is_isolated(registry, monkeypatch
 def test_runtime_failure_inside_row_validation_is_isolated(registry, monkeypatch) -> None:
     real = _column_eager.row_tests
 
-    def poisoned(constraints, dtype):
-        tests = real(constraints, dtype)
+    def poisoned(constraints, dtype, **options):
+        tests = real(constraints, dtype, **options)
         if "le" in tests:
             label, _ = tests["le"]
 

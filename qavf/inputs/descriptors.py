@@ -32,6 +32,7 @@ class File:
     format: FileFormat | None = None
     options: Mapping[str, Any] | None = None
     columns: Sequence[str] | None = None
+    text_columns: Sequence[str] = ()
     min_files: int | None = None
     acknowledge_lossy: bool = False
 
@@ -47,6 +48,7 @@ class File:
                 "format": self.format,
                 "options": {} if self.options is None else self.options,
                 "columns": self.columns,
+                "text_columns": list(self.text_columns),
                 "min_files": self.min_files,
                 "acknowledge_lossy": self.acknowledge_lossy,
             }
@@ -55,6 +57,7 @@ class File:
         object.__setattr__(self, "format", params.format)
         object.__setattr__(self, "options", MappingProxyType(deepcopy(params.options)))
         object.__setattr__(self, "columns", tuple(params.columns) if params.columns else None)
+        object.__setattr__(self, "text_columns", tuple(params.text_columns))
         object.__setattr__(self, "min_files", params.min_files)
         object.__setattr__(self, "acknowledge_lossy", params.acknowledge_lossy)
 
@@ -66,6 +69,7 @@ class File:
                 "format": self.format,
                 "options": self.options,
                 "columns": self.columns,
+                "text_columns": list(self.text_columns),
                 "min_files": self.min_files,
                 "acknowledge_lossy": self.acknowledge_lossy,
             }

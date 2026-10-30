@@ -58,7 +58,7 @@ class ColumnPlan:
         """Only this contract, for projected fallback through the eager kernel."""
         raw = self.spec.model_dump()
         defaults = ColumnSpec().model_dump()
-        for name in (*ROW_CONSTRAINTS, *COLUMN_CONSTRAINTS):
+        for name in (*ROW_CONSTRAINTS, *COLUMN_CONSTRAINTS, "ignore_case"):
             raw[name] = defaults[name]
         raw.update(
             checks=[],
@@ -148,7 +148,8 @@ def _lazy_column_reduction(
             error = compatibility_error(name, raw, actual[column])
             if error:
                 raise ValueError(error)
-            row_label, test = row_tests({name: raw}, actual[column])[name]
+            tests = row_tests({name: raw}, actual[column], ignore_case=check.ignore_case)
+            row_label, test = tests[name]
             predicates.append(
                 (row_label, scope & pl.col(column).is_not_null() & ~test(column).fill_null(True))
             )
@@ -156,8 +157,11 @@ def _lazy_column_reduction(
             predicates.append(("notin NaN", scope & pl.col(saved[column]).is_nan()))
         if check.max_null_fraction is not None:
             reducers["missing"] = value.is_null().sum()
+        if check.ignore_case and not is_text(actual[column]):
+            raise ValueError(f"ignore_case applies to text columns, not {actual[column]}")
         if check.unique:
-            reducers["duplicates"] = value.drop_nulls().len() - value.drop_nulls().n_unique()
+            distinct = value.cast(pl.String).str.to_lowercase() if check.ignore_case else value
+            reducers["duplicates"] = distinct.drop_nulls().len() - distinct.drop_nulls().n_unique()
         for name in COLUMN_CONSTRAINTS:
             if name not in constraints or name in ("unique", "max_null_fraction"):
                 continue
@@ -220,7 +224,7 @@ def _lazy_column_reduction(
             .implode()
         )
 
-    def finish(summary: dict[str, Any]) -> Finding | None:
+    def finish(summary: dict[str, Any]) -> Finding | NotImplementedType | None:
         applicable = int(summary["applicable"] or 0)
         if check and applicable < check.min_applicable_rows:
             raise ValueError(
@@ -245,7 +249,8 @@ def _lazy_column_reduction(
                     f"missing fraction {fraction:.4g} exceeds {check.max_null_fraction:g}"
                 )
         if summary.get("duplicates", 0):
-            problems.append("values are not unique")
+            # Duplicates are rare and need their rows: the exact kernel lists them.
+            return NotImplemented
         count = int(summary["bad"] or 0)
         if not count and not problems:
             return None
@@ -340,6 +345,8 @@ def _native_column_reduction(
         return NotImplemented
     if check is not None and check.regex is not None and not sql_compatible(check.regex):
         return NotImplemented
+    if check is not None and check.ignore_case:
+        return NotImplemented  # SQL folds case differently from the reference kernel
     statistics = {
         k: v
         for k, v in constraints.items()
@@ -461,7 +468,7 @@ def _native_column_reduction(
         if name == "mean":
             reducers["mean_n"] = f"count({value}) FILTER (WHERE {scope})"
 
-    def finish(summary: dict[str, Any]) -> Finding | None:
+    def finish(summary: dict[str, Any]) -> Finding | NotImplementedType | None:
         applicable = int(summary["applicable"])
         if check and applicable < check.min_applicable_rows:
             raise ValueError(
@@ -484,7 +491,8 @@ def _native_column_reduction(
                     f"missing fraction {fraction:.4g} exceeds {check.max_null_fraction:g}"
                 )
         if summary.get("duplicates", 0):
-            problems.append("values are not unique")
+            # Duplicates are rare and need their rows: the exact kernel lists them.
+            return NotImplemented
         count = int(summary["bad"])
         if not count and not problems:
             return None

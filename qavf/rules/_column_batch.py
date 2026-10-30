@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from types import NotImplementedType
 from typing import Any
 
 import duckdb
@@ -151,7 +152,7 @@ class ColumnInputs:
 class ColumnReduction[T]:
     dependencies: tuple[str, ...]
     reducers: dict[str, T]
-    finish: Callable[[dict[str, Any]], Finding | None]
+    finish: Callable[[dict[str, Any]], Finding | NotImplementedType | None]
     independent: bool = False
 
 

@@ -164,7 +164,7 @@ Each dataset has its required columns with the declared types, no undeclared col
 |---|---|---|---|
 | `datasets` | `tuple[str, ...] \| None` | `None` | Datasets to examine; every configured dataset when omitted. |
 
-*When it fails:* Fix the step that produced the dataset so column names and types match the schema, or update the schema if the layout changed intentionally. A numeric column read as text usually contains a stray non-numeric value.
+*When it fails:* Fix the step that produced the dataset so column names and types match the schema, or update the schema if the layout changed intentionally. A column read as text when another type is declared usually holds a few stray values: the listed rows show them. Declare placeholders such as 'N/A' in the column's missing_values. A code declared str but read as a number has lost its leading zeros: read it as text at the source ('text_columns' for CSV files).
 
 ### INP-003
 

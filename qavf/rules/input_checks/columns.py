@@ -12,6 +12,7 @@ from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
 from qavf.rules._column_plan import coherent_column_checks, column_checks, column_plans
+from qavf.rules._declared_types import converts_text
 from qavf.rules._execution import (
     projected_frame,
 )
@@ -25,7 +26,7 @@ from qavf.settings import (
 )
 
 from . import _column_values as values
-from ._column_eager import evaluate_eager
+from ._column_eager import evaluate_converted, evaluate_eager
 from ._column_simple import evaluate_simple
 from ._datasets import (
     CATEGORY,
@@ -80,6 +81,41 @@ class ColumnCheckRule(_SelectsDatasets):
         )
 
     def _dataset(
+        self, ctx: DataContext, dataset: str, schema: SchemaSpec
+    ) -> tuple[list[Finding], list[str]]:
+        actual = ctx.schema(dataset)
+        text = [
+            column
+            for column, spec in schema.columns.items()
+            if column in actual and converts_text(spec, actual[column])
+        ]
+        if not text:
+            return self._typed_dataset(ctx, dataset, schema)
+        # A declared type read as text: check the limits on its values, and keep
+        # every other column on its usual execution path.
+        rest = {c: spec for c, spec in schema.columns.items() if c not in text}
+        failures, passed = (
+            self._typed_dataset(ctx, dataset, schema.model_copy(update={"columns": rest}))
+            if rest
+            else ([], [])
+        )
+        try:
+            found, good = evaluate_converted(ctx, dataset, schema, text)
+        except Exception as exc:
+            found, good = (
+                [
+                    Finding.unassessed(
+                        f"Not assessed: {dataset}.{column}: {type(exc).__name__}: {exc}.",
+                        check=f"{dataset}.{column}",
+                        datasets=(dataset,),
+                    )
+                    for column in text
+                ],
+                [],
+            )
+        return failures + found, passed + good
+
+    def _typed_dataset(
         self, ctx: DataContext, dataset: str, schema: SchemaSpec
     ) -> tuple[list[Finding], list[str]]:
         kind = ctx.execution_kind(dataset)
