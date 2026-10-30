@@ -10,6 +10,7 @@ from pydantic import Field, StringConstraints, field_validator, model_validator
 
 from qavf.sources.base import SourceParams
 from qavf.sources.formats import GLOB_PATTERN, FileFormat, infer_format, is_remote, lossy_options
+from qavf.text_types import TextType
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 """A string that must contain something other than whitespace."""
@@ -39,6 +40,10 @@ class FileParams(SourceParams):
     min_files: int | None = Field(default=None, ge=1)
     """With a local glob: fewer matching files than this fails the load (a glob alone
     only proves that some files matched)."""
+    declared_columns: dict[str, TextType] = Field(default_factory=dict)
+    """CSV columns read as text and converted to their declared type in the same scan,
+    so the reader's sample never decides their type; a value that is not of the type
+    is missing, and INP-002 lists it. Filled from the dataset's schema."""
     max_rejected_rows: int = Field(default=0, ge=0)
     """With ``store_rejects`` or ``ignore_errors``: more lines left out than this fails
     INP-002, which lists the first of them by file and line."""
@@ -100,6 +105,8 @@ class FileParams(SourceParams):
         inferred = infer_format(self.path) if self.format is None else self.format
         if self.text_columns and inferred != "csv":
             raise ValueError(f"'text_columns' applies to CSV files, not {inferred}")
+        if self.declared_columns and inferred != "csv":
+            raise ValueError(f"'declared_columns' applies to CSV files, not {inferred}")
         if self.min_files is not None and (
             is_remote(self.path) or not GLOB_PATTERN.search(self.path)
         ):

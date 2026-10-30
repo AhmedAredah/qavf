@@ -30,7 +30,7 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from collections import Counter
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from importlib.metadata import entry_points
@@ -85,6 +85,18 @@ class RejectedRows:
 
     count: int
     exact: bool
+    sample: tuple[dict[str, Any], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class TypeViolations:
+    """Values of one column that are not of its declared type.
+
+    ``sample`` holds the first few as ``_row`` (0-based position), ``value`` (the
+    text as read) and any requested context columns.
+    """
+
+    count: int
     sample: tuple[dict[str, Any], ...] = ()
 
 
@@ -306,6 +318,11 @@ class DataSource[P: SourceParams](ABC):
     def rejected_rows(self) -> RejectedRows | None:
         """Rows the reader left out under lossy reader options, after a load."""
         return None
+
+    def type_violations(self, context: Sequence[str] = ()) -> dict[str, TypeViolations]:
+        """Per source column, the values a typed read could not convert to the declared
+        type (they are missing in the data); ``context`` columns accompany the sample."""
+        return {}
 
     def header_problems(self) -> list[dict[str, Any]]:
         """Header names the reader had to change or could not split, as problems

@@ -14,6 +14,7 @@ from typing import Any
 import polars as pl
 
 from qavf.settings import ColumnSpec
+from qavf.text_types import polars_value
 from qavf.value_policy import is_text
 
 CONVERTIBLE = ("int", "float", "decimal", "bool", "date", "datetime")
@@ -63,6 +64,13 @@ def convert(series: pl.Series, spec: ColumnSpec) -> Converted:
         raise ValueError(f"values cannot be recognized as {spec.dtype} in text")
     text = series.cast(pl.String)
     frame = pl.DataFrame({"text": text})
+    typed = spec.text_type()
+    if typed is not None:
+        # The same definition a typed CSV read uses, so both agree on every value.
+        value, missing = polars_value(pl.col("text"), typed)
+        out = frame.select(value.alias("value"), missing.alias("missing"))
+        invalid = ~out["missing"] & out["value"].is_null()
+        return Converted(out["value"].alias(series.name), invalid.alias(series.name))
     missing = pl.col("text").is_null()
     markers = [value for value in spec.missing_values if isinstance(value, str)]
     if markers:

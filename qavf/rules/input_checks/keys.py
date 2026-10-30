@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import ClassVar
 
 import polars as pl
@@ -11,12 +10,10 @@ from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
-from qavf.engine.sql import missing_sql
-from qavf.redaction import exception_details, redact_text
 from qavf.rules._contracts import contract_error
+from qavf.rules._duplicate_rows import DuplicateRows
 from qavf.rules._execution import (
     key_relation,
-    normalized_plan,
     observed_keys,
 )
 from qavf.rules._key_summary import KeySelection
@@ -41,11 +38,6 @@ from ._datasets import (
     _schemas,
     _SelectsDatasets,
 )
-
-logger = logging.getLogger(__name__)
-
-ROWS_PER_KEY = 10
-"""Row positions listed for each duplicated key in the evidence."""
 
 
 class DuplicateKeyRule(_SelectsDatasets):
@@ -211,9 +203,9 @@ class DuplicateKeyRule(_SelectsDatasets):
                 clean = False
                 involved = dupes.rows
                 positions = fresh_internal("rows", [*relation.schema, frequency])
-                evidence = self._with_rows(
-                    ctx, dataset, columns, dupes.sample, positions, selected, observation
-                )
+                evidence = DuplicateRows.of(
+                    ctx, dataset, columns, positions, selected=selected, observation=observation
+                ).attach(dupes.sample)
                 failures.append(
                     Finding.fail(
                         f"{plural(dupes.keys, 'duplicated key')} of {valid_keys.keys:,} "
@@ -241,80 +233,6 @@ class DuplicateKeyRule(_SelectsDatasets):
                 failures.append(contract_error(label, exc, (dataset,)))
 
         return clean
-
-    @staticmethod
-    def _with_rows(
-        ctx: DataContext,
-        dataset: str,
-        columns: list[str],
-        sample: pl.DataFrame,
-        rows: str,
-        selected: pl.DataFrame | None,
-        observation: Observation | None,
-    ) -> pl.DataFrame:
-        """Add the first row positions of each sampled duplicated key.
-
-        Positions are 0-based, in the order the dataset was read, like ``_row`` in
-        other evidence. The lookup reads the keys again; if that fails, the
-        evidence keeps its counts without positions.
-        """
-        if sample.is_empty():
-            return sample
-        row = fresh_internal("row", [*sample.columns, rows])
-        try:
-            if observation is None and selected is None and (
-                ctx.execution_kind(dataset) == "native_sql"
-            ):
-                # The same keys, normalization, filter and order as the sample.
-                q = quote_identifier
-                actual = ctx.schema(dataset)
-                spec = ctx.specs.get(dataset)
-                contracts = spec.schema_spec.columns if spec and spec.schema_spec else {}
-                normalized = ", ".join(
-                    f"CASE WHEN {missing_sql(c, actual[c], contracts.get(c))} THEN NULL "
-                    f"ELSE {q(c)} END AS {q(c)}"
-                    for c in columns
-                )
-                keys = ", ".join(q(c) for c in columns)
-                found = ctx.sql(
-                    f"SELECT {keys}, min({q(row)}, {ROWS_PER_KEY}) AS {q(rows)} "
-                    f"FROM (SELECT {normalized}, row_number() OVER () - 1 AS {q(row)} "
-                    f"FROM {q(dataset)}) AS source "
-                    f"WHERE {' AND '.join(f'{q(c)} IS NOT NULL' for c in columns)} "
-                    f"GROUP BY {keys} HAVING count(*) > 1 "
-                    f"ORDER BY {', '.join(f'{q(c)} NULLS FIRST' for c in columns)} "
-                    f"LIMIT {sample.height}",
-                    datasets=(dataset,),
-                )
-            else:
-                wanted = sample.select(columns).lazy()
-
-                def build(source: pl.LazyFrame) -> pl.LazyFrame:
-                    return (
-                        normalized_plan(ctx, dataset, source.select(columns))
-                        .with_row_index(row)
-                        .join(wanted, on=columns, how="semi")
-                        .group_by(columns)
-                        .agg(pl.col(row).sort().head(ROWS_PER_KEY).alias(rows))
-                    )
-
-                if observation is not None:
-                    found = observation.collect(build(observation.scan()))
-                elif selected is not None:
-                    found = build(selected.lazy()).collect()
-                else:
-                    found = ctx.reduce(dataset, build)
-            return sample.join(
-                found, on=columns, how="left", nulls_equal=True, maintain_order="left"
-            )
-        except Exception as exc:
-            logger.warning(
-                "%s",
-                redact_text(
-                    f"Row positions of duplicated keys in {dataset}: {exception_details(exc)}"
-                ),
-            )
-            return sample
 
     @staticmethod
     def _absent(

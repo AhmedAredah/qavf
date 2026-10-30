@@ -13,6 +13,7 @@ import pytest
 
 from qavf import Dataset, File, validate
 from qavf.engine.severity import Status
+from qavf.sources.csv_probe import CsvProbe
 from qavf.sources.formats import infer_format
 
 
@@ -93,12 +94,13 @@ def _errors(source: object, schema: dict) -> set[str]:
 @pytest.mark.parametrize(
     ("last", "located", "advice"),
     [
-        ("1,x,n/a\n", "line 25,002, column 'v' (cast): '1,x,n/a'", "text_columns"),
+        ("1,x,n/a\n", "line 25,002, column 'v' (cast): '1,x,n/a'", "declare the column's dtype"),
         ("1,Smith, John,5\n", "line 25,002 (too many columns)", "quote values"),
     ],
 )
 def test_an_unreadable_line_is_located_with_advice(tmp_path, last, located, advice) -> None:
-    errors = _errors(_late(tmp_path, last), {"columns": {"v": {"dtype": "int", "ge": 0}}})
+    # Without a declared dtype, the reader types "v" from its first rows.
+    errors = _errors(_late(tmp_path, last), {"columns": {"v": {"ge": 0}}})
     assert errors and all("1 row of" in e and located in e and advice in e for e in errors)
     assert not any("Possible fixes" in e or e.endswith("..") for e in errors)
 
@@ -141,13 +143,12 @@ def test_an_unrecognized_header_row_is_explained(tmp_path) -> None:
     assert any("header row was not recognized" in p for p in problems)
 
 
+def _never_read(*_args: object) -> list[str | None]:
+    raise AssertionError("a clean header must not be re-read")
+
+
 def test_clean_headers_need_no_raw_header_read(tmp_path, monkeypatch) -> None:
-    from qavf.sources.file import FileSource
-
-    def unexpected(*_args):
-        raise AssertionError("a clean header must not be re-read")
-
-    monkeypatch.setattr(FileSource, "_raw_header", unexpected)
+    monkeypatch.setattr(CsvProbe, "raw_header", _never_read)
     path = tmp_path / "t.csv"
     path.write_text("id,v_1,column_a\n1,2,3\n")
     assert _failed(str(path), {"columns": {"id": {"dtype": "int"}}}, "INP-002") == []

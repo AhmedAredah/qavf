@@ -7,6 +7,7 @@ allowed values can ignore case.
 
 from __future__ import annotations
 
+import zipfile
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -41,21 +42,32 @@ def _csv(tmp_path: Path, text: str, name: str = "t.csv") -> str:
 # =========================================================================
 # A declared type read as text: INP-002 locates the cells, INP-003 the rest
 # =========================================================================
-def test_a_stray_cell_is_located_and_the_limits_still_apply(tmp_path) -> None:
+@pytest.mark.parametrize("kind", ["csv", "frame"])
+def test_a_stray_cell_is_located_and_the_limits_still_apply(tmp_path, kind) -> None:
     rows = "".join(f"{i},{i}\n" for i in range(5))
     path = _csv(tmp_path, f"id,n\n{rows}5,12x\n6,-5\n")
-    schema = {"primary_key": ["id"], "columns": {"n": {"dtype": "int", "ge": 0}}}
+    # A CSV converts in its typed read; a frame holding text converts in the checks.
+    source = path if kind == "csv" else pl.read_csv(path, schema_overrides={"n": pl.String})
+    schema = {"primary_key": ["id"], "columns": {"n": {"dtype": "int", "ge": 0, "nullable": True}}}
 
-    [schema_failure] = _failed(path, schema, "INP-002")
+    [schema_failure] = _failed(source, schema, "INP-002")
     assert schema_failure.check == "t.n: dtype int"
     assert schema_failure.affected_count == 1 and schema_failure.total_records == 7
-    assert schema_failure.affected_records == [
-        {"id": 5, "n": "12x", "_row": 5, "violates": "not an int"}
-    ]
+    [cell] = schema_failure.affected_records
+    assert (cell["_row"], cell["id"], cell["n"], cell["violates"]) == (5, 5, "12x", "not an int")
 
-    [bound] = _failed(path, schema, "INP-003")
+    [bound] = _failed(source, schema, "INP-003")
     assert bound.status is Status.FAIL and bound.affected_count == 1
     assert bound.affected_records[0]["_row"] == 6 and bound.affected_records[0]["n"] == -5
+
+
+def test_typed_csv_reads_never_round_or_reinterpret_values(tmp_path) -> None:
+    # Past its type sample, a reader that chose BIGINT turns 2.5 into 3 and 0x10 into 16.
+    rows = "".join(f"{i},{i}\n" for i in range(25_000))
+    path = _csv(tmp_path, f"id,n\n{rows}25000,2.5\n25001,0x10\n25002,1e3\n")
+    schema = {"columns": {"n": {"dtype": "int", "nullable": True}}}
+    [schema_failure] = _failed(path, schema, "INP-002")
+    assert [r["n"] for r in schema_failure.affected_records] == ["2.5", "0x10", "1e3"]
 
 
 def test_text_missing_markers_let_a_numeric_column_conform(tmp_path) -> None:
@@ -76,11 +88,12 @@ def test_text_markers_are_ignored_once_the_column_holds_its_type(tmp_path, kind)
     assert all(r.status is Status.PASS for r in results), [r.message for r in results]
 
 
-def test_invalid_cells_are_not_counted_as_missing(tmp_path) -> None:
+@pytest.mark.parametrize("kind", ["csv", "frame"])
+def test_invalid_values_are_missing_for_every_other_check(tmp_path, kind) -> None:
     path = _csv(tmp_path, "n\n1\nx\n3\n")
-    results = _results(path, {"columns": {"n": {"dtype": "int"}}}, "INP-003")
-    assert all(r.status is Status.PASS for r in results)
-    assert "t.n: not null" in results[0].metrics["passed_checks"]
+    source = path if kind == "csv" else pl.read_csv(path)
+    [missing] = _failed(source, {"columns": {"n": {"dtype": "int"}}}, "INP-003")
+    assert missing.check == "t.n: not null" and missing.affected_records[0]["_row"] == 1
 
 
 @pytest.mark.parametrize(
@@ -219,3 +232,95 @@ def test_normalize_needs_text_membership_limits() -> None:
         ColumnSpec(dtype="int", isin=[1], normalize=["case"])
     with pytest.raises(ValidationError, match="twice"):
         ColumnSpec(isin=["a"], normalize=["case", "case"])
+
+
+# =========================================================================
+# Formats, boolean words and whole-number floats
+# =========================================================================
+@pytest.mark.parametrize("kind", ["csv", "frame"])
+def test_formats_and_boolean_words_convert_the_same_on_both_paths(tmp_path, kind) -> None:
+    path = _csv(tmp_path, "day,ok\n01/05/2024,Y\n13/40/2024,maybe\n2/29/2024,n\n")
+    source = path if kind == "csv" else pl.read_csv(path, infer_schema=False)
+    schema = {
+        "columns": {
+            "day": {
+                "dtype": "date", "format": "%m/%d/%Y", "nullable": True, "ge": date(2024, 2, 1)
+            },
+            "ok": {"dtype": "bool", "true_values": ["Y"], "false_values": ["N"], "nullable": True},
+        }
+    }
+    failed = {r.check: r for r in _failed(source, schema, "INP-002")}
+    assert [r["day"] for r in failed["t.day: dtype date"].affected_records] == ["13/40/2024"]
+    assert [r["ok"] for r in failed["t.ok: dtype bool"].affected_records] == ["maybe"]
+    [bound] = _failed(source, schema, "INP-003")
+    assert bound.affected_records[0]["_row"] == 0  # 2024-01-05 is before the bound
+
+
+def test_whole_number_floats_satisfy_int() -> None:
+    frame = pl.DataFrame({"n": [5.0, 6.0, 2.5, float("nan"), None]})
+    schema = {"columns": {"n": {"dtype": "int", "nullable": True}}}
+    [non_integral] = _failed(frame, schema, "INP-002")
+    assert non_integral.affected_count == 1
+    assert non_integral.affected_records[0]["_row"] == 2
+
+
+def test_column_formats_are_validated() -> None:
+    with pytest.raises(ValidationError, match="goes with dtype date or datetime"):
+        ColumnSpec(dtype="int", format="%Y")
+    with pytest.raises(ValidationError, match="go with dtype bool"):
+        ColumnSpec(dtype="str", true_values=["Y"])
+    with pytest.raises(ValidationError, match="%z"):
+        ColumnSpec(dtype="datetime", format="%Y-%m-%d %z")
+
+
+# =========================================================================
+# A text cell in an Excel number column names the cell
+# =========================================================================
+def _cell(ref: str, value: object) -> str:
+    """One worksheet cell: numbers as numeric cells, strings as inline strings."""
+    if isinstance(value, str):
+        return f'<c r="{ref}" t="inlineStr"><is><t>{value}</t></is></c>'
+    return f'<c r="{ref}"><v>{value}</v></c>'
+
+
+def _workbook(path: Path, rows: list[list[object]]) -> None:
+    """A minimal .xlsx holding ``rows`` on its first sheet."""
+    sheet = "".join(
+        f'<row r="{i}">'
+        + "".join(_cell(f"{chr(65 + j)}{i}", value) for j, value in enumerate(row))
+        + "</row>"
+        for i, row in enumerate(rows, start=1)
+    )
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    package = "http://schemas.openxmlformats.org/package/2006/relationships"
+    types = "http://schemas.openxmlformats.org/package/2006/content-types"
+    office = "application/vnd.openxmlformats-officedocument.spreadsheetml"
+    parts = {
+        "[Content_Types].xml": f'<Types xmlns="{types}">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.'
+        'relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>'
+        f'<Override PartName="/xl/workbook.xml" ContentType="{office}.sheet.main+xml"/>'
+        f'<Override PartName="/xl/worksheets/sheet1.xml" ContentType="{office}.worksheet+xml"/>'
+        "</Types>",
+        "_rels/.rels": f'<Relationships xmlns="{package}"><Relationship Id="rId1" '
+        f'Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+        "xl/workbook.xml": f'<workbook xmlns="{main}" xmlns:r="{rel}"><sheets>'
+        '<sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{package}"><Relationship '
+        f'Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+        "xl/worksheets/sheet1.xml": f'<worksheet xmlns="{main}"><sheetData>{sheet}'
+        "</sheetData></worksheet>",
+    }
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, text in parts.items():
+            archive.writestr(name, text)
+
+
+def test_a_text_cell_in_an_excel_number_column_is_named(tmp_path) -> None:
+    path = tmp_path / "book.xlsx"
+    _workbook(path, [["id", "n"], *([i, i * 1.5] for i in range(1, 40)), [40, "TBD"]])
+    report = validate({"t": Dataset(str(path), schema={"columns": {"n": {"dtype": "float"}}})})
+    [unavailable] = [r for r in report.results_for("INP-001") if r.status is Status.FAIL]
+    assert "cell B41 holds 'TBD', which is not a number" in unavailable.message
+    assert "all_varchar" in unavailable.message

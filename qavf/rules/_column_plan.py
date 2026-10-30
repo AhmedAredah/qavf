@@ -289,7 +289,7 @@ def _lazy_column_reduction(
             )
         return Finding.fail(
             f"{count:,} value{'s' if count != 1 else ''} of {applicable:,} "
-            f"in {dataset}.{column} violate '{label}'."
+            f"in {dataset}.{column} {'violates' if count == 1 else 'violate'} '{label}'."
             + (f" Column-level: {'; '.join(problems)}." if problems else ""),
             check=f"{dataset}.{column}: {label}",
             severity=severity,
@@ -519,7 +519,7 @@ def _native_column_reduction(
             )
         return Finding.fail(
             f"{count:,} value{'s' if count != 1 else ''} of {applicable:,} "
-            f"in {dataset}.{column} violate '{label}'."
+            f"in {dataset}.{column} {'violates' if count == 1 else 'violate'} '{label}'."
             + (f" Column-level: {'; '.join(problems)}." if problems else ""),
             check=f"{dataset}.{column}: {label}",
             severity=severity,

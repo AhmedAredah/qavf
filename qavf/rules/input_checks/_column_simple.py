@@ -315,7 +315,8 @@ def _row_failure(
 ) -> Finding:
     """Fused backends share the same row-count and bounded-evidence result contract."""
     return Finding.fail(
-        f"{plural(count, 'value')} of {rows:,} in {dataset}.{column} violate '{label}'.",
+        f"{plural(count, 'value')} of {rows:,} in {dataset}.{column} "
+        f"{'violates' if count == 1 else 'violate'} '{label}'.",
         check=f"{dataset}.{column}: {label}",
         severity=severity,
         affected=sample,

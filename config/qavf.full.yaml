@@ -54,6 +54,10 @@ datasets:
           dtype: str
           isin: [valid, suspect, invalid]
           normalize: [case, trim]     # compare ' Valid' as 'valid' (isin, notin, unique)
+        # Values written another way than ISO 8601 dates or true/false:
+        #   installed: {dtype: date, format: '%m/%d/%Y'}
+        #   active: {dtype: bool, true_values: [Y, 'yes', 1], false_values: [N, 'no', 0]}
+        # (quote yes and no, which YAML would otherwise read as booleans)
         serial:
           dtype: int
           unique: true

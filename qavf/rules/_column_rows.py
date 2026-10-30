@@ -125,7 +125,7 @@ def native_row_check(
         )
     return Finding.fail(
         f"{count:,} value{'s' if count != 1 else ''} of {applicable:,} "
-        f"in {dataset}.{column} violate '{label}'."
+        f"in {dataset}.{column} {'violates' if count == 1 else 'violate'} '{label}'."
         + (f" Column-level: {'; '.join(problems)}." if problems else ""),
         check=f"{dataset}.{column}: {label}",
         severity=check.severity,

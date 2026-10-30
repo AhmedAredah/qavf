@@ -36,6 +36,7 @@ from pydantic import (
 from qavf.configuration import expand_env as expand_env
 from qavf.configuration import read_config_mapping as _read_config_mapping
 from qavf.engine.severity import Severity
+from qavf.text_types import TEXT_DTYPES, TextType, Word
 from qavf.value_policy import TextNormalization
 
 if TYPE_CHECKING:
@@ -325,6 +326,15 @@ class ColumnSpec(ColumnConstraints):
     """Normalize empty and whitespace-only text to missing for every QA consumer. With
     a non-text ``dtype``, this applies while a column read as text is checked against
     that type."""
+    format: str | None = None
+    """For ``date`` and ``datetime`` written another way than ISO 8601: how values are
+    written, e.g. ``'%m/%d/%Y'`` or ``'%d %b %Y %H:%M'`` (directives ``%Y %y %m %d %b
+    %B %j``, and ``%H %I %M %S %p`` for datetimes)."""
+    true_values: list[Word] = Field(default_factory=lambda: ["true"])
+    """For ``bool`` written as text: the words meaning true (case and surrounding space
+    ignored), e.g. ``[Y, yes, 1]``."""
+    false_values: list[Word] = Field(default_factory=lambda: ["false"])
+    """For ``bool`` written as text: the words meaning false."""
     unit: str | None = None
     """The column's unit (``kg``, ``vehicle-miles``). Recorded in reports; ``REC-001``
     refuses to reconcile columns declared in different units."""
@@ -334,6 +344,22 @@ class ColumnSpec(ColumnConstraints):
     allowed_units: list[str] | None = None
     description: str | None = None
     checks: list[ColumnCheck] = Field(default_factory=list)
+
+    def text_type(self) -> TextType | None:
+        """How this column's declared type is written as text; ``None`` when its type
+        is not recognized in text by every engine (``str``, ``decimal``, undeclared)."""
+        if self.dtype not in TEXT_DTYPES:
+            return None
+        return TextType.model_validate(
+            {
+                "dtype": self.dtype,
+                "missing": [value for value in self.missing_values if isinstance(value, str)],
+                "blank_as_missing": self.blank_as_missing,
+                "format": self.format,
+                "true_values": self.true_values,
+                "false_values": self.false_values,
+            }
+        )
 
     def all_checks(self) -> list[ColumnCheck]:
         """The implicit check (if any limits are set inline) followed by ``checks``."""
@@ -346,6 +372,12 @@ class ColumnSpec(ColumnConstraints):
     @model_validator(mode="after")
     def _compatible_with_dtype(self) -> ColumnSpec:
         """With a declared ``dtype``, reject limits that cannot apply to it."""
+        if self.format is not None and self.dtype not in ("date", "datetime"):
+            raise ValueError("'format' goes with dtype date or datetime")
+        words = (self.true_values, self.false_values)
+        if self.dtype != "bool" and words != (["true"], ["false"]):
+            raise ValueError("'true_values' and 'false_values' go with dtype bool")
+        self.text_type()  # validates format directives and true/false words
         if self.allowed_units is not None and not self.allowed_units:
             raise ValueError("'allowed_units' must not be empty")
         if self.unit_column is not None and self.unit is None and self.allowed_units is None:
@@ -573,7 +605,41 @@ class DatasetSpec(_Strict):
         text = self._declared_text(config)
         if text:
             config["text_columns"] = list(dict.fromkeys([*config.get("text_columns", []), *text]))
+        declared = self._declared_types(config)
+        if declared:
+            config["declared_columns"] = {**declared, **config.get("declared_columns", {})}
         return config
+
+    def _declared_types(self, config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+        """Columns of a CSV file source to read as text and convert to their declared
+        type in the same scan, so a reader's sample never decides their type.
+
+        A reader that typed a column from its first rows silently rounds a later
+        ``2.5`` into an integer and reads ``0x10`` as 16. A ``datetime`` without a
+        ``format`` keeps the reader's typing: it fails on a bad value rather than
+        changing it, and it alone reads time-zone offsets (``...Z``) as instants.
+        """
+        if not self._csv(config) or self.schema_spec is None:
+            return {}
+        original = {new: old for old, new in self.rename.items()}
+        declared = {}
+        for column, spec in self.schema_spec.columns.items():
+            text = spec.text_type()
+            if text is None or (text.dtype == "datetime" and text.format is None):
+                continue
+            declared[original.get(column, column)] = text.model_dump()
+        return declared
+
+    @staticmethod
+    def _csv(config: Mapping[str, Any]) -> bool:
+        if config.get("type") != "file":
+            return False
+        from qavf.sources.formats import infer_format
+
+        try:
+            return (config.get("format") or infer_format(str(config.get("path", "")))) == "csv"
+        except ValueError:
+            return False  # the source's own validation reports an unknown format
 
     def _declared_text(self, config: Mapping[str, Any]) -> list[str]:
         """Source names of the columns declared ``dtype: str`` in a CSV file source.
@@ -581,15 +647,7 @@ class DatasetSpec(_Strict):
         A type sniffed from a sample would turn codes such as ``007`` into numbers
         and drop their leading zeros before any check could see them.
         """
-        if config.get("type") != "file" or self.schema_spec is None:
-            return []
-        from qavf.sources.formats import infer_format
-
-        try:
-            fmt = config.get("format") or infer_format(str(config.get("path", "")))
-        except ValueError:
-            return []  # the source's own validation reports an unknown format
-        if fmt != "csv":
+        if not self._csv(config) or self.schema_spec is None:
             return []
         original = {new: old for old, new in self.rename.items()}
         return [

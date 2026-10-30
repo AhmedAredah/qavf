@@ -10,7 +10,6 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
-from qavf.rules._declared_types import convert, converts_text, described
 from qavf.rules._predicates import (
     is_temporal,
 )
@@ -20,14 +19,12 @@ from qavf.rules.helpers import (
     plural,
 )
 from qavf.settings import (
-    ColumnSpec,
     DType,
     QAVFSettings,
-    SchemaSpec,
 )
-from qavf.sources.base import DataSource, SourceNotFoundError
+from qavf.sources.base import SourceNotFoundError
 
-from . import _column_values as values
+from ._conformance import DatasetView, SourceChecks, column_conformance
 from ._datasets import (
     CATEGORY,
     DatasetSelection,
@@ -152,6 +149,7 @@ class SchemaConformanceRule(_SelectsDatasets):
                     )
                 )
                 continue
+            view = DatasetView(ctx, dataset, schema, actual_schema, row_count)
             problems: list[dict[str, Any]] = []
             for column, spec in schema.columns.items():
                 if column not in actual_schema:
@@ -163,24 +161,27 @@ class SchemaConformanceRule(_SelectsDatasets):
                         problems.append(problem)
                     continue
                 actual = actual_schema[column]
-                if spec.dtype is None or _matches(actual, spec.dtype):
-                    continue
-                if converts_text(spec, actual):
-                    finding = _invalid_values(ctx, dataset, schema, actual_schema, column, spec)
+                conformance = column_conformance(view, column)
+                if conformance is not None:
+                    finding = conformance.finding()
                     if finding is not None:
                         failures.append(finding)
                         failing.add(dataset)
+                    continue
+                if spec.dtype is None or _matches(actual, spec.dtype):
                     continue
                 problems.append(
                     {"column": column, "problem": f"expected {spec.dtype}, found {actual}"}
                 )
             source = ctx.source(dataset)
             if source is not None:
-                problems.extend(_header_problems(source))
-                rejected = _rejected(dataset, source, ctx.evidence_limit)
-                if rejected is not None:
-                    failures.append(rejected)
+                rename = ctx.specs[dataset].rename if dataset in ctx.specs else {}
+                checks = SourceChecks(view, source, rename)
+                found = checks.findings()
+                failures.extend(found)
+                if found:
                     failing.add(dataset)
+                problems.extend(checks.problems())
             if schema.strict:
                 for column in actual_schema:
                     if column not in schema.columns:
@@ -219,70 +220,3 @@ class SchemaConformanceRule(_SelectsDatasets):
             "No available dataset has a schema configured.",
         )
 
-
-def _header_problems(source: DataSource) -> list[dict[str, Any]]:
-    try:
-        return source.header_problems()
-    except Exception:
-        return []  # a diagnosis is a courtesy; the schema checks still decide
-
-
-def _rejected(dataset: str, source: DataSource, limit: int) -> Finding | None:
-    """Lines a lossy read left out, beyond the source's ``max_rejected_rows``."""
-    rejected = source.rejected_rows()
-    allowed = int(getattr(source.params, "max_rejected_rows", 0))
-    if rejected is None or rejected.count <= allowed:
-        return None
-    count = f"{rejected.count:,}" if rejected.exact else f"at least {rejected.count:,}"
-    return Finding.fail(
-        f"{count} {'line' if rejected.count == 1 else 'lines'} of {dataset} could not be "
-        f"read and {'was' if rejected.count == 1 else 'were'} left out "
-        f"(max_rejected_rows: {allowed}).",
-        check=f"{dataset}: unreadable lines",
-        affected=list(rejected.sample[:limit]),
-        affected_count=rejected.count,
-        unit="lines",
-        datasets=(dataset,),
-    )
-
-
-def _invalid_values(
-    ctx: DataContext,
-    dataset: str,
-    schema: SchemaSpec,
-    actual_schema: dict[str, pl.DataType],
-    column: str,
-    spec: ColumnSpec,
-) -> Finding | None:
-    """The cells of a text column that are neither missing nor of its declared type.
-
-    A column whose every value is of the declared type conforms: it is text only
-    because of declared missing markers, and INP-003 checks the converted values.
-    """
-    assert spec.dtype is not None
-    check = f"{dataset}.{column}: dtype {spec.dtype}"
-    actual = actual_schema[column]
-    context = [c for c in schema.primary_key or [] if c != column and c in actual_schema]
-    try:
-        frame = ctx.project(dataset, [*context, column])
-        invalid = convert(frame[column], spec).invalid
-        count = int(invalid.sum())
-    except Exception as exc:
-        return Finding.unassessed(
-            f"Not assessed: {check}: {type(exc).__name__}: {exc}.",
-            check=check,
-            datasets=(dataset,),
-        )
-    if not count:
-        return None
-    kind = described(spec.dtype)
-    return Finding.fail(
-        f"{plural(count, 'value')} of {frame.height:,} in {dataset}.{column} "
-        f"{'is' if count == 1 else 'are'} not {kind}, so the column was read as {actual}.",
-        check=check,
-        affected=values._rows(frame, invalid, f"not {kind}", ctx.evidence_limit),
-        affected_count=count,
-        total_records=frame.height,
-        unit="rows",
-        datasets=(dataset,),
-    )

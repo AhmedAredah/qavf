@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from typing import Any
 
 import polars as pl
@@ -39,14 +38,8 @@ def evaluate_eager(
     dataset: str,
     schema: SchemaSpec,
     frame: pl.DataFrame | None = None,
-    invalid: Mapping[str, pl.Series] | None = None,
 ) -> tuple[list[Finding], list[str]]:
-    """Assess ``schema`` on ``frame`` (by default the whole dataset).
-
-    ``invalid`` marks, per column, cells that are null in ``frame`` because they
-    were not values of the declared type. INP-002 reports them, so they are
-    neither missing values nor values to check here.
-    """
+    """Assess ``schema`` on ``frame`` (by default the whole dataset)."""
     frame = ctx.get(dataset) if frame is None else frame
     rows = frame.height
     failures: list[Finding] = []
@@ -120,10 +113,6 @@ def evaluate_eager(
         missing = series.null_count()
         nans = int(frame[column].is_nan().sum()) if is_float else 0
         missing_mask = series.is_null()  # null, NaN, configured sentinels and blanks
-        excluded = invalid.get(column) if invalid else None
-        if excluded is not None:
-            missing_mask = missing_mask & ~excluded
-            missing = int(missing_mask.sum())
 
         if not spec.nullable:
             if missing:
@@ -335,8 +324,8 @@ def evaluate_converted(
 ) -> tuple[list[Finding], list[str]]:
     """Assess text ``columns`` on the values of their declared types.
 
-    Cells that are not values of the declared type are INP-002 failures; every
-    limit here is assessed on the remaining values. The projection holds these
+    INP-002 lists the values that are not of the declared type; here they are
+    missing, as in a typed read of the same data. The projection holds these
     columns, their check dependencies and the primary key for evidence.
     """
     actual = ctx.schema(dataset)
@@ -351,12 +340,9 @@ def evaluate_converted(
                 needed.extend(pl.sql_expr(check.where).meta.root_names())
     frame = ctx.project(dataset, [name for name in actual if name in set(needed)])
     contract: dict[str, ColumnSpec] = {}
-    invalid: dict[str, pl.Series] = {}
     for name in frame.columns:
         if name in columns:
-            converted = convert(frame[name], schema.columns[name])
-            frame = frame.with_columns(converted.values)
-            invalid[name] = converted.invalid
+            frame = frame.with_columns(convert(frame[name], schema.columns[name]).values)
             contract[name] = typed_spec(schema.columns[name])
         elif name in schema.columns:
             # Dependencies keep their missing-value policy and carry no limits.
@@ -367,9 +353,7 @@ def evaluate_converted(
                 missing_values=dependency.missing_values,
                 blank_as_missing=dependency.blank_as_missing,
             )
-    return evaluate_eager(
-        ctx, dataset, schema.model_copy(update={"columns": contract}), frame, invalid
-    )
+    return evaluate_eager(ctx, dataset, schema.model_copy(update={"columns": contract}), frame)
 
 
 def _duplicated(column: str, dtype: pl.DataType, check: ColumnCheck) -> pl.Expr:

@@ -34,8 +34,27 @@ All notable changes to this project are documented here. The format follows
 - INP-002 reports duplicate and blank CSV header names that the reader renamed (`v_1`,
   `column3`), and a header row the reader did not recognize.
 
+- **Declared types are read, not guessed.** In a CSV, a column declared `int`, `float`,
+  `bool` or `date` (or `datetime` with a `format`) is read as text and converted in the
+  same scan, so the reader's sample of the first rows never decides its type. A value
+  that is not of the type is missing for every check, and INP-002 lists it with its row
+  and text. Polars and DuckDB recognize exactly the same text for each type.
+- `format` for `date` and `datetime` columns written another way than ISO 8601, and
+  `true_values`/`false_values` for `bool` columns (`Y`/`N`).
+- A column declared `int` accepts floats that are whole numbers, as spreadsheets store
+  every number; INP-002 lists the rows holding a fraction.
+- A text cell in an Excel number or date column names the cell and how to read it.
+
+### Fixed
+
+- A CSV value past the reader's type sample could be silently changed: in a column typed
+  as an integer from its first rows, `2.5` was read as 3, `0x10` as 16 and `1e3` as 1000,
+  and every check passed. Declared columns are now converted strictly (see above).
+
 ### Changed
 
+- A value that is not of a column's declared type counts as missing for every check
+  other than INP-002, whichever way the data is read.
 - Zoned timestamps load and compare in UTC on every machine. They previously took the
   host's time zone, so the same file and bounds could pass on one machine and fail on
   another.
