@@ -22,10 +22,10 @@ from qavf.settings import (
     validate_config_mapping_keys,
 )
 from qavf.sources.base import DataSource, SourceEnvironment, SourceError
-from qavf.sources.frames import as_polars, supports_frame
+from qavf.sources.frames import as_polars, known_rows, supports_frame
 from qavf.sources.parameters import FileParams
 
-from .adapters import _LoaderInput, _QueryInput
+from .adapters import _FrameInput, _LoaderInput, _QueryInput
 from .descriptors import Dataset, File, Loader, Query
 from .resources import ResourceLimits
 
@@ -191,6 +191,10 @@ def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, ob
         else:
             if callable(getattr(value, "read_next_batch", None)):
                 raise TypeError("a borrowed one-pass reader requires an explicit source adapter")
+            if policy.row_budget is not None and known_rows(value) is not None:
+                # Admit the stated size at load, before a conversion copies the frame.
+                frames[name] = _FrameInput(value, env, policy)
+                continue
             try:
                 frames[name] = as_polars(value)
             except SourceError as exc:

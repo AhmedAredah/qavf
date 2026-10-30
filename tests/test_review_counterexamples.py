@@ -504,3 +504,25 @@ def test_f16_a_huge_label_is_cut_before_the_chart_is_built() -> None:
     assert peak < 1_000_000
     assert all(len(svg) < 10 * charts.MAX_TEXT_CHARS + 5_000 for svg in drawn)
     assert "+50%" in drawn[2]  # the cell is still found under its full label
+
+
+# =========================================================================
+# F17: a frame known to exceed its row budget is refused before conversion
+# =========================================================================
+def _never_converted(*_args: object, **_kwargs: object) -> pl.DataFrame:
+    raise AssertionError("an over-budget frame must not be converted")
+
+
+def test_f17_an_over_budget_pandas_frame_is_not_converted(monkeypatch) -> None:
+    pd = pytest.importorskip("pandas")
+    schema = {"columns": {"x": {}}}
+    within = validate({"d": pd.DataFrame({"x": ["a", "b"]})}, schema=schema,
+                      config={"datasets": {"d": {"load_policy": {"row_budget": 2}}}})  # fmt: skip
+    assert within.verdict() == "passed"
+    monkeypatch.setattr(pl, "from_pandas", _never_converted)
+    report = validate(
+        {"d": pd.DataFrame({"x": ["y" * 1024] * 20_000})}, schema=schema,
+        config={"datasets": {"d": {"load_policy": {"row_budget": 1}}}},
+    )  # fmt: skip
+    [availability] = report.results_for("INP-001")
+    assert availability.status is Status.FAIL and "row_budget" in availability.message

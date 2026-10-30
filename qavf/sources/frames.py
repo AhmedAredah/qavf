@@ -38,6 +38,21 @@ def supports_frame(frame: object) -> bool:
     return _adapter_kind(frame) is not None
 
 
+def known_rows(frame: object) -> int | None:
+    """The row count a pandas frame or Arrow table states, without converting it.
+
+    ``None`` when it is not known without reading: an Arrow C stream is never
+    consumed to count it.
+    """
+    kind = _adapter_kind(frame)
+    if kind == "pandas":
+        return len(frame.index)  # type: ignore[attr-defined]
+    arrow = sys.modules.get("pyarrow")
+    if kind == "arrow" and arrow is not None and isinstance(frame, arrow.Table | arrow.RecordBatch):
+        return int(frame.num_rows)
+    return None
+
+
 def as_polars(frame: Any) -> pl.DataFrame:
     """Convert a Polars/pandas DataFrame or Arrow table to Polars.
 

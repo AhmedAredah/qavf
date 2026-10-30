@@ -10,7 +10,7 @@ import polars as pl
 
 from qavf.settings import SourcePolicy
 from qavf.sources.base import DataSource, ScanPlan, SourceEnvironment, SourceError, SourceParams
-from qavf.sources.frames import as_polars
+from qavf.sources.frames import as_polars, known_rows
 from qavf.sources.native import budgeted, check_budget, connect
 from qavf.sources.sql import normalize_sql_paths, referenced_connections
 
@@ -93,6 +93,42 @@ class _QueryInput(DataSource[SourceParams]):
     def describe(self) -> str:
         borrowed = isinstance(self.query.connection, duckdb.DuckDBPyConnection)
         return "parameterized query" + (" (borrowed connection)" if borrowed else "")
+
+
+class _FrameInput(DataSource[SourceParams]):
+    """A borrowed pandas frame or Arrow table under a row budget, converted on load.
+
+    A frame whose stated row count exceeds the budget is refused before any
+    conversion allocates a copy of it.
+    """
+
+    kind: ClassVar[str] = "frame_input"
+    Params: ClassVar[type[SourceParams]] = SourceParams
+
+    def __init__(
+        self, frame: object, env: SourceEnvironment, policy: SourcePolicy | None = None
+    ) -> None:
+        super().__init__(
+            SourceParams(
+                type=self.kind, **(policy.model_dump(exclude_unset=True) if policy else {})
+            ),
+            env,
+        )
+        self.frame = frame
+
+    def bind(self, env: SourceEnvironment) -> _FrameInput:
+        policy = SourcePolicy.model_validate(self.params.model_dump(exclude={"type"}))
+        return type(self)(self.frame, self.bound_environment(env), policy)
+
+    def load(self) -> pl.DataFrame:
+        budget = self.params.row_budget
+        rows = known_rows(self.frame)
+        if budget is not None and rows is not None and rows > budget:
+            raise SourceError(f"{self.describe()} has more than {budget:,} rows (row_budget)")
+        return check_budget(as_polars(self.frame), budget, self.describe())
+
+    def describe(self) -> str:
+        return f"in-memory {type(self.frame).__name__}"
 
 
 class _LoaderInput(DataSource[SourceParams]):
