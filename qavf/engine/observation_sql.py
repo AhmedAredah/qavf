@@ -10,7 +10,7 @@ from uuid import uuid4
 import polars as pl
 import pyarrow as pa
 
-from qavf.engine.sql import check_sql_columns, sample_result, sample_statement
+from qavf.engine.sql import BoundedSample, check_sql_columns
 from qavf.missingness import normalize_frame
 from qavf.sources.base import SourceError
 from qavf.sources.native import drop_temporary_relation
@@ -34,13 +34,11 @@ def sample_observed(
 
     Other referenced datasets retain normal binding, integrity and retry policy.
     Readers and registrations end before returning; observation owners remain
-    with the caller. DuckDB owns the sampled CTE under native memory/spill limits.
+    with the caller. The sample is read in one pass, without staging the result.
     """
     names = ctx.referenced(query)
     others = [name for name in names if name not in observations]
-    statement = sample_statement(
-        resolve_sql_paths(query, ctx.env.base_dir, known_tables=ctx.declared()), limit
-    )
+    resolved = resolve_sql_paths(query, ctx.env.base_dir, known_tables=ctx.declared())
 
     def attempt() -> tuple[pl.DataFrame, int]:
         with (
@@ -93,11 +91,8 @@ def sample_observed(
                     f"CREATE TEMP TABLE {table_name} AS SELECT * FROM {quote_identifier(alias)}"
                 )
                 tables.callback(drop_temporary_relation, con, name, kind="TABLE")
-            result = con.execute(statement)
-            fetch = getattr(result, "to_arrow_table", None) or result.fetch_arrow_table
-            table = fetch()
+            sample, count = BoundedSample(limit).read(con, resolved, ctx._check_cancelled)
         ctx._check_cancelled()
-        sample, count = sample_result(table)
         ctx._check_materialization("SQL observation sample", sample)
         return sample, count
 

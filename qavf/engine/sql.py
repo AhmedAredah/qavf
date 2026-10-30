@@ -6,7 +6,7 @@ import functools
 import json
 import math
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any, cast
 
 import duckdb
@@ -162,6 +162,57 @@ def sample_statement(query: str, limit: int, *, ordered: bool = False) -> str:
         f"(SELECT list(s) FROM (SELECT * FROM __qavf_rows{order} "
         f"LIMIT {int(limit)}) s) AS __sample"
     )
+
+
+class BoundedSample:
+    """One evaluation of a query, counted in full while only its first rows are kept.
+
+    The result is read once from DuckDB's Arrow stream, batch by batch, so no copy
+    of the complete result is staged (a materialized CTE writes all of it to
+    temporary storage). Rows keep the result's order: the same unordered sample.
+    A query whose sample must be ordered keeps :func:`sample_statement`.
+    """
+
+    BATCH_ROWS = 65_536
+
+    def __init__(self, limit: int) -> None:
+        if limit < 0:
+            raise ValueError("sample limit must be non-negative")
+        self.limit = limit
+
+    @staticmethod
+    def statement(query: str) -> str:
+        """The query as a subquery: anything but a single query is refused, never run."""
+        # The newline ends a trailing line comment in the query.
+        return f"SELECT * FROM ({normalize_single_query(query)}\n)"
+
+    def read(
+        self, connection: Any, query: str, check_cancelled: Callable[[], None]
+    ) -> tuple[pl.DataFrame, int]:
+        """``(sample, count)`` of one evaluation of ``query`` on ``connection``."""
+        result = connection.execute(self.statement(query))
+        reader = (
+            result.to_arrow_reader(self.BATCH_ROWS)
+            if hasattr(result, "to_arrow_reader")
+            else result.fetch_record_batch(self.BATCH_ROWS)
+        )
+        kept: list[pa.RecordBatch] = []
+        count = retained = 0
+        try:
+            for batch in reader:
+                check_cancelled()
+                count += batch.num_rows
+                if retained < self.limit and batch.num_rows:
+                    taken = min(self.limit - retained, batch.num_rows)
+                    # A copy: a slice would keep the whole batch alive.
+                    kept.append(batch.take(pa.array(range(taken), type=pa.int64())))
+                    retained += taken
+            schema = reader.schema
+        finally:
+            reader.close()
+        sample = pl.from_arrow(pa.Table.from_batches(kept, schema=schema))
+        assert isinstance(sample, pl.DataFrame)
+        return sample, count
 
 
 def sample_result(table: pa.Table) -> tuple[pl.DataFrame, int]:

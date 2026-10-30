@@ -27,6 +27,7 @@ from qavf.engine.relations import bind_scan
 from qavf.engine.resources import ResourceLimitError, RunResources, retained_size
 from qavf.engine.session import Invocation, KeyedLocks
 from qavf.engine.sql import (
+    BoundedSample,
     check_sql_columns,
     missing_projection,
     sample_result,
@@ -932,21 +933,21 @@ class DataContext:
     ) -> tuple[pl.DataFrame, int]:
         """Evaluate once; count all rows and collect only a bounded evidence sample.
 
-        The materialized CTE is owned by DuckDB and subject to its memory/spill
-        budget. Non-query statements are rejected rather than executed as a fallback.
+        An unordered sample streams the result once (:class:`BoundedSample`); an
+        ordered one stages it in a materialized CTE owned by DuckDB, subject to its
+        memory/spill budget. Non-query statements are rejected, never executed.
         """
-        statement = sample_statement(
-            resolve_sql_paths(query, self.env.base_dir, known_tables=self.declared()),
-            limit,
-            ordered=ordered,
-        )
+        resolved = resolve_sql_paths(query, self.env.base_dir, known_tables=self.declared())
         with self._sql_lease(query, normalize_missing=normalize_missing) as con:
-            result = con.execute(statement)
-            # Newer DuckDB deprecates fetch_arrow_table; the 1.2 floor lacks to_arrow_table.
-            fetch = getattr(result, "to_arrow_table", None) or result.fetch_arrow_table
-            table = fetch()
+            if not ordered:
+                sample, count = BoundedSample(limit).read(con, resolved, self._check_cancelled)
+            else:
+                result = con.execute(sample_statement(resolved, limit, ordered=True))
+                # Newer DuckDB deprecates fetch_arrow_table; the 1.2 floor lacks
+                # to_arrow_table.
+                fetch = getattr(result, "to_arrow_table", None) or result.fetch_arrow_table
+                sample, count = sample_result(fetch())
         self._check_cancelled()
-        sample, count = sample_result(table)
         self._check_materialization("SQL evidence sample", sample)
         return sample, count
 

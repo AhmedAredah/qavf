@@ -6,6 +6,7 @@ overwritten input or a silent omission must fail here before any fix is trusted.
 
 from __future__ import annotations
 
+import functools
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -703,3 +704,59 @@ def test_f23_evidence_projects_checked_columns(engine, whole, tmp_path) -> None:
     [scoped] = [check for check in shown if check.startswith("d.y:")]
     assert shown[scoped] >= {"id", "y", "scope"}
     assert ("payload" in shown[scoped]) is whole
+
+
+# =========================================================================
+# F20: an unordered evidence sample reads its query once, staging nothing
+# =========================================================================
+class _CountedRead:
+    """``BoundedSample.read`` wrapped to count the samples it streams."""
+
+    def __init__(self) -> None:
+        from qavf.engine.sql import BoundedSample
+
+        self.read, self.calls = BoundedSample.read, 0
+
+    def __get__(self, sampler: object, _owner: object) -> object:
+        return functools.partial(self.__call__, sampler)
+
+    def __call__(self, sampler: object, *args: object) -> object:
+        self.calls += 1
+        return self.read(sampler, *args)
+
+
+def _no_staging(*_args: object, **_kwargs: object) -> str:
+    raise AssertionError("an unordered sample must not stage the query in a CTE")
+
+
+def test_f20_unordered_samples_stream_and_count_exactly(monkeypatch) -> None:
+    import duckdb
+
+    from qavf.engine import context
+    from qavf.engine.sql import BoundedSample
+
+    connection = duckdb.connect()
+    sample, count = BoundedSample(20).read(
+        connection, "SELECT i, repeat('x', 1024) AS payload FROM range(100000) t(i)", _ignore
+    )
+    assert count == 100_000 and sample["i"].to_list() == list(range(20))
+    empty, none = BoundedSample(0).read(connection, "SELECT 1 AS a WHERE false", _ignore)
+    assert (none, empty.columns) == (0, ["a"])
+    connection.execute("CREATE TABLE kept AS SELECT 1 AS a")
+    with pytest.raises(duckdb.Error):
+        BoundedSample(1).read(connection, "DELETE FROM kept", _ignore)
+    assert connection.execute("SELECT count(*) FROM kept").fetchone() == (1,)
+
+    counted = _CountedRead()
+    monkeypatch.setattr(context, "sample_statement", _no_staging)
+    monkeypatch.setattr(BoundedSample, "read", counted)
+    frame = pl.DataFrame({"x": [-1, 2, -3, 4], "payload": ["p"] * 4})
+    report = validate(
+        {"d": Dataset(frame, expressions=[{"name": "positive", "expr": "x > 0"}])}
+    )
+    [failed] = [r for r in report.results_for("INP-006") if r.status is Status.FAIL]
+    assert failed.affected_count == 2 and counted.calls >= 1
+
+
+def _ignore() -> None:
+    """A cancellation check that never cancels."""
