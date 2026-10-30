@@ -118,8 +118,10 @@ Ordinary calls use these defaults; larger admitted workloads can override them:
 | `max_matches` | 2,000,000 | Selected point-zone mappings, including `overlap: all` expansion |
 | `max_work` | 20,000,000 | Bounding-box candidate pairs admitted before exact predicates |
 
-These controls apply to polygon assignment. Grid-cell and attribute-zone steps
-retain their existing controls. New finite defaults can refuse workloads that
+These controls apply to polygon assignment. Grid-cell assignment in another CRS
+applies `max_points` and `batch_size` to the distinct points it transforms; a grid in
+the points' own CRS needs no transform, and attribute-zone steps retain their
+existing controls. New finite defaults can refuse workloads that
 previously attempted unrestricted assignment; increase them deliberately for larger
 validated workloads.
 

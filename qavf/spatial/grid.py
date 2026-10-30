@@ -22,13 +22,14 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from typing import Any
+from uuid import uuid4
 
 import polars as pl
 from pydantic import Field, model_validator
 
 from qavf.engine.registry import RuleParams
 from qavf.rules.helpers import fresh_internal
-from qavf.spatial.assign import Assigned, coordinate_keys
+from qavf.spatial.assign import Assigned, AssignmentLimits, coordinate_keys
 from qavf.spatial.crs import Crs, same_crs, transform_sql
 from qavf.spatial.extension import fetch, register
 
@@ -134,6 +135,25 @@ def grid_cells(grid: Grid) -> pl.Series:
     return cells.select(label_of(pl.col("ix"), pl.col("iy")).alias("cell"))["cell"]
 
 
+def _transformed(con: Any, points: pl.DataFrame, source: str, target: str) -> pl.DataFrame:
+    """``pid``, ``tx``, ``ty`` of one batch of finite points, moved to ``target``.
+
+    The batch is registered under an operation-local name, removed on every exit.
+    """
+    name = f"qavf_cells_{uuid4().hex}"
+    register(con, name, points)
+    try:
+        point = transform_sql("ST_Point(px, py)", source, target)
+        return fetch(
+            con,
+            f"SELECT pid, ST_X(p) AS tx, ST_Y(p) AS ty FROM (SELECT pid, {point} AS p FROM "
+            f"{name} WHERE px IS NOT NULL AND py IS NOT NULL AND isfinite(px) AND "
+            "isfinite(py)) ORDER BY pid",
+        )
+    finally:
+        con.unregister(name)
+
+
 def assign_cells(
     plan: pl.LazyFrame,
     grid: Grid,
@@ -144,17 +164,21 @@ def assign_cells(
     column: str,
     collect: Callable[[pl.LazyFrame], pl.DataFrame],
     connection: Callable[[], Any] | None = None,
+    limits: AssignmentLimits | None = None,
 ) -> Assigned:
     """Add ``column``, each row's cell label; rows without usable coordinates get none.
 
     In the points' own CRS the labels are one native expression. Otherwise the
     distinct points are transformed in DuckDB (``connection()`` opens a spatial
-    connection as a context manager) and their labels joined back.
+    connection as a context manager), ``limits.batch_size`` at a time, and their
+    labels joined back. At most ``limits.max_points`` distinct points are admitted,
+    reading one more to detect an excess; more refuse the whole assignment.
 
     Raises:
-        ValueError: for a ``column`` the plan already has.
+        ValueError: for a ``column`` the plan already has, or beyond ``max_points``.
         SpatialUnavailable: when a transform is needed without the extension.
     """
+    limits = limits or AssignmentLimits()
     schema = plan.collect_schema()
     if column in schema:
         raise ValueError(f"the zone column {column!r} already exists")
@@ -165,23 +189,29 @@ def assign_cells(
         assert connection is not None
         taken = [*schema, column]
         names = [fresh_internal(f"cell_{role}", taken) for role in ("x", "y")]
-        distinct = collect(plan.select(kx.alias(names[0]), ky.alias(names[1])).unique())
-        points = distinct.select(pl.col(names[0]).alias("px"), pl.col(names[1]).alias("py"))
-        with connection() as con:
-            register(con, "qavf_cells", points.with_row_index("pid"))
-            point = transform_sql("ST_Point(px, py)", crs, grid.crs)
-            moved = fetch(
-                con,
-                f"SELECT pid, ST_X(p) AS tx, ST_Y(p) AS ty FROM (SELECT pid, {point} AS p FROM "
-                "qavf_cells WHERE px IS NOT NULL AND py IS NOT NULL AND isfinite(px) AND "
-                "isfinite(py)) ORDER BY pid",
-            )
-            con.unregister("qavf_cells")
-        cells = moved.select(
-            pl.col("pid").cast(pl.UInt32),
-            cell_labels(pl.col("tx"), pl.col("ty"), grid).alias(column),
+        distinct = collect(
+            plan.select(kx.alias(names[0]), ky.alias(names[1]))
+            .unique()
+            .limit(limits.max_points + 1)
         )
-        mapping = distinct.with_row_index("pid").join(cells, on="pid").drop("pid")
+        if distinct.height > limits.max_points:
+            raise ValueError(f"grid assignment exceeds max_points ({limits.max_points:,})")
+        distinct = distinct.with_columns(pl.int_range(0, pl.len(), dtype=pl.Int64).alias("pid"))
+        points = distinct.select(
+            "pid", pl.col(names[0]).alias("px"), pl.col(names[1]).alias("py")
+        )
+        with connection() as con:
+            moved = pl.concat(
+                [
+                    _transformed(con, batch, crs, grid.crs)
+                    for batch in points.iter_slices(limits.batch_size)
+                ],
+                how="vertical",
+            )
+        cells = moved.select(
+            pl.col("pid"), cell_labels(pl.col("tx"), pl.col("ty"), grid).alias(column)
+        )
+        mapping = distinct.join(cells, on="pid").drop("pid")
         labelled = plan.with_columns(kx.alias(names[0]), ky.alias(names[1])).join(
             mapping.lazy(), on=names, how="left"
         )

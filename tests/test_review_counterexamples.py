@@ -814,3 +814,36 @@ def test_f21_spill_reads_are_native_and_do_not_hold_the_cache_lock(tmp_path, mon
     assert "d" not in roomy.data
     del roomy["other"]
     assert roomy["d"].equals(frame) and "d" in roomy.data  # promoted into free space
+
+
+# =========================================================================
+# F19: cross-CRS grid assignment admits its distinct points, in batches
+# =========================================================================
+def _grid_cells(limits: object) -> dict[float | None, set[str | None]]:
+    """Each longitude's cells from a cross-CRS grid assignment under ``limits``."""
+    from qavf.spatial.extension import spatial_connection
+    from qavf.spatial.grid import Grid, assign_cells
+
+    frame = pl.DataFrame({"lon": [-99.0, -99.0, -98.0, -100.0, None], "lat": [0.0] * 5})
+    assigned = assign_cells(
+        frame.lazy(), Grid(size=100_000.0, crs="EPSG:32614"), x="lon", y="lat",
+        crs="EPSG:4326", column="cell", collect=pl.LazyFrame.collect,
+        connection=spatial_connection, limits=limits,  # type: ignore[arg-type]
+    ).plan.collect()  # fmt: skip
+    found: dict[float | None, set[str | None]] = {}
+    for lon, cell in assigned.select("lon", "cell").iter_rows():
+        found.setdefault(lon, set()).add(cell)
+    return found
+
+
+def test_f19_grid_assignment_is_admitted_and_batched() -> None:
+    from qavf.spatial.assign import AssignmentLimits
+
+    try:
+        whole = _grid_cells(AssignmentLimits())
+    except Exception as exc:  # the spatial extension cannot be installed here
+        pytest.skip(f"spatial extension unavailable: {exc}")
+    assert _grid_cells(AssignmentLimits(batch_size=1)) == whole
+    assert whole == {-99.0: {"5_0"}, -98.0: {"6_0"}, -100.0: {"3_0"}, None: {None}}
+    with pytest.raises(ValueError, match="max_points"):
+        _grid_cells(AssignmentLimits(max_points=3))

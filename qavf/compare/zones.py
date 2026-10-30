@@ -209,6 +209,7 @@ class AssignZonesStep(AlignmentStep):
                 column=params.column,
                 collect=context.collect,
                 connection=lambda: spatial_connection(context.data),
+                limits=params,
             )
         else:
             with spatial_connection(context.data) as con:
