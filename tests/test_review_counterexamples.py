@@ -555,3 +555,32 @@ def test_f15_shape_screens_beyond_max_work_are_refused_not_run(monkeypatch) -> N
         assert not refused.assessed and refused.affected_count == 1
     assert result.verdict == "incomplete"
     assert split_work(12, 4) == 12 * 5 and lag_work(12, 12, 3) == 7 * 24
+
+
+# =========================================================================
+# F24: integer closeness under a tolerance is decided natively and exactly
+# =========================================================================
+def _no_scalar_cells(*_args: object, **_kwargs: object) -> None:
+    raise AssertionError("64-bit integers under a tolerance must not take the per-cell path")
+
+
+@pytest.mark.parametrize(("rtol", "atol"), [(1e-6, 0), (0, 1), (0.1, 2), (1e-12, 3)])
+def test_f24_integer_tolerances_match_the_exact_rule_without_per_cell_work(
+    rtol, atol, monkeypatch
+) -> None:
+    from qavf.regression import _comparison
+    from qavf.regression._numeric import _settled, numbers_close
+    from qavf.regression.compare_outputs import compare_frames
+
+    edges = [0, 1, -1, 999_999, 1_000_000, 2**53, 2**53 + 1, 2**63 - 1, -(2**63), 10, 13]
+    after = [0, 2, 1, 1_000_000, 1_000_001, 2**53 + 1, 2**53 + 3, 2**63 - 2, -(2**63) + 1, 12, 9]
+    cells = pl.DataFrame({"a": edges, "b": after}, schema={"a": pl.Int64, "b": pl.Int64})
+    settled = cells.select(_settled(pl.col("a"), pl.col("b"), pl.Int64, pl.Int64, rtol, atol))
+    assert settled.to_series().to_list() == [
+        numbers_close(a, b, rtol, atol) for a, b in zip(edges, after, strict=True)
+    ]
+    monkeypatch.setattr(_comparison, "_cell_change", _no_scalar_cells)
+    base = cells.select(pl.int_range(pl.len()).alias("k"), pl.col("a").alias("v"))
+    cand = cells.select(pl.int_range(pl.len()).alias("k"), pl.col("b").alias("v"))
+    result = compare_frames(base, cand, "k", rtol=rtol, atol=atol)
+    assert result.equal == all(settled.to_series())

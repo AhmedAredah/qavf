@@ -124,16 +124,51 @@ def _integer_difference_maxima(cells: pl.DataFrame) -> tuple[float | None, float
     return float(maximum), relative_max
 
 
+_NATIVE_INTEGERS = frozenset(
+    {pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64}
+)
+_NATIVE_TERM = 2**62
+"""Largest tolerance numerator or denominator decided natively: with 64-bit
+values, every product of the closeness rule then fits in Int128 exactly."""
+
+
+def native_integer_tolerance(dtype: pl.DataType, rtol: Number, atol: Number) -> bool:
+    """Whether integer closeness under these tolerances is decided natively and exactly."""
+    if dtype not in _NATIVE_INTEGERS:
+        return False
+    terms = (tolerance_fraction(rtol), tolerance_fraction(atol))
+    return all(
+        part <= _NATIVE_TERM for term in terms for part in (term.numerator, term.denominator)
+    )
+
+
+def _integer_close(a: pl.Expr, b: pl.Expr, rtol: Number, atol: Number) -> pl.Expr:
+    """``numbers_close`` for 64-bit integers, in exact Int128 arithmetic.
+
+    ``gap <= p/q`` is ``gap * q <= p``; ``gap <= r/s * max(|a|, |b|)`` is
+    ``gap * s <= r * max(|a|, |b|)``. Callers admit the operands first with
+    :func:`native_integer_tolerance`, so no product overflows.
+    """
+    relative, absolute = tolerance_fraction(rtol), tolerance_fraction(atol)
+    wide_a, wide_b = a.cast(pl.Int128), b.cast(pl.Int128)
+    gap = (wide_a - wide_b).abs()
+    larger = pl.max_horizontal(wide_a.abs(), wide_b.abs())
+    return (gap * absolute.denominator <= absolute.numerator) | (
+        gap * relative.denominator <= larger * relative.numerator
+    )
+
+
 def _settled(
     a: pl.Expr, b: pl.Expr, da: pl.DataType, db: pl.DataType, rtol: float, atol: float
 ) -> pl.Expr:
     """True where two cells certainly compare equal under the comparison's own rules.
 
     Float pairs are promoted to binary64 before applying ``math.isclose``'s formula;
-    NaN matches NaN. Other pairs of one dtype are settled
-    only when exactly equal, leaving every other decision (integers within
-    tolerance, decimals, mixed types) to the exact path. Native nested equality
-    can settle identical cells; nested tolerance is handled separately.
+    NaN matches NaN. 64-bit integer pairs are settled exactly within tolerance
+    (:func:`native_integer_tolerance`). Other pairs of one dtype are settled only
+    when exactly equal, leaving every other decision (wider integers, decimals,
+    mixed types) to the exact path. Native nested equality can settle identical
+    cells; nested tolerance is handled separately.
     """
     both_null = a.is_null() & b.is_null()
     if da != db or isinstance(da, pl.Object):
@@ -148,4 +183,6 @@ def _settled(
             & ((gap <= rtol * b.abs()) | (gap <= rtol * a.abs()) | (gap <= atol))
         )
         return both_null | (a.is_nan() & b.is_nan()) | close.fill_null(False)
+    if native_integer_tolerance(da, rtol, atol):
+        return both_null | ((a == b) | _integer_close(a, b, rtol, atol)).fill_null(False)
     return both_null | (a == b).fill_null(False)

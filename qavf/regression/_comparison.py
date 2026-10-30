@@ -10,7 +10,12 @@ import polars as pl
 from qavf.numeric import tolerance_fraction
 from qavf.regression._cells import _cell_change
 from qavf.regression._evidence import _capture_cells, _capture_native, _Changes
-from qavf.regression._numeric import _difference_size, _integer_difference_maxima, _settled
+from qavf.regression._numeric import (
+    _difference_size,
+    _integer_difference_maxima,
+    _settled,
+    native_integer_tolerance,
+)
 from qavf.regression._plan import ComparisonPlan
 from qavf.regression._schema import _encode_temporal, _nested, _structure_changed, _type_changed
 from qavf.regression.models import ComparisonExecution, ComparisonResult
@@ -157,10 +162,13 @@ def _compare_batch(
         if not pending.any():
             continue
         positions = pending.arg_true()
-        # Zero-tolerance integer equality is already decided exactly by the
-        # native prefilter. Nonzero tolerance and Decimal pairs keep the exact
-        # scalar fallback; neither branch casts exact inputs to floats.
-        exact_integer = da.is_integer() and tolerance(column) == (0, 0)
+        # 64-bit integer closeness, with or without tolerance, is already decided
+        # exactly by the native prefilter: what remains pending has changed. Wider
+        # tolerance terms and Decimal pairs keep the exact scalar fallback; neither
+        # branch casts exact inputs to floats.
+        exact_integer = da.is_integer() and (
+            tolerance(column) == (0, 0) or native_integer_tolerance(da, *tolerance(column))
+        )
         native = (
             _TOLERANCE_PREFILTER
             and scalar
