@@ -24,7 +24,8 @@ A member with too few values on a side is not assessed, never passed.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Callable
+import operator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar, Literal
 
@@ -190,13 +191,27 @@ def _completed_test(
     policy would not run are not evaluated here either.
     """
     result = run() if inference.tests and needs_test(inference.decision, material) else None
+    return _CompletedTest(result)
 
-    def completed() -> TestResult:
-        if result is None:
+
+class _CompletedTest:
+    """A retained test result, or a refusal when the decision policy skipped the test."""
+
+    __slots__ = ("result",)
+
+    def __init__(self, result: TestResult | None) -> None:
+        self.result = result
+
+    def __call__(self) -> TestResult:
+        if self.result is None:
             raise RuntimeError("the decision policy did not request this test")
-        return result
+        return self.result
 
-    return completed
+
+def _sliced_rows(rows: pl.DataFrame, selected: list[str]) -> Iterator[tuple[Any, ...]]:
+    """The selected columns' rows, made precise one bounded slice at a time."""
+    for batch in rows.select(selected).iter_slices(8192):
+        yield from precise_frame(batch).iter_rows()
 
 
 def _float(value: Any) -> float | None:
@@ -526,11 +541,6 @@ class DistributionLevel(ComparisonLevel):
                 rows = pl.DataFrame({ordinal: [0], column: [None], left: [None], right: [None]})
         inputs.ctx.check_materialization("categorical distribution groups", rows)
         selected = [ordinal, *keys, column, left, right]
-
-        def grouped_rows():
-            for batch in rows.select(selected).iter_slices(8192):
-                yield from precise_frame(batch).iter_rows()
-
         measured: list[_Measured] = []
         unmeasured: list[dict[str, Any]] = []
         evidence = inputs.evidence()
@@ -538,7 +548,9 @@ class DistributionLevel(ComparisonLevel):
         limit = inputs.ctx.evidence_limit
         detail_budget = BoundedEvidence(limit, byte_limit=inputs.ctx.evidence_bytes)
         family_bytes = 0
-        for position, entries in itertools.groupby(grouped_rows(), key=lambda row: row[0]):
+        for position, entries in itertools.groupby(
+            _sliced_rows(rows, selected), key=operator.itemgetter(0)
+        ):
             table: list[tuple[Any, int, int]] = []
             group: dict[str, Any] = {}
             table_bytes = 0

@@ -17,8 +17,13 @@ import sys
 import tempfile
 import time
 import tracemalloc
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import polars as pl
 
 
 def runtime_digest(source: Path) -> str:
@@ -27,6 +32,33 @@ def runtime_digest(source: Path) -> str:
         digest.update(path.relative_to(source).as_posix().encode())
         digest.update(path.read_bytes())
     return digest.hexdigest()
+
+
+@contextmanager
+def range_batches(rows: int, batch_rows: int) -> Iterator[Iterator[pl.DataFrame]]:
+    """Yield consecutive integer frames of ``batch_rows`` rows covering ``range(rows)``."""
+    import polars as pl
+
+    yield (
+        pl.DataFrame({"x": range(start, min(rows, start + batch_rows))})
+        for start in range(0, rows, batch_rows)
+    )
+
+
+def count_and_sum(frame: pl.LazyFrame) -> pl.LazyFrame:
+    """The row count and the sum of ``x``."""
+    import polars as pl
+
+    return frame.select(pl.len(), pl.col("x").sum())
+
+
+def peak_rss_native() -> int | None:
+    """This process's ``ru_maxrss`` in the platform's native units, or None on Windows."""
+    if sys.platform != "win32":
+        import resource
+
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return None
 
 
 def main() -> None:
@@ -46,16 +78,13 @@ def main() -> None:
     from qavf.engine.context import DataContext
     from qavf.inputs.normalize import prepare
 
-    @contextmanager
-    def batches():
-        yield (
-            pl.DataFrame({"x": range(start, min(args.rows, start + args.batch_rows))})
-            for start in range(0, args.rows, args.batch_rows)
-        )
-
     with tempfile.TemporaryDirectory() as directory:
         settings, frames = prepare(
-            BatchSource(batches, schema={"x": pl.Int64}),
+            BatchSource(
+                range_batches,
+                schema={"x": pl.Int64},
+                kwargs={"rows": args.rows, "batch_rows": args.batch_rows},
+            ),
             schema={},
             config=None,
             resources=ResourceLimits(
@@ -77,9 +106,7 @@ def main() -> None:
                 "resources": ctx.resource_usage(),
                 "python_allocations": tracemalloc.get_traced_memory() if args.trace else None,
             }
-            result = observation.reduce(
-                lambda frame: frame.select(pl.len(), pl.col("x").sum())
-            ).row(0)
+            result = observation.reduce(count_and_sum).row(0)
             expected = (args.rows, args.rows * (args.rows - 1) // 2)
             if result != expected:
                 raise RuntimeError(f"observation mismatch: {result} != {expected}")
@@ -89,12 +116,7 @@ def main() -> None:
             raise RuntimeError("owned state was not cleaned up")
         if args.trace:
             tracemalloc.stop()
-    try:
-        import resource
-
-        peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    except ImportError:
-        peak_rss = None
+    peak_rss = peak_rss_native()
     if runtime_digest(args.source) != before:
         raise RuntimeError("source changed during benchmark")
     print(

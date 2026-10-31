@@ -228,6 +228,11 @@ def _equivalence(method: str) -> TestResult:
     return untested(method, f"{method} has no equivalence form")
 
 
+def _already_built[T](value: T) -> T:
+    """An already constructed detail model, offered to a deferred builder unchanged."""
+    return value
+
+
 @register_level
 class RelationshipsLevel(ComparisonLevel):
     """Correlation changes, ratio invariants and agreement of matched records."""
@@ -640,7 +645,7 @@ class RelationshipsLevel(ComparisonLevel):
                 if hard:
                     record["hard_limits"] = ", ".join(hard)
                 family.add(bool(measured.material), name, record, magnitude, None if hard else run)
-                append_model(found, detail_budget, partial(lambda value: value, measured))
+                append_model(found, detail_budget, partial(_already_built, measured))
             plan = MeasureTest("identity_fit", None)
             what = f"Agreement of {column}"
             decided = self._decide(

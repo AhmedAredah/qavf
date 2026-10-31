@@ -391,6 +391,12 @@ def grouped_quantile(
     return grouped_quantiles(relation, keys, value, {alias: probability})
 
 
+def _rank_at(exact: Fraction, count: int, *, upper: bool = False) -> int:
+    """Lower (or upper) zero-based rank of an exact probability among ``count`` values."""
+    quotient, remainder = divmod(max(count - 1, 0) * exact.numerator, exact.denominator)
+    return quotient + int(upper and remainder != 0)
+
+
 def grouped_quantiles(
     relation: ProjectedRelation,
     keys: Sequence[str],
@@ -434,13 +440,8 @@ def grouped_quantiles(
             lower = quotient.cast(pl.Int64)
             upper = (quotient + (rank % denominator != 0).cast(pl.Int128)).cast(pl.Int64)
         else:
-
-            def rank_at(count: int, *, upper: bool = False, exact: Fraction = exact) -> int:
-                quotient, remainder = divmod(max(count - 1, 0) * exact.numerator, exact.denominator)
-                return quotient + int(upper and remainder != 0)
-
-            lower = size.map_elements(rank_at, return_dtype=pl.Int64)
-            upper = size.map_elements(partial(rank_at, upper=True), return_dtype=pl.Int64)
+            lower = size.map_elements(partial(_rank_at, exact), return_dtype=pl.Int64)
+            upper = size.map_elements(partial(_rank_at, exact, upper=True), return_dtype=pl.Int64)
         reductions[low] = ordered.slice(lower, 1).first()
         reductions[high] = ordered.slice(upper, 1).first()
     reduced = grouped_reduce(relation, keys, reductions)

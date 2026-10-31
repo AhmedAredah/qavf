@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
+from functools import partial
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -59,23 +60,30 @@ def project_input(ctx: DataContext, value: object, columns: Iterable[str]) -> pl
     else:
         raise TypeError("auxiliary input must be a supported frame, path or input descriptor")
     selected = list(dict.fromkeys(columns))
-
-    def attempt() -> pl.DataFrame:
-        source.prepare_identity(hash_contents=True)
-        view = SourceReadView(ctx.source_read_services(), source)
-        try:
-            schema = view.schema()
-            rename = {old: new for old, new in spec.rename.items() if old in schema}
-            public = [rename.get(name, name) for name in schema]
-            if len(public) != len(set(public)):
-                raise SourceError("auxiliary Dataset.rename produces duplicate columns")
-            inverse = {new: old for old, new in rename.items()}
-            if missing := set(selected) - set(public):
-                raise SourceError(f"auxiliary input lacks column(s) {sorted(missing)!r}")
-            raw_columns = [inverse.get(name, name) for name in selected]
-            frame = view.project(raw_columns)
-            return frame.rename({old: new for old, new in rename.items() if old in raw_columns})
-        finally:
-            view.close()
-
+    attempt = partial(_read_projection, ctx, source, spec.rename, selected)
     return ctx.run_source_operation([source], attempt)
+
+
+def _read_projection(
+    ctx: DataContext,
+    source: DataSource,
+    renames: Mapping[str, str],
+    selected: Sequence[str],
+) -> pl.DataFrame:
+    """One attempt to read ``selected`` public columns through a fresh source view."""
+    source.prepare_identity(hash_contents=True)
+    view = SourceReadView(ctx.source_read_services(), source)
+    try:
+        schema = view.schema()
+        rename = {old: new for old, new in renames.items() if old in schema}
+        public = [rename.get(name, name) for name in schema]
+        if len(public) != len(set(public)):
+            raise SourceError("auxiliary Dataset.rename produces duplicate columns")
+        inverse = {new: old for old, new in rename.items()}
+        if missing := set(selected) - set(public):
+            raise SourceError(f"auxiliary input lacks column(s) {sorted(missing)!r}")
+        raw_columns = [inverse.get(name, name) for name in selected]
+        frame = view.project(raw_columns)
+        return frame.rename({old: new for old, new in rename.items() if old in raw_columns})
+    finally:
+        view.close()

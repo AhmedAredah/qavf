@@ -357,9 +357,14 @@ class ReportAnalysis:
         return tuple(
             sorted(
                 (index for index, result in enumerate(self.results) if result.failed),
-                key=lambda index: (-self.results[index].severity.rank, self.results[index].rule_id),
+                key=self._failure_order,
             )
         )
+
+    def _failure_order(self, index: int) -> tuple[int, str]:
+        """Most severe first, then by rule id, for the result at ``index``."""
+        result = self.results[index]
+        return -result.severity.rank, result.rule_id
 
     @functools.cached_property
     def failures(self) -> tuple[RuleResult, ...]:

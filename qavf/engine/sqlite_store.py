@@ -17,6 +17,34 @@ if TYPE_CHECKING:
     from qavf.engine.resources import RunResources
 
 
+class _ReadOnlyAuthorizer:
+    """SQLite authorizer that permits everything and records whether only reads occurred."""
+
+    _READS = frozenset(
+        {
+            sqlite3.SQLITE_SELECT,
+            sqlite3.SQLITE_READ,
+            sqlite3.SQLITE_FUNCTION,
+            sqlite3.SQLITE_RECURSIVE,
+        }
+    )
+
+    def __init__(self) -> None:
+        self.readonly = True
+
+    def __call__(
+        self,
+        action: int,
+        _first: str | None,
+        _second: str | None,
+        _database: str | None,
+        _trigger: str | None,
+    ) -> int:
+        """Note one prepared action; never deny it."""
+        self.readonly &= action in self._READS
+        return sqlite3.SQLITE_OK
+
+
 class Store:
     """One owned SQLite database charged to ``RunResources.spill_budget``."""
 
@@ -33,9 +61,7 @@ class Store:
             raise ResourceLimitError("indexed work requires at least 65,536 memory target bytes")
         # One owner uses a store at a time, but run cleanup may close it from
         # another thread (an abandoned timed-out rule), so allow that close.
-        self.connection = sqlite3.connect(
-            self.path, isolation_level=None, check_same_thread=False
-        )
+        self.connection = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
         try:
             self.resources.own_cleanup(self)
         except BaseException:
@@ -62,19 +88,7 @@ class Store:
         """Ask SQLite which capabilities a prepared statement uses; never parse SQL."""
         from qavf.engine.resources import ResourceLimitError
 
-        readonly = True
-        reads = {
-            sqlite3.SQLITE_SELECT,
-            sqlite3.SQLITE_READ,
-            sqlite3.SQLITE_FUNCTION,
-            sqlite3.SQLITE_RECURSIVE,
-        }
-
-        def authorize(action, _first, _second, _database, _trigger):
-            nonlocal readonly
-            readonly &= action in reads
-            return sqlite3.SQLITE_OK
-
+        authorize = _ReadOnlyAuthorizer()
         self.connection.set_authorizer(authorize)
         try:
             for row in self.connection.execute("EXPLAIN QUERY PLAN " + sql, parameters):
@@ -86,11 +100,11 @@ class Store:
             self.connection.set_authorizer(None)
         # Result-bearing writes can outlive their admitted credit while their
         # cursor is being consumed. Work stores permit only completed writes.
-        if not readonly and any(
+        if not authorize.readonly and any(
             row[1] == "ResultRow" for row in self.connection.execute("EXPLAIN " + sql, parameters)
         ):
             raise ValueError("indexed work writes must not return result rows")
-        return readonly
+        return authorize.readonly
 
     def _run(self, sql: str, values: Any, *, many: bool) -> sqlite3.Cursor:
         from qavf.engine.resources import ResourceLimitError

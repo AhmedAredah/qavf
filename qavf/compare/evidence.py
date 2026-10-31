@@ -124,30 +124,33 @@ def bound_check(check: CheckResult, rows: int, byte_limit: int) -> CheckResult:
     )
 
 
-def bound_level(
-    level: LevelResult, rows: int, byte_limit: int, *, detail_rows: int | None = None
-) -> LevelResult:
-    """Defensive publication boundary, including extension results and nested details."""
-    any_dropped = False
-    details = rows if detail_rows is None else detail_rows
-    detail_remaining = byte_limit
+class _LevelTrimmer:
+    """Recursive optional-detail trimmer sharing one level's remaining byte budget."""
 
-    def trim(value: Any, field: str = "") -> Any:
-        nonlocal any_dropped, detail_remaining
+    def __init__(self, rows: int, byte_limit: int, details: int) -> None:
+        self.rows = rows
+        self.byte_limit = byte_limit
+        self.details = details
+        self.detail_remaining = byte_limit
+        self.any_dropped = False
+
+    def __call__(self, value: Any, field: str = "") -> Any:
+        rows = self.rows
+        details = self.details
         if isinstance(value, Significance):
-            bounded = bound_significance(value, rows, max(0, detail_remaining - 10))
+            bounded = bound_significance(value, rows, max(0, self.detail_remaining - 10))
             assert bounded is not None
             if bounded.tests:
                 size = size_within(
                     [test.model_dump(mode="python") for test in bounded.tests],
-                    max(0, detail_remaining - 10),
+                    max(0, self.detail_remaining - 10),
                 )
                 assert size is not None
-                detail_remaining -= size + 10  # {"tests": [...]} framing
-            any_dropped |= len(bounded.tests) != len(value.tests)
+                self.detail_remaining -= size + 10  # {"tests": [...]} framing
+            self.any_dropped |= len(bounded.tests) != len(value.tests)
             return bounded
         if isinstance(value, CheckResult):
-            return bound_check(value, rows, byte_limit)
+            return bound_check(value, rows, self.byte_limit)
         if isinstance(value, SnapshotModel):
             updates: dict[str, Any] = {}
             optional = set(getattr(value, "detail_fields", ()))
@@ -167,7 +170,7 @@ def bound_level(
                     candidates = original if isinstance(original, (list, tuple)) else [original]
                     kept: list[Any] = []
                     used = 0
-                    remaining = detail_remaining
+                    remaining = self.detail_remaining
                     overhead = len(name.encode("utf-8")) + (5 if fields_kept == 0 else 4)
                     available = max(0, remaining - overhead)
                     sequence = isinstance(original, (list, tuple))
@@ -183,24 +186,33 @@ def bound_level(
                         size = size_within(raw, available - used - framing)
                         if size is None or used + size + framing > available:
                             break
-                        kept.append(trim(item, name))
+                        kept.append(self(item, name))
                         used += size + framing
                     if kept:
-                        detail_remaining = max(0, detail_remaining - used - overhead)
+                        self.detail_remaining = max(0, self.detail_remaining - used - overhead)
                         fields_kept += 1
                     dropped |= len(kept) != len(candidates)
                     updates[name] = (
                         kept if isinstance(original, (list, tuple)) else (kept[0] if kept else None)
                     )
                 else:
-                    updates[name] = trim(original, name)
-            any_dropped |= dropped
+                    updates[name] = self(original, name)
+            self.any_dropped |= dropped
             if dropped and "truncated" in type(value).model_fields:
                 updates["truncated"] = True
             return value.model_copy(update=updates)
         if isinstance(value, (list, tuple)):
-            return [trim(item, field) for item in value]
+            return [self(item, field) for item in value]
         return value
 
+
+def bound_level(
+    level: LevelResult, rows: int, byte_limit: int, *, detail_rows: int | None = None
+) -> LevelResult:
+    """Defensive publication boundary, including extension results and nested details."""
+    details = rows if detail_rows is None else detail_rows
+    trim = _LevelTrimmer(rows, byte_limit, details)
     result: LevelResult = trim(level)
-    return result.model_copy(update={"details_truncated": level.details_truncated or any_dropped})
+    return result.model_copy(
+        update={"details_truncated": level.details_truncated or trim.any_dropped}
+    )

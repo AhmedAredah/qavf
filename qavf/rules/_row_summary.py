@@ -31,6 +31,17 @@ def row_aliases(columns: Sequence[str]) -> tuple[str, str]:
     return row, problem
 
 
+@dataclass(frozen=True, slots=True)
+class _ReducedPlan:
+    """Build the labelled plan for a source, then reduce it to counts and sample."""
+
+    build: Callable[[pl.LazyFrame], pl.LazyFrame]
+    reducers: list[pl.Expr]
+
+    def __call__(self, source: pl.LazyFrame) -> pl.LazyFrame:
+        return self.build(source).select(self.reducers)
+
+
 def summarize_rows(
     ctx: DataContext,
     dataset: str,
@@ -88,11 +99,7 @@ def summarize_rows(
                 .implode()
                 .alias(sample)
             )
-
-        def plan(source: pl.LazyFrame) -> pl.LazyFrame:
-            assert build is not None
-            return build(source).select(reducers_lazy)
-
+        plan = _ReducedPlan(build, reducers_lazy)
         reduced = reduce(plan) if reduce is not None else ctx.reduce(dataset, plan)
     values = reduced[sample][0] if limit else None
     evidence = values.struct.unnest() if values is not None else pl.DataFrame()

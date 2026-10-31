@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import logging
+import operator
 import os
 import threading
 import time
@@ -77,6 +78,39 @@ if TYPE_CHECKING:
 
 class DatasetNotAvailableError(KeyError):
     """Raised when a rule asks for a dataset the context cannot provide."""
+
+
+class _LatestAttempt:
+    """Open one observation per source attempt, closing every earlier attempt first."""
+
+    def __init__(self, open_attempt: Callable[[], Observation]) -> None:
+        self._open_attempt = open_attempt
+        self._attempts: list[Observation] = []
+
+    def __call__(self) -> Observation:
+        """Discard earlier attempts and own a fresh one."""
+        self.close()
+        current = self._open_attempt()
+        self._attempts.append(current)
+        return current
+
+    def close(self) -> None:
+        """Release every attempt still owned."""
+        for previous in self._attempts:
+            previous.close()
+        self._attempts.clear()
+
+
+class _NativeStatement:
+    """Consumer factory that runs one statement through a native session reader."""
+
+    def __init__(self, reader: str, statement: str) -> None:
+        self._reader = reader
+        self._statement = statement
+
+    def __call__(self) -> Callable[[SqlReadSession], Any]:
+        """Return a fresh consumer for one native read attempt."""
+        return operator.methodcaller(self._reader, self._statement)
 
 
 class DataContext:
@@ -412,13 +446,11 @@ class DataContext:
                     frame = self._catalog.prepare(name, frame)
                 self._check_row_budget(name, frame)
                 self._check_cancelled()
-
-                def publish_lazy_metadata() -> None:
-                    self._check_cancelled()
-                    self._require_available(name)
-                    self._catalog.record_frame(name, frame)
-
-                self._frames.publish({name: frame}, publish_lazy_metadata, self._lock)
+                self._frames.publish(
+                    {name: frame},
+                    functools.partial(self._publish_lazy_metadata, name, frame),
+                    self._lock,
+                )
                 return frame.clone()
             source = self._catalog.sources.get(name)
             if source is None:
@@ -461,14 +493,11 @@ class DataContext:
             self._add_thread_load_time(time.perf_counter() - started)
             notes = dict(getattr(source, "load_notes", {}) or {})
             self._check_cancelled()
-
-            def publish_metadata() -> None:
-                self._check_cancelled()
-                self._require_available(name)
-                self._catalog.record_frame(name, frame)
-                self._catalog.record_load(name, notes, time.perf_counter() - started)
-
-            self._frames.publish({name: frame}, publish_metadata, self._lock)
+            self._frames.publish(
+                {name: frame},
+                functools.partial(self._publish_load_metadata, name, frame, notes, started),
+                self._lock,
+            )
             logger.info(
                 "Loaded dataset %r: %d rows from %s",
                 name,
@@ -476,6 +505,21 @@ class DataContext:
                 redact_text(source.describe()),
             )
             return frame.clone()
+
+    def _publish_lazy_metadata(self, name: str, frame: pl.DataFrame) -> None:
+        """Record a collected lazy dataset's frame metadata at publication."""
+        self._check_cancelled()
+        self._require_available(name)
+        self._catalog.record_frame(name, frame)
+
+    def _publish_load_metadata(
+        self, name: str, frame: pl.DataFrame, notes: dict[str, Any], started: float
+    ) -> None:
+        """Record an eager load's frame metadata, notes and duration at publication."""
+        self._check_cancelled()
+        self._require_available(name)
+        self._catalog.record_frame(name, frame)
+        self._catalog.record_load(name, notes, time.perf_counter() - started)
 
     def pandas(self, name: str) -> pd.DataFrame:
         """Return a detached pandas view; cached state cannot be mutated through the result."""
@@ -682,21 +726,11 @@ class DataContext:
             empty = pl.DataFrame(schema=schema)
             prepared = self._catalog.prepare(name, empty)
             rename = dict(zip(empty.columns, prepared.columns, strict=True))
-            attempts: list[Observation] = []
-
-            def admit() -> Observation:
-                for previous in attempts:
-                    previous.close()
-                attempts.clear()
-                current = observe_batches(self, source, rename)
-                attempts.append(current)
-                return current
-
+            admit = _LatestAttempt(functools.partial(observe_batches, self, source, rename))
             try:
                 observed = self._source_operation([name], admit)
             except BaseException:
-                for previous in attempts:
-                    previous.close()
+                admit.close()
                 raise
             try:
                 self._check_cancelled()
@@ -1229,102 +1263,122 @@ class DataContext:
 
     def native_read_services(self) -> NativeReadServices:
         """Wire native reads without exposing context internals to session code."""
-        from qavf.engine.sql_read import NativeReadServices, NativeReadUnavailable, SqlReadPolicy
-
-        def sources(names, extra):
-            for name in names:
-                self._require_available(name)
-                if name in self._frames or name in self._lazy or name not in self._catalog.sources:
-                    raise NativeReadUnavailable(
-                        f"dataset {name!r} requires its typed/materialized reader"
-                    )
-            bound = {name: self._catalog.sources[name] for name in names}
-            declared = {name.lower() for name in self.declared()}
-            for name, config in extra.items():
-                if name.lower() in declared:
-                    raise ValueError(
-                        f"ad-hoc source alias {name!r} collides with a declared dataset"
-                    )
-                bound[name] = (
-                    (
-                        config
-                        if config.env.connection_budget is self._resources
-                        else config.bind(self.env)
-                    )
-                    if isinstance(config, DataSource)
-                    else self.build_source(config)
-                )
-            return bound
-
-        def fingerprint(name, source):
-            if not self._catalog.has_fingerprint(name):
-                return self._fingerprint(name, source)
-            return None
-
-        def publish(names, observations, fingerprints):
-            with self._lock:
-                self._catalog.mark_identity_used(names)
-                for name in names:
-                    self._capabilities.record_native(name)
-                    self._catalog.record_native(name, *observations[name])
-                    self._catalog.record_native_plan(name)
-                    if not self._catalog.has_fingerprint(name):
-                        self._catalog.record_fingerprint(name, fingerprints[name])
+        from qavf.engine.sql_read import NativeReadServices, SqlReadPolicy
 
         return NativeReadServices(
             SqlReadPolicy(
                 self.env.base_dir, self.declared, self._check_cancelled, self.check_materialization
             ),
-            sources,
+            self._native_sources,
             self._sql_connections,
             self._operations,
             self._catalog.prepare,
-            fingerprint,
-            publish,
+            self._native_fingerprint,
+            self._publish_native,
             self._hash_inputs,
         )
+
+    def _native_sources(
+        self, names: tuple[str, ...], extra: Mapping[str, Mapping[str, Any] | DataSource]
+    ) -> dict[str, DataSource]:
+        """Bind declared native participants and ad-hoc aliases for one native read."""
+        from qavf.engine.sql_read import NativeReadUnavailable
+
+        for name in names:
+            self._require_available(name)
+            if name in self._frames or name in self._lazy or name not in self._catalog.sources:
+                raise NativeReadUnavailable(
+                    f"dataset {name!r} requires its typed/materialized reader"
+                )
+        bound = {name: self._catalog.sources[name] for name in names}
+        declared = {name.lower() for name in self.declared()}
+        for name, config in extra.items():
+            if name.lower() in declared:
+                raise ValueError(f"ad-hoc source alias {name!r} collides with a declared dataset")
+            bound[name] = (
+                (
+                    config
+                    if config.env.connection_budget is self._resources
+                    else config.bind(self.env)
+                )
+                if isinstance(config, DataSource)
+                else self.build_source(config)
+            )
+        return bound
+
+    def _native_fingerprint(self, name: str, source: DataSource) -> dict[str, Any] | None:
+        """Fingerprint a native participant unless one is already recorded."""
+        if not self._catalog.has_fingerprint(name):
+            return self._fingerprint(name, source)
+        return None
+
+    def _publish_native(
+        self,
+        names: tuple[str, ...],
+        observations: dict[str, tuple[dict[str, pl.DataType], float]],
+        fingerprints: dict[str, dict[str, Any] | None],
+    ) -> None:
+        """Record a completed native read's capabilities, schemas and fingerprints."""
+        with self._lock:
+            self._catalog.mark_identity_used(names)
+            for name in names:
+                self._capabilities.record_native(name)
+                self._catalog.record_native(name, *observations[name])
+                self._catalog.record_native_plan(name)
+                if not self._catalog.has_fingerprint(name):
+                    self._catalog.record_fingerprint(name, fingerprints[name])
 
     def source_read_services(self) -> SourceReadServices:
         """Compose scoped-reader dependencies at the engine boundary."""
         from qavf.engine.batch_input import observe_batches
-        from qavf.engine.observation import _lazy, observe_source
+        from qavf.engine.observation import observe_source
         from qavf.engine.source_read import SourceReadServices
-        from qavf.engine.sql_read import consume_native
-
-        def eager(source):
-            self._resources.eager_fallbacks.add("<ad-hoc>")
-            return self._load_with_retries("<ad-hoc>", source)
-
-        def schema(source, alias):
-            return consume_native(
-                self,
-                lambda: lambda session: session.schema(f"SELECT * FROM {quote_identifier(alias)}"),
-                sources={alias: source},
-            )
-
-        def frame(source, alias, columns):
-            projection = ", ".join(quote_identifier(column) for column in columns)
-            return consume_native(
-                self,
-                lambda: (
-                    lambda session: session.frame(
-                        f"SELECT {projection} FROM {quote_identifier(alias)}"
-                    )
-                ),
-                sources={alias: source},
-            )
 
         return SourceReadServices(
             self._check_cancelled,
             self.declared,
             self.check_materialization,
-            lambda source: observe_batches(self, source),
-            lambda plan, budget: _lazy(self, plan, None, budget),
-            eager,
-            schema,
-            frame,
-            lambda source, columns: observe_source(self, source, columns),
+            functools.partial(observe_batches, self),
+            self._lazy_observation,
+            self._load_ad_hoc,
+            self._native_ad_hoc_schema,
+            self._native_ad_hoc_frame,
+            functools.partial(observe_source, self),
             self.work_store,
+        )
+
+    def _lazy_observation(self, plan: pl.LazyFrame, budget: int) -> Observation:
+        """Observe an ad-hoc lazy plan in full under its row budget."""
+        from qavf.engine.observation import _lazy
+
+        return _lazy(self, plan, None, budget)
+
+    def _load_ad_hoc(self, source: DataSource) -> pl.DataFrame:
+        """Load an ad-hoc source eagerly, recording the fallback."""
+        self._resources.eager_fallbacks.add("<ad-hoc>")
+        return self._load_with_retries("<ad-hoc>", source)
+
+    def _native_ad_hoc_schema(self, source: DataSource, alias: str) -> dict[str, pl.DataType]:
+        """Read an ad-hoc source's schema through a native session."""
+        from qavf.engine.sql_read import consume_native
+
+        return consume_native(
+            self,
+            _NativeStatement("schema", f"SELECT * FROM {quote_identifier(alias)}"),
+            sources={alias: source},
+        )
+
+    def _native_ad_hoc_frame(
+        self, source: DataSource, alias: str, columns: list[str]
+    ) -> pl.DataFrame:
+        """Read selected columns of an ad-hoc source through a native session."""
+        from qavf.engine.sql_read import consume_native
+
+        projection = ", ".join(quote_identifier(column) for column in columns)
+        return consume_native(
+            self,
+            _NativeStatement("frame", f"SELECT {projection} FROM {quote_identifier(alias)}"),
+            sources={alias: source},
         )
 
     def read_source[T](
@@ -1541,17 +1595,18 @@ class DataContext:
                     lambda: self._snapshot_attempt(connection, members),
                 )
                 self._check_cancelled()
-
-                def publish_metadata() -> None:
-                    self._check_cancelled()
-                    for name in staged:
-                        self._require_available(name)
-                    for name, failure in failures.items():
-                        self._catalog.record_failure(name, failure)
-                    for name, frame in staged.items():
-                        self._catalog.record_snapshot(name, frame, connection, members, started_at)
-
-                self._frames.publish(staged, publish_metadata, self._lock)
+                self._frames.publish(
+                    staged,
+                    functools.partial(
+                        self._publish_snapshot_metadata,
+                        connection,
+                        members,
+                        staged,
+                        failures,
+                        started_at,
+                    ),
+                    self._lock,
+                )
             except Exception as exc:
                 self._check_cancelled()
                 failure = redacted_error(
@@ -1560,6 +1615,23 @@ class DataContext:
                 with self._lock:
                     for name in members:
                         self._catalog.record_failure(name, failure)
+
+    def _publish_snapshot_metadata(
+        self,
+        connection: str,
+        members: list[str],
+        staged: dict[str, pl.DataFrame],
+        failures: dict[str, SourceError],
+        started_at: datetime,
+    ) -> None:
+        """Record a snapshot attempt's member failures and frames at publication."""
+        self._check_cancelled()
+        for name in staged:
+            self._require_available(name)
+        for name, failure in failures.items():
+            self._catalog.record_failure(name, failure)
+        for name, frame in staged.items():
+            self._catalog.record_snapshot(name, frame, connection, members, started_at)
 
     def _snapshot_attempt(
         self, connection: str, members: list[str]

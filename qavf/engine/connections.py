@@ -7,6 +7,7 @@ Dataset loading, source integrity and rule policy remain with DataContext.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import threading
 from collections.abc import Iterable, Iterator, Mapping
@@ -206,7 +207,9 @@ class SqlConnections:
             self._local.connections = {}
             self._local.registered = set()
         failures = self._close_selected(connections)
-        failures.extend(attempt_cleanup([lambda: self.session.close_worker_connections(owner)]))
+        failures.extend(
+            attempt_cleanup([functools.partial(self.session.close_worker_connections, owner)])
+        )
         with self._lock:
             if not self._owners.get(owner):
                 self._registration_bytes.pop(owner, None)

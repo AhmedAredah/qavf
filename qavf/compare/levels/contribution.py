@@ -26,6 +26,7 @@ overall rate's (a Poisson test of the totals when the numerators are counts).
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from fractions import Fraction
 from typing import Any, ClassVar, Literal
 
@@ -59,6 +60,7 @@ from qavf.inference.registry import TESTS, TestInput
 from qavf.inference.results import TestResult
 from qavf.numeric import count_input, exact_rational, report_number
 from qavf.statistics.decomposition import (
+    Contribution,
     DecompositionMethod,
     contributions,
     minimal_set,
@@ -174,6 +176,25 @@ class ContributionParams(InferenceParams):
 def _exact(value: Any) -> Fraction:
     exact = exact_rational(value)
     return exact if exact is not None else Fraction(0)
+
+
+def _member_records(
+    ranked: Sequence[Contribution], keys: Sequence[str], total: Fraction, picked: set[int]
+) -> Iterator[dict[str, Any]]:
+    """Each ranked member's raw contribution record with its running cumulative share."""
+    running = Fraction(0)
+    for position, item in enumerate(ranked):
+        running += item.change
+        yield {
+            "group": dict(zip(keys, item.key, strict=True)),
+            "baseline": report_number(item.baseline) or 0,
+            "candidate": report_number(item.candidate) or 0,
+            "change": report_number(item.change) or 0,
+            "exact_change": str(item.change),
+            "share": float(item.change / total) if total else None,
+            "cumulative": float(running / total) if total else None,
+            "in_minimal_set": position in picked,
+        }
 
 
 @register_level
@@ -304,23 +325,12 @@ class ContributionLevel(ComparisonLevel):
         chosen = minimal_set(changes, Fraction(str(params.share)))
         picked = set(chosen or ())
         limit = inputs.spec.chart_points
-
-        def detail_records():
-            running = Fraction(0)
-            for position, item in enumerate(ranked):
-                running += item.change
-                yield {
-                    "group": dict(zip(keys, item.key, strict=True)),
-                    "baseline": report_number(item.baseline) or 0,
-                    "candidate": report_number(item.candidate) or 0,
-                    "change": report_number(item.change) or 0,
-                    "exact_change": str(item.change),
-                    "share": float(item.change / total) if total else None,
-                    "cumulative": float(running / total) if total else None,
-                    "in_minimal_set": position in picked,
-                }
-
-        kept = model_records(MemberContribution, detail_records(), limit, inputs.ctx.evidence_bytes)
+        kept = model_records(
+            MemberContribution,
+            _member_records(ranked, keys, total, picked),
+            limit,
+            inputs.ctx.evidence_bytes,
+        )
         explained = sum((changes[i] for i in picked), Fraction(0))
         return DimensionContribution(
             dimension=label,

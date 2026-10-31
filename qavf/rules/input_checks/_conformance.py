@@ -37,6 +37,11 @@ from qavf.sources.sql import quote_identifier, sql_literal
 from ._datasets import _row_count
 
 
+def _count_rows(plan: pl.LazyFrame) -> pl.LazyFrame:
+    """Reduce an observed plan to its row count."""
+    return plan.select(pl.len())
+
+
 @dataclass(frozen=True)
 class DatasetView:
     """A dataset as INP-002 sees it: its contract, actual types and row count."""
@@ -71,7 +76,7 @@ class DatasetView:
             columns.extend(column for column in schema.primary_key or [] if column in actual)
         needed = set(columns)
         with ctx.observe(name, [column for column in actual if column in needed]) as observed:
-            rows = int(observed.reduce(lambda plan: plan.select(pl.len())).item())
+            rows = int(observed.reduce(_count_rows).item())
             yield cls(ctx, name, schema, actual, rows, observed)
 
     def context(self, column: str) -> list[str]:

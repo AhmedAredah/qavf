@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from decimal import Decimal
+from functools import partial
 from typing import cast
 
 import polars as pl
@@ -249,6 +250,16 @@ def _decimal_from_coefficients(values: pl.Series, scale: int) -> pl.Series:
     return cast(pl.Series, pl.from_arrow(decimal, rechunk=False)).rename(values.name)
 
 
+def _scale_float(multiplier: float, values: pl.Series) -> pl.Series:
+    """Multiply in binary64, refusing finite values that overflow or underflow to zero."""
+    values = values.cast(pl.Float64)
+    product = values * multiplier
+    lost = values.is_finite() & (~product.is_finite() | ((values != 0) & (product == 0)))
+    if lost.any():
+        raise ValueError("scaling would overflow or underflow finite Float64 values")
+    return product
+
+
 def exact_scale(expr: pl.Expr, dtype: pl.DataType, factor: int | float | Decimal) -> pl.Expr:
     """Multiply a numeric column by a finite factor without rounding exact values.
 
@@ -267,16 +278,9 @@ def exact_scale(expr: pl.Expr, dtype: pl.DataType, factor: int | float | Decimal
         multiplier = float(exact)
         if not math.isfinite(multiplier) or not multiplier:
             raise ValueError("a floating scale factor must be finite and nonzero in Float64")
-
-        def scale_float(values: pl.Series) -> pl.Series:
-            values = values.cast(pl.Float64)
-            product = values * multiplier
-            lost = values.is_finite() & (~product.is_finite() | ((values != 0) & (product == 0)))
-            if lost.any():
-                raise ValueError("scaling would overflow or underflow finite Float64 values")
-            return product
-
-        return expr.map_batches(scale_float, return_dtype=pl.Float64, is_elementwise=True)
+        return expr.map_batches(
+            partial(_scale_float, multiplier), return_dtype=pl.Float64, is_elementwise=True
+        )
     if not (dtype.is_integer() or dtype.is_decimal()):
         raise ValueError(f"only numeric columns can be scaled, not {dtype}")
     coefficient, factor_scale = _decimal_parts(exact)

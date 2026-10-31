@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from typing import Any, ClassVar
 
@@ -221,24 +221,20 @@ class _BatchInput(DataSource[SourceParams]):
                 close()
             raise SourceError("BatchSource.factory must return an owned context manager")
         with manager as batches:
+            yield self._converted(batches)
 
-            def converted() -> Iterator[pl.DataFrame]:
-                for batch in batches:
-                    if isinstance(batch, pl.LazyFrame):
-                        raise SourceError("BatchSource batches must be eager typed tables")
-                    frame = admitted_frame(batch, self.params.row_budget, self.describe())
-                    if dict(frame.schema) != self.batch_schema():
-                        raise SourceError(
-                            "BatchSource batch schema/order differs from its declaration"
-                        )
-                    # Dict equality ignores order; column order is part of this contract.
-                    if frame.columns != list(self.batch.schema):
-                        raise SourceError(
-                            "BatchSource batch schema/order differs from its declaration"
-                        )
-                    yield frame
-
-            yield converted()
+    def _converted(self, batches: Iterable[object]) -> Iterator[pl.DataFrame]:
+        """Admit each produced batch as an eager frame matching the declared schema/order."""
+        for batch in batches:
+            if isinstance(batch, pl.LazyFrame):
+                raise SourceError("BatchSource batches must be eager typed tables")
+            frame = admitted_frame(batch, self.params.row_budget, self.describe())
+            if dict(frame.schema) != self.batch_schema():
+                raise SourceError("BatchSource batch schema/order differs from its declaration")
+            # Dict equality ignores order; column order is part of this contract.
+            if frame.columns != list(self.batch.schema):
+                raise SourceError("BatchSource batch schema/order differs from its declaration")
+            yield frame
 
     def load(self) -> pl.DataFrame:
         raise SourceError("BatchSource requires QAVF's managed observation engine")
