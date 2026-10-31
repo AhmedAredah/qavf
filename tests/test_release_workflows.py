@@ -9,10 +9,14 @@ from scripts.release_checks.gate import REQUIRED_JOBS
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_release_workflow_covers_gate_matrix_and_cannot_publish():
+PUBLISHERS = {"publish-pypi", "github-release", "container"}
+"""The only jobs that may publish, each behind the strict aggregate gate."""
+
+
+def test_release_workflow_covers_gate_matrix_and_publishes_only_after_it():
     config = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
     jobs = config["jobs"]
-    assert jobs.keys() >= REQUIRED_JOBS
+    assert jobs.keys() >= REQUIRED_JOBS | PUBLISHERS
     assert set(jobs["aggregate"]["needs"]) == REQUIRED_JOBS
     assert jobs["aggregate"]["if"] == "always()"
     assert jobs["test"]["strategy"]["matrix"]["python"] == ["3.12", "3.13", "3.14"]
@@ -23,7 +27,14 @@ def test_release_workflow_covers_gate_matrix_and_cannot_publish():
         "macos-3.12",
     }
     assert config["permissions"] == {"contents": "read"}
-    for job in jobs.values():
+    # PyPI publishes only for a v* tag and only after the aggregate passed; the
+    # release and image follow PyPI. No other job publishes or gains write access.
+    assert jobs["publish-pypi"]["needs"] == "aggregate"
+    assert jobs["publish-pypi"]["if"] == "startsWith(github.ref, 'refs/tags/v')"
+    assert jobs["github-release"]["needs"] == jobs["container"]["needs"] == "publish-pypi"
+    for name, job in jobs.items():
+        if name in PUBLISHERS:
+            continue
         assert not job.get("permissions")
         for step in job["steps"]:
             command = step.get("run", "")

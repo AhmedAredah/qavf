@@ -76,32 +76,38 @@ def bound_significance(
     return value if len(tests) == len(value.tests) else value.model_copy(update={"tests": tests})
 
 
+def _field_overhead(name: str, first: bool) -> int:
+    """JSON framing of one field: its quoted name, colon and a brace or comma."""
+    return len(name.encode("utf-8")) + (5 if first else 4)
+
+
 def bound_check(check: CheckResult, rows: int, byte_limit: int) -> CheckResult:
-    """Cap the optional object containing records, metrics and listed tests.
+    """Cap the optional object containing metrics, records and listed tests.
 
     The canonical budget scope is the nonempty subset of these three fields;
-    required verdicts, counts and family summaries belong to the report budget.
-    Braces, field names, colons, commas and each nested payload are charged.
+    required verdicts and counts belong to the report budget. Metrics hold the
+    family summary and exact values, so they are admitted first and sample
+    records take what remains. Braces, field names, colons, commas and each
+    nested payload are charged.
     """
     used = 0
-
-    def overhead(name: str) -> int:
-        return len(name.encode("utf-8")) + (5 if used == 0 else 4)
-
-    evidence = BoundedEvidence(rows, byte_limit=max(0, byte_limit - overhead("affected_records")))
+    metrics = check.metrics
+    if metrics:
+        framing = _field_overhead("metrics", True)
+        metrics_size = size_within(metrics, byte_limit - framing)
+        if metrics_size is None or framing + metrics_size > byte_limit:
+            metrics = {}
+        else:
+            used += framing + metrics_size
+    framing = _field_overhead("affected_records", used == 0)
+    evidence = BoundedEvidence(rows, byte_limit=max(0, byte_limit - used - framing))
     evidence.extend(check.affected_records)
     if evidence.records:
-        used += overhead("affected_records") + evidence.bytes_used
-    metrics = check.metrics
-    framing = overhead("metrics")
-    metrics_size = size_within(metrics, byte_limit - used - framing) if metrics else None
-    if metrics_size is None or used + framing + metrics_size > byte_limit:
-        metrics = {}
-    else:
-        used += framing + metrics_size
+        used += framing + evidence.bytes_used
     significance = check.significance
     if significance is not None:
-        tests = keep_models(significance.tests, rows, max(0, byte_limit - used - overhead("tests")))
+        framing = _field_overhead("tests", used == 0)
+        tests = keep_models(significance.tests, rows, max(0, byte_limit - used - framing))
         significance = significance.model_copy(update={"tests": tests})
     omitted = len(evidence.records) != len(check.affected_records) or bool(
         check.metrics and not metrics

@@ -31,8 +31,17 @@ class Store:
         self._connection_closed = False
         if resources.memory_bytes is not None and resources.memory_bytes < 65_536:
             raise ResourceLimitError("indexed work requires at least 65,536 memory target bytes")
-        self.connection = sqlite3.connect(self.path, isolation_level=None)
-        self.resources.own_cleanup(self)
+        # One owner uses a store at a time, but run cleanup may close it from
+        # another thread (an abandoned timed-out rule), so allow that close.
+        self.connection = sqlite3.connect(
+            self.path, isolation_level=None, check_same_thread=False
+        )
+        try:
+            self.resources.own_cleanup(self)
+        except BaseException:
+            self.connection.close()
+            self.path.unlink(missing_ok=True)
+            raise
         self.connection.execute("PRAGMA page_size=4096")
         self.connection.execute("PRAGMA journal_mode=OFF")
         self.connection.execute("PRAGMA synchronous=OFF")

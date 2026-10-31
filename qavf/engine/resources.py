@@ -292,19 +292,7 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
                     raise ResourceLimitError("frame store has been closed")
             if key in self:
                 del self[key]
-            while True:
-                with self.lock:
-                    if not self.data or (
-                        self.bytes + size <= self.limit and size <= self.retained_budget.remaining
-                    ):
-                        break
-                    old, frame = next(iter(self.data.items()))
-                spill = self._write_spill(frame)
-                with self.lock:
-                    self._publish_spill(old, spill)
-                    self.data.pop(old)
-                    self.bytes -= self.sizes[old]
-                    self._memory_leases.pop(old).release()
+            self._evict_for(size)
             with self.lock:
                 retained = size <= self.limit - self.bytes and self.retained_budget.reserve(size)
                 if retained:
@@ -318,6 +306,27 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
                 with self.lock:
                     self._publish_spill(key, spill)
                     self.sizes[key] = size
+
+    def _evict_for(self, size: int, replacing: Iterable[str] = ()) -> None:
+        """Spill least recently used entries until ``size`` bytes fit (``_writes`` held).
+
+        Entries named in ``replacing`` are about to be replaced, so never spilled.
+        """
+        replaced = set(replacing)
+        while True:
+            with self.lock:
+                if self.bytes + size <= self.limit and size <= self.retained_budget.remaining:
+                    return
+                old = next((key for key in self.data if key not in replaced), None)
+                if old is None:
+                    return
+                frame = self.data[old]
+            spill = self._write_spill(frame)
+            with self.lock:
+                self._publish_spill(old, spill)
+                self.data.pop(old)
+                self.bytes -= self.sizes[old]
+                self._memory_leases.pop(old).release()
 
     def publish(
         self,
@@ -337,6 +346,11 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
             with self.lock:
                 if self._closed:
                     raise ResourceLimitError("frame store has been closed")
+            # Newly loaded data takes the place of the least recently used, as a
+            # single insertion does; it is not left on disk because the cache is full.
+            wanted = sum(frame.estimated_size() for frame in frames.values())
+            self._evict_for(int(min(wanted, self.limit)), replacing=frames)
+            with self.lock:
                 available = max(0, self.limit - self.bytes)
             staging = FrameStore(
                 available,

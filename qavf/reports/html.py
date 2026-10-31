@@ -104,8 +104,13 @@ def _result_views(results: list[RuleResult]) -> list[ResultView]:
 
 
 def _affected(result: RuleResult) -> str:
-    """``3 keys of 2,000 (5 rows)``: the count, its unit, denominator and row impact."""
+    """``3 keys of 2,000 (5 rows)``: the count, its unit, denominator and row impact.
+
+    A lower bound reads ``at least 3 ...``.
+    """
     text = f"{result.affected_count:,}"
+    if not result.affected_count_exact:
+        text = f"at least {text}"
     if result.unit:
         text += f" {result.unit}"
     if result.total_records:

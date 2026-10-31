@@ -22,6 +22,8 @@ class SpillBudget:
         self.used = self.peak = 0
         self.lock = threading.RLock()
         self._credits = 0
+        self._holders: dict[int, int] = {}
+        """Unsettled growth credits by thread: a credit lends out all free space."""
         self._available = threading.Condition(self.lock)
         self._files: set[SpillFile] = set()
 
@@ -71,11 +73,19 @@ class SpillBudget:
 
         if size < 0:
             raise ValueError("spill reservation must be nonnegative")
-        with self.lock:
+        with self._available:
+            # Space lent to another thread's native write returns when it
+            # settles: wait for it rather than fail. Never wait on this thread's
+            # own credit, which only this thread can settle.
+            while size > self.limit - self.used and self._lent_elsewhere():
+                self._available.wait(0.05)
             if size > self.limit - self.used:
                 raise ResourceLimitError("owned spill budget exhausted")
             self.used += size
             self.peak = max(self.peak, self.used)
+
+    def _lent_elsewhere(self) -> bool:
+        return self._credits > self._holders.get(threading.get_ident(), 0)
 
     def release(self, size: int) -> None:
         with self.lock:
@@ -96,8 +106,11 @@ class SpillBudget:
                 self._available.wait(0.05)
             check_cancelled()
             credit = self.limit - self.used
-            self.reserve(credit)
+            self.used += credit
+            self.peak = max(self.peak, self.used)
             self._credits += 1
+            thread = threading.get_ident()
+            self._holders[thread] = self._holders.get(thread, 0) + 1
             return credit
 
     def settle_growth(self, credit: int, growth: int) -> None:
@@ -108,6 +121,11 @@ class SpillBudget:
                 self.release(credit - growth)
             finally:
                 self._credits -= 1
+                thread = threading.get_ident()
+                if self._holders.get(thread, 0) > 1:
+                    self._holders[thread] -= 1
+                else:
+                    self._holders.pop(thread, None)
                 self._available.notify_all()
 
 
