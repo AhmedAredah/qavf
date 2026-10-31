@@ -6,6 +6,7 @@ on:
 permissions:
   contents: read
 env:
+  UV_VERSION: '0.13.5'
   POLARS_MAX_THREADS: '2'
   OPENBLAS_NUM_THREADS: '1'
   OMP_NUM_THREADS: '1'
@@ -23,6 +24,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --locked --all-extras
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync ruff format --check .
@@ -57,6 +60,8 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --locked --all-extras
       - run: uv run --no-sync python scripts/verify_platform.py --output-dir "${{ runner.temp }}/qavf-evidence/${{ matrix.label }}"
       - uses: actions/upload-artifact@v4
@@ -74,6 +79,8 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --locked --all-extras
       - run: uv build --clear
       - run: uv run --no-sync python scripts/verify_dist.py
@@ -93,6 +100,8 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --locked
       - run: uv build --clear
       - run: uv run --no-sync python scripts/verify_dist.py
@@ -135,12 +144,19 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
       - name: Start disposable Azure Blob emulator
         run: >-
           docker run --detach --name qavf-azurite -p 10000:10000
           -e AZURITE_ACCOUNTS=qavftest:cWF2Zi1kaXNwb3NhYmxlLXRlc3Qta2V5LTEyMzQ1Njc4OTA=
           mcr.microsoft.com/azure-storage/azurite:3.35.0
           azurite --blobHost 0.0.0.0 --skipApiVersionCheck
+      - name: Wait for the object stores
+        run: |
+          curl --fail --silent --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null http://127.0.0.1:5000/moto-api/
+          # Azurite rejects anonymous requests; any HTTP response means it is listening.
+          curl --silent --retry 30 --retry-all-errors --retry-delay 2 -o /dev/null http://127.0.0.1:10000/
       - run: uv sync --locked --all-extras --group integration
       - run: uv run --no-sync python scripts/verify_release.py extensions --integration
       - run: uv run --no-sync python scripts/verify_release.py test --integration --id integrations --output "${{ runner.temp }}/qavf-evidence/integrations.json" tests/integration
@@ -163,6 +179,8 @@ jobs:
         with:
           python-version: '3.12'
       - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
       - run: uv sync --locked
       - uses: actions/download-artifact@v4
         with:
@@ -223,7 +241,8 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
-          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY"             --title "QAVF ${TAG#v}" --generate-notes --verify-tag
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "QAVF ${TAG#v}" --generate-notes --verify-tag
 
   container:
     name: Container image

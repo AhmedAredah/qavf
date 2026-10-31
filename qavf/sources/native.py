@@ -115,9 +115,11 @@ class OwnedConnection:
             # Do not lose the only owner or release its reservation while a
             # failed native close may still retain buffers and file handles.
             unregister = getattr(self._owner, "unregister_connection", None)
-            if unregister is not None:
-                unregister(self._token)
-            self._owner.release(self._token)
+            try:
+                if unregister is not None:
+                    unregister(self._token)
+            finally:
+                self._owner.release(self._token)
             self._closed = True
 
     def __enter__(self) -> OwnedConnection:

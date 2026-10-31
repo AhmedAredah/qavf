@@ -45,6 +45,9 @@ All notable changes to this project are documented here. The format follows
   every decision policy; the identity-line test decides only slope and intercept.
 - `qavf.engine.registry.RuleParams` moved to `qavf.parameters`; the old import
   still works.
+- Lossy CSV reads (`ignore_errors` or `store_rejects`) need a list of files no larger
+  than `rejects_budget` (default 1,000): an unresolved remote wildcard or a larger
+  list is refused. Raise `rejects_budget` or list the files explicitly.
 
 ### Fixed
 
