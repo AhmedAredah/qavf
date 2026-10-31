@@ -7,8 +7,12 @@
 
 **Configurable data QA/QC for Python.** Validate files, dataframes and database
 queries against declared limits, statistical expectations and stored baselines.
-QAVF reports exact violation counts with bounded evidence, and it never reports a
-pass for a check it could not assess.
+QAVF reports violation counts with bounded evidence. Counts are exact unless
+explicitly labelled as lower bounds, and an insufficient lower bound cannot
+establish a pass.
+
+For this source update, read [the upgrade guide](README_UPGRADE.md) and
+[implementation and verification status](docs/remediation_status.md).
 
 - **Any input.** CSV, Parquet, JSON, Excel, globs and URLs; DuckDB, SQLite, PostgreSQL
   and MySQL tables; SQL queries; Polars, pandas and Arrow frames; Python loaders.
@@ -123,10 +127,12 @@ report = validate(
 )
 print(report.verdict())
 
-report = validate({
-    "counts": Dataset(counts_frame, schema={"columns": {"count": {"ge": 0}}}),
-    "sites": Dataset("sites.parquet", schema={"primary_key": ["site_id"]}),
-})
+report = validate(
+    {
+        "counts": Dataset(counts_frame, schema={"columns": {"count": {"ge": 0}}}),
+        "sites": Dataset("sites.parquet", schema={"primary_key": ["site_id"]}),
+    }
+)
 
 # Validate the configured inputs in a supervised worker with a wall-time deadline.
 report = validate(config="qavf.yaml", resources=ResourceLimits(wall_time=60))
@@ -212,8 +218,9 @@ from qavf.regression import assert_outputs_match
 
 def test_output_matches_baseline(tmp_path):
     run_pipeline(output=tmp_path / "out.parquet")
-    assert_outputs_match("tests/baselines/out.parquet", tmp_path / "out.parquet",
-                         keys=["site_id", "year"], rtol=1e-6)
+    assert_outputs_match(
+        "tests/baselines/out.parquet", tmp_path / "out.parquet", keys=["site_id", "year"], rtol=1e-6
+    )
 ```
 
 Rows match by key, numbers within tolerance, and changed values, added or removed rows
@@ -229,13 +236,18 @@ renamed, retyped, rescaled or recoded:
 from qavf import compare_datasets
 
 result = compare_datasets(
-    "v1/counts.parquet", "v2/counts.parquet",
+    "v1/counts.parquet",
+    "v2/counts.parquet",
     keys=["site_id", "year"],
-    columns={"AADT": "aadt"},                      # baseline name -> candidate name
-    units={"aadt": {"factor": 1000}},              # v1 counted thousands of vehicles
+    columns={"AADT": "aadt"},  # baseline name -> candidate name
+    units={"aadt": {"factor": 1000}},  # v1 counted thousands of vehicles
     recode={"fclass": {"values": {"1": "interstate", "2": "arterial"}}},
-    levels=["structure", "coverage", "records",
-            {"level": "groups", "group_by": ["county"], "measures": ["count", "sum(aadt)"]}],
+    levels=[
+        "structure",
+        "coverage",
+        "records",
+        {"level": "groups", "group_by": ["county"], "measures": ["count", "sum(aadt)"]},
+    ],
 )
 print(result.summary())
 ```

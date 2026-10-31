@@ -15,18 +15,22 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 import duckdb
 
 from qavf.redaction import redact_text
 from qavf.sources.base import RejectedRows, SourceEnvironment, SourceError, TypeViolations
 from qavf.sources.errors import redacted_error
+from qavf.sources.formats import GLOB_PATTERN
 from qavf.sources.native import connect
 from qavf.sources.sql import quote_identifier, sql_literal
 from qavf.text_types import TextType, sql_stripped, sql_value
 
 REJECTED_SAMPLE = 100
 """Failing lines or values located per file or column, for messages and evidence."""
+REJECT_ENTRIES = 1000
+"""Default run-read budget for native diagnostic entries, not distinct bad rows."""
 REJECT_OPTIONS = frozenset(
     {"ignore_errors", "store_rejects", "rejects_table", "rejects_scan", "rejects_limit"}
 )
@@ -87,17 +91,14 @@ class CsvProbe:
 
         ``count(COLUMNS(*))`` converts every column; ``count(*)`` would skip them.
         """
-        reader = self.read.reader(
-            REJECT_OPTIONS, store_rejects=True, rejects_limit=REJECTED_SAMPLE
-        )
         try:
+            cap = rejection_capture_limit(self.read.location, REJECT_ENTRIES, REJECTED_SAMPLE)
+            reader = self.read.reader(REJECT_OPTIONS, store_rejects=True, rejects_limit=cap)
             with self._connection() as con:
                 con.execute(f"SELECT count(COLUMNS(*)) FROM {reader}").fetchall()
                 # The reject table is complete once the scan has been fetched.
-                return read_rejects(
-                    con, "reject_errors", "reject_scans", REJECTED_SAMPLE, REJECTED_SAMPLE
-                )
-        except duckdb.Error:
+                return read_rejects(con, "reject_errors", "reject_scans", cap, REJECTED_SAMPLE)
+        except (duckdb.Error, SourceError):
             return None
 
     def fetch_one(self, query: str) -> tuple[Any, ...]:
@@ -154,34 +155,35 @@ class TypedColumns:
     def __bool__(self) -> bool:
         return bool(self.columns)
 
-    def wrap(self, sql: str) -> str:
+    def wrap(self, sql: str, available: Sequence[str]) -> str:
         """``sql`` with each declared column replaced by its converted value.
 
         Each column is stripped once, in an inner projection: DuckDB evaluates a
         repeated expression again at every reference.
         """
         q = quote_identifier
-        stripped = self._stripped_names()
+        if not available or not self.columns.keys() <= set(available):
+            raise SourceError("cannot establish the complete CSV conversion column namespace")
+        stripped = self._stripped_names(available)
         strips = ", ".join(f"{sql_stripped(q(c))} AS {q(stripped[c])}" for c in self.columns)
-        replaced = ", ".join(
-            f"{sql_value(q(c), text, q(stripped[c]))[0]} AS {q(c)}"
-            for c, text in self.columns.items()
+        converted = {
+            c: sql_value(q(c), text, q(stripped[c]))[0] for c, text in self.columns.items()
+        }
+        projection = ", ".join(
+            f"{converted[c]} AS {q(c)}" if c in converted else q(c) for c in available
         )
-        hidden = ", ".join(q(name) for name in stripped.values())
         return (
-            f"SELECT * EXCLUDE ({hidden}) REPLACE ({replaced}) "
+            f"SELECT {projection} "
             f"FROM (SELECT *, {strips} FROM ({sql}) AS raw_text) AS stripped_text"
         )
 
-    def violations(
-        self, probe: CsvProbe, context: Sequence[str] = ()
-    ) -> dict[str, TypeViolations]:
+    def violations(self, probe: CsvProbe, context: Sequence[str] = ()) -> dict[str, TypeViolations]:
         """Count values that do not convert; locate them only when there are any.
 
         Counting streams. Positions need every row numbered, which holds the scan,
         so that pass runs only on failure and keeps a bounded sample per column.
         """
-        shown = [c for c in dict.fromkeys(context) if c not in self.columns]
+        shown = list(dict.fromkeys(context))
         stripped = self._stripped_names(shown)
         reader = probe.read.reader()
         counts = probe.fetch_one(self._counting(reader, stripped, shown))
@@ -189,7 +191,9 @@ class TypedColumns:
         if any(counts):
             samples = probe.fetch_one(self._locating(reader, stripped, shown))
         return {
-            column: TypeViolations(int(count or 0), tuple(dict(e) for e in sample or ()))
+            column: TypeViolations(
+                int(count or 0), tuple(dict(e) for e in sample or ()), context_field="context"
+            )
             for column, count, sample in zip(self.columns, counts, samples, strict=True)
         }
 
@@ -201,9 +205,7 @@ class TypedColumns:
 
     def _locating(self, reader: str, stripped: Mapping[str, str], shown: list[str]) -> str:
         row = quote_identifier(_fresh("__qavf_row", [*self.columns, *shown, *stripped.values()]))
-        samples = ", ".join(
-            self._sample(column, row, stripped, shown) for column in self.columns
-        )
+        samples = ", ".join(self._sample(column, row, stripped, shown) for column in self.columns)
         return (
             f"SELECT {samples} FROM ({self._text(stripped, shown)}, "
             f"row_number() OVER () - 1 AS {row} FROM {reader}) AS raw_text"
@@ -212,15 +214,17 @@ class TypedColumns:
     def _sample(self, column: str, row: str, stripped: Mapping[str, str], shown: list[str]) -> str:
         q = quote_identifier
         context = [f"{sql_literal(c)}: {q(c)}" for c in shown]
-        fields = ", ".join([f"'_row': {row}", *context, f"'value': {q(column)}"])
+        fields = [f"'_row': {row}", f"'value': {q(column)}"]
+        if context:
+            fields.append("'context': {" + ", ".join(context) + "}")
         return (
-            f"arg_min({{{fields}}}, {row}, {REJECTED_SAMPLE}) "
+            f"arg_min({{{', '.join(fields)}}}, {row}, {REJECTED_SAMPLE}) "
             f"FILTER (WHERE {self._invalid(column, stripped)})"
         )
 
     def _text(self, stripped: Mapping[str, str], shown: list[str]) -> str:
         q = quote_identifier
-        columns = [q(c) for c in [*self.columns, *shown]]
+        columns = [q(c) for c in dict.fromkeys([*self.columns, *shown])]
         columns += [f"{sql_stripped(q(c))} AS {q(stripped[c])}" for c in self.columns]
         return f"SELECT {', '.join(columns)}"
 
@@ -404,9 +408,13 @@ def read_rejects(con: Any, errors: str, scans: str, limit: int, sample: int) -> 
     a lower bound.
     """
     e, s = quote_identifier(errors), quote_identifier(scans)
-    per_file = con.execute(f"SELECT count(DISTINCT line) FROM {e} GROUP BY scan_id, file_id")
-    counts = [int(row[0]) for row in per_file.fetchall()]
-    exact = not limit or all(count < limit for count in counts)
+    per_file = con.execute(
+        f"SELECT count(*), count(DISTINCT line) FROM {e} GROUP BY scan_id, file_id"
+    ).fetchall()
+    counts = [int(row[1]) for row in per_file]
+    # The native cap counts error entries. One bad line can contribute several
+    # entries, so distinct-line counts cannot establish capture completeness.
+    exact = not limit or all(int(entries) < limit for entries, _ in per_file)
     rows = con.execute(
         f"SELECT s.file_path, e.line, e.column_name, e.error_type, e.csv_line "
         f"FROM {e} AS e JOIN {s} AS s USING (scan_id, file_id) "
@@ -425,6 +433,32 @@ def read_rejects(con: Any, errors: str, scans: str, limit: int, sample: int) -> 
         for file, line, column, kind, text in rows
     )
     return RejectedRows(sum(counts), exact, located)
+
+
+def rejection_capture_limit(location: str | list[str], budget: int, requested: int = 0) -> int:
+    """Allocate a bounded raw-error capture across a known source manifest.
+
+    DuckDB limits entries per file, not per query. An unresolved wildcard does
+    not expose a file count, so cannot promise a query-wide diagnostic budget.
+    A zero reader limit means use this explicit budget, never unbounded storage.
+    """
+    if isinstance(location, list):
+        files = len(location)
+    else:
+        path = urlsplit(location).path if "://" in location else location
+        if GLOB_PATTERN.search(path):
+            raise SourceError(
+                "bounded CSV rejection capture needs an explicit file manifest, "
+                "not an unresolved wildcard"
+            )
+        files = 1
+    if not files or files > budget:
+        raise SourceError(
+            f"CSV rejection capture for {files:,} files exceeds rejects_budget ({budget:,}); "
+            "increase rejects_budget or split the input"
+        )
+    per_file = budget // files
+    return min(per_file, requested) if requested else per_file
 
 
 def _clipped(text: object, width: int = 200) -> str:

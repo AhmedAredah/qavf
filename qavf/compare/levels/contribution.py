@@ -31,6 +31,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field, model_validator
 
+from qavf.compare.evidence import model_records
 from qavf.compare.levels import SIDES, ComparisonLevel, LevelInputs, not_assessed, register_level
 from qavf.compare.levels.groups import (
     AlignedGroups,
@@ -38,6 +39,7 @@ from qavf.compare.levels.groups import (
     compare_measure,
     materiality,
     measure_tests,
+    precise_frame,
     reduce_groups,
 )
 from qavf.compare.levels.temporal import TimeMembers, keyed_sides
@@ -278,7 +280,9 @@ class ContributionLevel(ComparisonLevel):
         presence = [aligned.columns[side][aligned.presence] for side in SIDES]
         keys = aligned.keys
         members = []
-        for row in aligned.joined.select([*keys, left, right, *presence]).iter_rows():
+        for row in precise_frame(
+            aligned.joined.select([*keys, left, right, *presence]), keys
+        ).iter_rows():
             key = tuple(row[: len(keys)])
             b, c, on_b, on_c = row[len(keys) :]
             if (on_b is not None and exact_rational(b) is None) or (
@@ -300,24 +304,23 @@ class ContributionLevel(ComparisonLevel):
         chosen = minimal_set(changes, Fraction(str(params.share)))
         picked = set(chosen or ())
         limit = inputs.spec.chart_points
-        kept = []
-        running = Fraction(0)
-        for position, item in enumerate(ranked):
-            running += item.change
-            if position >= limit:
-                continue
-            kept.append(
-                MemberContribution(
-                    group=dict(zip(keys, item.key, strict=True)),
-                    baseline=report_number(item.baseline) or 0,
-                    candidate=report_number(item.candidate) or 0,
-                    change=report_number(item.change) or 0,
-                    exact_change=str(item.change),
-                    share=float(item.change / total) if total else None,
-                    cumulative=float(running / total) if total else None,
-                    in_minimal_set=position in picked,
-                )
-            )
+
+        def detail_records():
+            running = Fraction(0)
+            for position, item in enumerate(ranked):
+                running += item.change
+                yield {
+                    "group": dict(zip(keys, item.key, strict=True)),
+                    "baseline": report_number(item.baseline) or 0,
+                    "candidate": report_number(item.candidate) or 0,
+                    "change": report_number(item.change) or 0,
+                    "exact_change": str(item.change),
+                    "share": float(item.change / total) if total else None,
+                    "cumulative": float(running / total) if total else None,
+                    "in_minimal_set": position in picked,
+                }
+
+        kept = model_records(MemberContribution, detail_records(), limit, inputs.ctx.evidence_bytes)
         explained = sum((changes[i] for i in picked), Fraction(0))
         return DimensionContribution(
             dimension=label,
@@ -362,7 +365,9 @@ class ContributionLevel(ComparisonLevel):
         columns = [aligned.columns[side][alias] for alias in aliases for side in SIDES]
         presence = [aligned.columns[side][aligned.presence] for side in SIDES]
         strata: list[tuple[Any, Fraction, Fraction, Fraction, Fraction]] = []
-        for row in aligned.joined.select([*keys, *columns, *presence]).iter_rows():
+        for row in precise_frame(
+            aligned.joined.select([*keys, *columns, *presence]), keys
+        ).iter_rows():
             values = row[len(keys) : len(keys) + 4]
             nb_, nc_, db_, dc_ = values
             on_b, on_c = row[-2:]
@@ -402,21 +407,28 @@ class ContributionLevel(ComparisonLevel):
 
         effects = sorted(decomposed.strata, key=lambda e: -abs(e.total))
         limit = inputs.ctx.evidence_limit
-        shown = [
-            RateEffect(
-                group=dict(zip(keys, effect.key, strict=True)),
-                baseline_weight=float(effect.baseline_weight),
-                candidate_weight=float(effect.candidate_weight),
-                baseline_rate=None if effect.baseline_rate is None else float(effect.baseline_rate),
-                candidate_rate=(
-                    None if effect.candidate_rate is None else float(effect.candidate_rate)
-                ),
-                mix=float(effect.mix),
-                rate=float(effect.rate),
-                interaction=float(effect.interaction),
-            )
-            for effect in effects[:limit]
-        ]
+        shown = model_records(
+            RateEffect,
+            (
+                dict(
+                    group=dict(zip(keys, effect.key, strict=True)),
+                    baseline_weight=float(effect.baseline_weight),
+                    candidate_weight=float(effect.candidate_weight),
+                    baseline_rate=None
+                    if effect.baseline_rate is None
+                    else float(effect.baseline_rate),
+                    candidate_rate=(
+                        None if effect.candidate_rate is None else float(effect.candidate_rate)
+                    ),
+                    mix=float(effect.mix),
+                    rate=float(effect.rate),
+                    interaction=float(effect.interaction),
+                )
+                for effect in effects
+            ),
+            limit,
+            inputs.ctx.evidence_bytes,
+        )
         parts = {
             "change": decomposed.change,
             "mix": decomposed.mix,
@@ -469,6 +481,7 @@ class ContributionLevel(ComparisonLevel):
             f"{passed} ({float(before):.6g} to {float(after):.6g}; {split}{how}).",
             f"{rate.label} changed from {float(before):.6g} to {float(after):.6g} ({split}{how})",
             "rate",
+            byte_limit=inputs.ctx.evidence_bytes,
         )
         metrics = {**check.metrics, **{name: str(value) for name, value in parts.items()}}
         metrics["strata"] = len(strata)

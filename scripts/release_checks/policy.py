@@ -14,6 +14,16 @@ def accepted_skip(nodeid: str, reason: str, env: dict[str, Any] | None = None) -
     if not isinstance(capabilities, dict):
         return False
     reason = reason.removeprefix("Skipped: ")
+    if (
+        nodeid
+        == (
+            "tests/test_performance_runner.py::"
+            "test_real_windows_timeout_reaps_grandchild_and_releases_files"
+        )
+        and reason == "real Windows Job Object contract"
+        and system in {"Linux", "Darwin"}
+    ):
+        return True
     if nodeid.startswith("tests/test_isolated_supervisor.py::test_") and (
         reason,
         system,
@@ -37,6 +47,22 @@ def accepted_skip(nodeid: str, reason: str, env: dict[str, Any] | None = None) -
             else importlib.util.find_spec("scipy") is not None
         )
     if system == "Windows":
+        if (
+            nodeid.startswith(
+                "tests/test_review_072_boundaries.py::test_cli_never_replaces_selected_input["
+            )
+            and reason == "Windows filenames forbid these characters"
+        ):
+            return True
+        if (
+            nodeid
+            == (
+                "tests/test_review_072_boundaries.py::"
+                "test_protection_preserves_file_aliases[symlink]"
+            )
+            and reason == "Windows symlink privileges unavailable"
+        ):
+            return True
         if (
             nodeid.startswith(
                 "tests/test_source_expressions.py::test_literal_forms_resolve_to_configuration_root["

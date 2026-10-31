@@ -73,9 +73,7 @@ def test_canonical_metadata_without_package_claim_preserves_unknown_provenance(
 
 
 @pytest.mark.parametrize("providers", [[], ["alternate-qavf"]])
-def test_source_checkout_without_canonical_metadata_keeps_generic_fallback(
-    monkeypatch, providers
-):
+def test_source_checkout_without_canonical_metadata_keeps_generic_fallback(monkeypatch, providers):
     def missing(name):
         raise importlib.metadata.PackageNotFoundError(name)
 

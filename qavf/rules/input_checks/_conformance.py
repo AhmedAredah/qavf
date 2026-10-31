@@ -11,13 +11,15 @@ header names it had to invent.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import polars as pl
 
 from qavf.engine.context import DataContext
+from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding
 from qavf.rules._declared_types import (
     ConvertedPlan,
@@ -27,10 +29,12 @@ from qavf.rules._declared_types import (
 )
 from qavf.rules._row_summary import RowSummary, row_aliases, summarize_rows
 from qavf.rules._temporal import temporal_evidence
-from qavf.rules.helpers import fresh_internal, plural, present
+from qavf.rules.helpers import annotate, fresh_internal, plural, present
 from qavf.settings import ColumnSpec, SchemaSpec
 from qavf.sources.base import DataSource, TypeViolations
 from qavf.sources.sql import quote_identifier, sql_literal
+
+from ._datasets import _row_count
 
 
 @dataclass(frozen=True)
@@ -42,9 +46,38 @@ class DatasetView:
     schema: SchemaSpec
     actual: Mapping[str, pl.DataType]
     rows: int
+    observation: Observation | None = None
+
+    @classmethod
+    @contextmanager
+    def open(cls, ctx: DataContext, name: str, schema: SchemaSpec) -> Iterator[DatasetView]:
+        """Own one population for the row count and every value-level type check.
+
+        Schema-only checks keep their metadata/count path. Value checks project
+        only their columns and evidence keys; helpers borrow this scope instead
+        of independently observing a potentially volatile source.
+        """
+        actual = ctx.schema(name)
+        columns = [
+            column
+            for column, spec in schema.columns.items()
+            if column in actual
+            and any(check.applies(spec, actual[column]) for check in COLUMN_CHECKS)
+        ]
+        if not columns:
+            yield cls(ctx, name, schema, actual, _row_count(ctx, name))
+            return
+        if ctx.evidence_limit and ctx.evidence_bytes:
+            columns.extend(column for column in schema.primary_key or [] if column in actual)
+        needed = set(columns)
+        with ctx.observe(name, [column for column in actual if column in needed]) as observed:
+            rows = int(observed.reduce(lambda plan: plan.select(pl.len())).item())
+            yield cls(ctx, name, schema, actual, rows, observed)
 
     def context(self, column: str) -> list[str]:
         """Primary-key columns that identify a row in evidence about ``column``."""
+        if not self.ctx.evidence_limit or not self.ctx.evidence_bytes:
+            return []
         return [c for c in self.schema.primary_key or [] if c != column and c in self.actual]
 
     def unassessed(self, check: str, exc: Exception) -> Finding:
@@ -101,7 +134,12 @@ class TextValues(ColumnConformance):
         kind = described(str(self.spec.dtype))
         conversion = TextConversion(column, self.spec)
         context = view.context(column)
-        with view.ctx.observe(view.name, [*context, column]) as observed:
+        scope = (
+            nullcontext(view.observation)
+            if view.observation is not None
+            else view.ctx.observe(view.name, [*context, column])
+        )
+        with scope as observed:
             scale = ConvertedPlan.resolved([conversion], observed.reduce).scale(column)
             cells = InvalidCells(conversion, scale, context, view.ctx.evidence_limit)
             rows, count, sample = cells.summarize(observed.reduce)
@@ -146,9 +184,10 @@ class InvalidCells:
 
     def evidence(self, sample: pl.DataFrame, violates: str) -> pl.DataFrame:
         reason = fresh_internal("violates", [*sample.columns])
-        return present(sample.with_columns(pl.lit(violates).alias(reason)), {
-            self.row: "_row", reason: "violates"
-        })
+        return present(
+            sample.with_columns(pl.lit(violates).alias(reason)),
+            {self.row: "_row", reason: "violates"},
+        )
 
     def __call__(self, plan: pl.LazyFrame) -> pl.LazyFrame:
         rows, bad, first = self.reduced
@@ -199,7 +238,7 @@ class NonIntegralValues(ColumnConformance):
     def _summary(self) -> RowSummary:
         view = self.view
         sample = [*view.context(self.column), self.column, self.row, self.problem]
-        if view.ctx.execution_kind(view.name) == "native_sql":
+        if view.observation is None and view.ctx.execution_kind(view.name) == "native_sql":
             return summarize_rows(
                 view.ctx,
                 view.name,
@@ -216,6 +255,7 @@ class NonIntegralValues(ColumnConformance):
             labels=(self.LABEL,),
             sample_columns=sample,
             build=self._classified_plan,
+            reduce=view.observation.reduce if view.observation is not None else None,
         )
 
     def _classified_sql(self) -> str:
@@ -232,9 +272,7 @@ class NonIntegralValues(ColumnConformance):
     def _classified_plan(self, source: pl.LazyFrame) -> pl.LazyFrame:
         value = pl.col(self.column)
         fractional = (
-            value.is_not_null()
-            & ~value.is_nan()
-            & (value.is_infinite() | (value != value.floor()))
+            value.is_not_null() & ~value.is_nan() & (value.is_infinite() | (value != value.floor()))
         )
         return (
             source.select([*self.view.context(self.column), self.column])
@@ -294,18 +332,17 @@ class SourceChecks:
         self, column: str, spec: ColumnSpec, found: TypeViolations, context: list[str]
     ) -> Finding:
         view = self.view
-        kind = described(str(spec.dtype)) + (
-            f" written as {spec.format!r}" if spec.format else ""
-        )
-        evidence = [
-            {
-                "_row": entry["_row"],
-                **{self.rename.get(c, c): entry[c] for c in context if c in entry},
-                column: entry["value"],
-                "violates": f"not {kind}",
-            }
-            for entry in found.sample[: view.ctx.evidence_limit]
-        ]
+        kind = described(str(spec.dtype)) + (f" written as {spec.format!r}" if spec.format else "")
+        user_names = {column, *(self.rename.get(c, c) for c in context)}
+        row_column = "_row"
+        while row_column in user_names:
+            row_column = f"qavf_{row_column}"
+        evidence = []
+        for entry in found.sample[: view.ctx.evidence_limit]:
+            saved = entry.get(found.context_field, {}) if found.context_field else entry
+            data = {self.rename.get(c, c): saved[c] for c in context if c in saved}
+            data[column] = entry["value"]
+            evidence.append(annotate(data, _row=entry["_row"], violates=f"not {kind}"))
         one = found.count == 1
         return Finding.fail(
             f"{plural(found.count, 'value')} of {view.rows:,} in {view.name}.{column} "
@@ -314,6 +351,7 @@ class SourceChecks:
             check=f"{view.name}.{column}: dtype {spec.dtype}",
             affected=evidence,
             affected_count=found.count,
+            row_column=row_column,
             total_records=view.rows,
             unit="rows",
             datasets=(view.name,),
@@ -323,8 +361,21 @@ class SourceChecks:
         """Lines a lossy read left out, beyond the source's ``max_rejected_rows``."""
         rejected = self.source.rejected_rows()
         allowed = int(getattr(self.source.params, "max_rejected_rows", 0))
-        if rejected is None or rejected.count <= allowed:
+        if rejected is None or (rejected.exact and rejected.count <= allowed):
             return None
+        if not rejected.exact and rejected.count <= allowed:
+            return Finding.unassessed(
+                f"Not assessed: {self.view.name}: at least {rejected.count:,} lines were "
+                f"rejected, but bounded diagnostic capture cannot establish whether "
+                f"max_rejected_rows ({allowed:,}) was exceeded. Increase rejects_budget "
+                "or fix the source; a lower bound cannot establish acceptance.",
+                check=f"{self.view.name}: unreadable lines",
+                affected=list(rejected.sample[: self.view.ctx.evidence_limit]),
+                affected_count=rejected.count,
+                affected_count_exact=False,
+                unit="lines",
+                datasets=(self.view.name,),
+            )
         count = f"{rejected.count:,}" if rejected.exact else f"at least {rejected.count:,}"
         one = rejected.count == 1
         return Finding.fail(
@@ -333,6 +384,7 @@ class SourceChecks:
             check=f"{self.view.name}: unreadable lines",
             affected=list(rejected.sample[: self.view.ctx.evidence_limit]),
             affected_count=rejected.count,
+            affected_count_exact=rejected.exact,
             unit="lines",
             datasets=(self.view.name,),
         )

@@ -28,7 +28,8 @@ def context(frame, backend, tmp_path, *, columns=None, evidence=2):
         frame.write_parquet(path)
         spec["source"] = (
             {"type": "query", "sql": f"SELECT * FROM read_parquet('{path}')"}
-            if backend == "native_query" else {"type": "file", "path": str(path)}
+            if backend == "native_query"
+            else {"type": "file", "path": str(path)}
         )
     settings = QAVFSettings.model_validate(
         {"datasets": {"d": spec}, "engine": {"native_threads": 1, "max_workers": 1}}

@@ -2,8 +2,9 @@
 
 The controller owns request identity, process status, and log paths. Worker
 stdout/stderr go directly to files; only bounded tails enter the final record.
-On POSIX timeout/cancellation kills the owned process group. Other platforms
-can terminate the direct child only using this standard-library implementation.
+On POSIX timeout/cancellation kills the owned process group. Windows workers
+join a parent-owned Job Object before importing workload code or spawning any
+descendants. A platform that cannot establish that ownership fails closed.
 """
 
 from __future__ import annotations
@@ -15,8 +16,12 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from qavf.execution._windows_job import Job
 
 TAIL_BYTES = 8192
 MAX_RESULT_BYTES = 16 * 1024 * 1024
@@ -33,10 +38,18 @@ def _tail(path: Path) -> str:
         return f"Log unavailable: {type(error).__name__}: {error}"[:TAIL_BYTES]
 
 
-def _stop_process(process: subprocess.Popen[bytes]) -> None:
-    """Reap the direct child and, on POSIX, stop its entire owned session group."""
+def _stop_process(process: subprocess.Popen[bytes], job: Job | None = None) -> None:
+    """Reap the worker and every owned descendant, including pre-join startup."""
     try:
-        if sys.platform == "win32":
+        if job is not None:
+            try:
+                job.terminate()
+            finally:
+                # Even a failed job API call must not block reaping the bootstrap.
+                # It might not yet have joined when cancellation arrives.
+                if process.poll() is None:
+                    process.kill()
+        elif sys.platform == "win32":
             process.kill()
         else:
             os.killpg(process.pid, signal.SIGKILL)
@@ -44,6 +57,41 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
         pass
     finally:
         process.wait()
+    if job is not None:
+        deadline = time.monotonic() + 5.0
+        while job.active_processes():
+            if time.monotonic() >= deadline:
+                raise OSError("benchmark job still has live descendants after termination")
+            time.sleep(0.01)
+
+
+def _windows_launch(argv: list[str], directory: Path) -> tuple[list[str], Job]:
+    """Create ownership before launch; workers self-join before executing argv."""
+    from qavf.execution import _windows_job
+
+    job = _windows_job.Job(
+        f"Local\\qavf-benchmark-{uuid.uuid4().hex}", memory_bytes=None, cpu_seconds=None
+    )
+    try:
+        control = directory / "job-control.json"
+        # Installed-wheel tests stage scripts outside source; resolve the actual
+        # imported implementation rather than assuming a checkout beside scripts.
+        helper = Path(_windows_job.__file__).resolve()
+        control.write_text(
+            json.dumps(
+                {
+                    "job": job.name,
+                    "job_module": str(helper),
+                    "argv": argv,
+                }
+            ),
+            encoding="utf-8",
+        )
+        bootstrap = Path(__file__).with_name("_job_bootstrap.py").resolve()
+        return [argv[0], "-S", str(bootstrap), str(control)], job
+    except BaseException:
+        job.close()
+        raise
 
 
 def _reject_nonfinite(value: str) -> None:
@@ -102,8 +150,11 @@ def execute_worker(
     error_kind: str | None = None
     error: str | None = None
     started = time.perf_counter()
+    job = None
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
         try:
+            if sys.platform == "win32":
+                argv, job = _windows_launch(argv, run_dir)
             process = subprocess.Popen(
                 argv,
                 cwd=run_dir,
@@ -119,14 +170,27 @@ def execute_worker(
             try:
                 returncode = process.wait(timeout=timeout_s)
             except subprocess.TimeoutExpired:
-                _stop_process(process)
+                if job is not None:
+                    _stop_process(process, job)
+                else:
+                    _stop_process(process)
                 returncode = process.returncode
                 status = "timed_out"
                 error_kind = "timeout"
                 error = f"Worker exceeded its {timeout_s:g}-second timeout"
             except BaseException:
-                _stop_process(process)
+                if job is not None:
+                    _stop_process(process, job)
+                else:
+                    _stop_process(process)
                 raise
+            else:
+                if job is not None:
+                    # Successful parents may also have left children behind.
+                    _stop_process(process, job)
+        finally:
+            if job is not None:
+                job.close()
     elapsed = time.perf_counter() - started
     if error_kind is None:
         try:
@@ -159,7 +223,7 @@ def execute_worker(
         "returncode": returncode,
         "process_elapsed_seconds": elapsed,
         "timeout_seconds": timeout_s,
-        "termination_method": "direct child"
+        "termination_method": "Windows Job Object (kill-on-close)"
         if sys.platform == "win32"
         else "POSIX process group SIGKILL",
         "request_path": str(request_path),

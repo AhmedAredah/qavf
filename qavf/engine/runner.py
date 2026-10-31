@@ -15,6 +15,7 @@ import time
 import uuid
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -517,11 +518,14 @@ class QARunner:
                         # A plugin can terminate its worker with SystemExit;
                         # it must not leave queued rules without a live owner.
                         rule = rules[index]
-                        outcome = [self._result(
-                            rule, Status.ERROR,
-                            f"Rule worker failed: {exception_details(exc)}",
-                            severity=max(rule.severity, Severity.ERROR),
-                        )]
+                        outcome = [
+                            self._result(
+                                rule,
+                                Status.ERROR,
+                                f"Rule worker failed: {exception_details(exc)}",
+                                severity=max(rule.severity, Severity.ERROR),
+                            )
+                        ]
                     with lock:
                         if index in abandoned:
                             return
@@ -542,7 +546,8 @@ class QARunner:
                                     results[index] = [
                                         *(results[index] or []),
                                         self._result(
-                                            rule, Status.ERROR,
+                                            rule,
+                                            Status.ERROR,
                                             f"Rule worker cleanup failed: {exception_details(exc)}",
                                             severity=max(rule.severity, Severity.ERROR),
                                         ),
@@ -616,14 +621,21 @@ class QARunner:
                     index in abandoned for index in started
                 ):
                     continue
-                deadlines = [stamp + timeout for index, (stamp, _) in started.items()
-                             if index not in abandoned]
+                deadlines = [
+                    stamp + timeout
+                    for index, (stamp, _) in started.items()
+                    if index not in abandoned
+                ]
                 delay = max(0.0, min(deadlines) - time.monotonic()) if deadlines else None
                 lock.wait(timeout=delay)
 
     def _execute(
-        self, rule: Rule, ctx: DataContext, invocation: Invocation | None = None,
-        *, finish_invocation: bool = True,
+        self,
+        rule: Rule,
+        ctx: DataContext,
+        invocation: Invocation | None = None,
+        *,
+        finish_invocation: bool = True,
     ) -> list[RuleResult]:
         """Isolate the complete invocation, including entry and resource release."""
         began = False
@@ -752,7 +764,6 @@ class QARunner:
         elapsed = time.perf_counter() - start
 
         locator = RowLocator(ctx)
-        findings = [locator.locate(f) if isinstance(f, Finding) else f for f in findings]
         if not findings:
             return [self._result(rule, Status.SKIPPED, "Rule reported nothing.", elapsed)]
         # Time is measured per rule; attribute it to the first result only.
@@ -764,6 +775,7 @@ class QARunner:
                 # Subclasses may override construction hooks. Reapply the base
                 # verdict/count contract at the engine's admission boundary.
                 Finding.__post_init__(finding)
+                finding = self._locate_evidence(finding, locator)
                 severity = None
                 if not finding.assessed:
                     status = Status.ERROR
@@ -798,6 +810,49 @@ class QARunner:
         logger.debug("%s produced %d result(s) in %.3fs", rule.rule_id, len(results), elapsed)
         return results
 
+    def _locate_evidence(self, finding: Finding, locator: RowLocator) -> Finding:
+        """Admit a raw prefix before provenance work, preserving the full count.
+
+        Location metadata is included in the final byte check in ``_result``.
+        This preflight avoids expanding arbitrary plugin output merely to drop
+        it, and never changes a plugin's frame or count semantics.
+        """
+        affected = finding.affected
+        if affected is None:
+            return finding
+        count = len(affected)
+        limit = min(count, self.settings.engine.max_affected_records)
+        remaining = self.settings.engine.max_evidence_bytes
+        admitted = 0
+        while admitted < limit and remaining:
+            raw = (
+                affected.slice(admitted, 1)
+                if isinstance(affected, pl.DataFrame)
+                else affected[admitted]
+            )
+            size = (
+                int(raw.estimated_size()) if isinstance(raw, pl.DataFrame) else retained_size(raw)
+            )
+            if size > remaining:
+                break
+            remaining -= size
+            admitted += 1
+        prefix = (
+            affected.head(admitted)
+            if isinstance(affected, pl.DataFrame)
+            else [affected[index] for index in range(admitted)]
+        )
+        message = finding.message
+        if admitted < limit:
+            message += " Evidence was truncated or omitted: engine.max_evidence_bytes."
+        bounded = replace(
+            finding,
+            affected=prefix,
+            message=message,
+            affected_count=finding.affected_count if finding.affected_count is not None else count,
+        )
+        return locator.locate(bounded)
+
     def _result(
         self,
         rule: Rule,
@@ -820,7 +875,8 @@ class QARunner:
         # exactly and bounded only by the complete-report budget.
         coverage = (
             _coverage_labels(raw_metrics["passed_checks"])
-            if "passed_checks" in raw_metrics else None
+            if "passed_checks" in raw_metrics
+            else None
         )
         evidence_metrics = {
             key: value for key, value in raw_metrics.items() if key != "passed_checks"
@@ -875,6 +931,7 @@ class QARunner:
             message=redact_text(message),
             affected_records=bounded_records,
             affected_count=count,
+            affected_count_exact=finding.affected_count_exact if finding else True,
             total_records=finding.total_records if finding else None,
             unit=unit,
             affected_rows=affected_rows,
@@ -956,8 +1013,7 @@ def _builtin_distribution() -> tuple[bool, str | None]:
             "qavf" in declared
             if declared
             else any(
-                len(path.parts) > 1 and path.parts[0] == "qavf"
-                for path in distribution.files or ()
+                len(path.parts) > 1 and path.parts[0] == "qavf" for path in distribution.files or ()
             )
         )
         name = distribution.metadata["Name"]

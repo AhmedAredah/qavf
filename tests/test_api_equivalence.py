@@ -114,14 +114,22 @@ def test_file_location_override_keeps_format_options_projection_and_policy(tmp_p
     for file in (path, other):
         file.write_text("x;unused\n1;100\n2;200\n")
     source = {
-        "type": "file", "path": str(path), "format": "csv",
-        "options": {"delim": ";", "header": True}, "columns": ["x"],
-        "row_budget": 2, "retries": 2, "retry_delay_s": 0,
+        "type": "file",
+        "path": str(path),
+        "format": "csv",
+        "options": {"delim": ";", "header": True},
+        "columns": ["x"],
+        "row_budget": 2,
+        "retries": 2,
+        "retry_delay_s": 0,
     }
-    settings = QAVFSettings.model_validate({
-        "datasets": {"data": {"source": source, "schema": {**SCHEMA, "strict": True}}},
-        "plugins": {"entry_points": False}, "engine": {"parallel": False},
-    })
+    settings = QAVFSettings.model_validate(
+        {
+            "datasets": {"data": {"source": source, "schema": {**SCHEMA, "strict": True}}},
+            "plugins": {"entry_points": False},
+            "engine": {"parallel": False},
+        }
+    )
     before = settings.model_dump()
     for replacement in (None, path, {"data": other}):
         report = validate(replacement, config=settings)
@@ -140,27 +148,37 @@ def test_input_override_does_not_weaken_existing_row_budget(kind, tmp_path):
     frame = pl.DataFrame({"x": [1, 2]})
     frame.write_csv(path)
     inputs = {
-        "path": path, "frame": frame, "lazy": frame.lazy(),
+        "path": path,
+        "frame": frame,
+        "lazy": frame.lazy(),
         "query": Query("SELECT * FROM (VALUES (1), (2)) t(x)"),
         "loader": Loader(lambda: frame),
         "source": FileSource(FileParams(path=str(path)), SourceEnvironment()),
     }
-    report = validate(inputs[kind], config={
-        "datasets": {"data": {
-            "source": {"type": "file", "path": str(path), "row_budget": 1},
-            "schema": SCHEMA,
-        }},
-        "plugins": {"entry_points": False}, "engine": {"parallel": False},
-    })
+    report = validate(
+        inputs[kind],
+        config={
+            "datasets": {
+                "data": {
+                    "source": {"type": "file", "path": str(path), "row_budget": 1},
+                    "schema": SCHEMA,
+                }
+            },
+            "plugins": {"entry_points": False},
+            "engine": {"parallel": False},
+        },
+    )
     assert report.exit_code() == 1
     assert any("row_budget" in result.message for result in report.results)
 
 
 def test_policy_roundtrips_preserve_only_explicit_overrides():
-    spec = DatasetSpec.model_validate({
-        "source": {"type": "file", "path": "input.csv", "row_budget": 3, "retries": 2},
-        "load_policy": {"row_budget": 4},
-    })
+    spec = DatasetSpec.model_validate(
+        {
+            "source": {"type": "file", "path": "input.csv", "row_budget": 3, "retries": 2},
+            "load_policy": {"row_budget": 4},
+        }
+    )
     for _ in range(3):
         assert spec.effective_load_policy().row_budget == 4
         assert spec.effective_load_policy().retries == 2
@@ -173,15 +191,27 @@ def test_loader_does_not_retry_after_inheriting_retry_policy(tmp_path):
 
     def load():
         from qavf.sources import SourceError
+
         calls.append(1)
         raise SourceError("temporarily unavailable", retryable=True)
 
-    report = validate(Loader(load), config={
-        "datasets": {"data": {
-            "source": {"type": "file", "path": "prior.csv", "retries": 2, "retry_delay_s": 0},
-            "schema": SCHEMA,
-        }}, "plugins": {"entry_points": False},
-    })
+    report = validate(
+        Loader(load),
+        config={
+            "datasets": {
+                "data": {
+                    "source": {
+                        "type": "file",
+                        "path": "prior.csv",
+                        "retries": 2,
+                        "retry_delay_s": 0,
+                    },
+                    "schema": SCHEMA,
+                }
+            },
+            "plugins": {"entry_points": False},
+        },
+    )
     assert report.exit_code() == 1
     assert calls == [1]
 
@@ -197,11 +227,19 @@ def test_replay_safe_loader_retries_only_with_explicit_policy():
             raise SourceError("temporarily unavailable", retryable=True)
         return pl.DataFrame({"x": [1]})
 
-    report = validate(Loader(load, replayable=True, retry_safe=True), config={
-        "datasets": {"data": {
-            "load_policy": {"retries": 2, "retry_delay_s": 0}, "schema": SCHEMA,
-        }}, "plugins": {"entry_points": False}, "engine": {"parallel": False},
-    })
+    report = validate(
+        Loader(load, replayable=True, retry_safe=True),
+        config={
+            "datasets": {
+                "data": {
+                    "load_policy": {"retries": 2, "retry_delay_s": 0},
+                    "schema": SCHEMA,
+                }
+            },
+            "plugins": {"entry_points": False},
+            "engine": {"parallel": False},
+        },
+    )
     assert report.exit_code() == 0
     assert len(calls) == 3
 
@@ -244,23 +282,35 @@ def test_bound_file_queries_support_paths_without_literal_sql(tmp_path, borrowed
 
 
 def _plugin_rule(name, rule_id, description="A normal plugin."):
-    return type(name, (Rule,), {
-        "__module__": "custom_plugin", "rule_id": rule_id, "name": name,
-        "description": description, "category": "custom",
-        "evaluate": lambda self, ctx: Finding.ok("ok"),
-    })
+    return type(
+        name,
+        (Rule,),
+        {
+            "__module__": "custom_plugin",
+            "rule_id": rule_id,
+            "name": name,
+            "description": description,
+            "category": "custom",
+            "evaluate": lambda self, ctx: Finding.ok("ok"),
+        },
+    )
 
 
 def test_failed_entrypoint_registration_is_transactional(monkeypatch):
     import qavf.engine.registry as registry_module
+
     registry = RuleRegistry()
     registry.register(_plugin_rule("Existing", "DUPLICATE"))
     module = ModuleType("custom_plugin")
     module.Good = _plugin_rule("Good", "GOOD-001")
     module.Bad = _plugin_rule("Bad", "DUPLICATE")
-    monkeypatch.setattr(registry_module, "entry_points", lambda **kw: [
-        SimpleNamespace(name="mixed", load=lambda: module),
-    ])
+    monkeypatch.setattr(
+        registry_module,
+        "entry_points",
+        lambda **kw: [
+            SimpleNamespace(name="mixed", load=lambda: module),
+        ],
+    )
     assert registry.discover_entry_points() == []
     assert [rule.rule_id for rule in registry] == ["DUPLICATE"]
     assert registry.plugins["mixed"].startswith("error:")
@@ -306,18 +356,23 @@ def test_decimal_profile_preserves_exact_bounds_through_json_and_yaml(margin):
 def test_cli_handles_resource_budget_failure_without_traceback(tmp_path, capsys):
     pl.DataFrame({"x": [1]}).write_csv(tmp_path / "data.csv")
     config = tmp_path / "q.json"
-    config.write_text(json.dumps({
-        "datasets": {"data": {"path": "data.csv", "schema": SCHEMA}},
-        "engine": {"max_report_bytes": 1, "parallel": False},
-        "plugins": {"entry_points": False},
-    }))
+    config.write_text(
+        json.dumps(
+            {
+                "datasets": {"data": {"path": "data.csv", "schema": SCHEMA}},
+                "engine": {"max_report_bytes": 1, "parallel": False},
+                "plugins": {"entry_points": False},
+            }
+        )
+    )
     assert main(["run", "-c", str(config)]) == EXIT_USAGE
     output = capsys.readouterr()
     assert "Increase the budget" in output.err
     assert "Traceback" not in output.err
     process = subprocess.run(
         [sys.executable, "-m", "qavf.cli", "run", "-c", str(config)],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     assert process.returncode == EXIT_USAGE
     assert "Traceback" not in process.stderr

@@ -183,6 +183,7 @@ def test_concurrent_first_fingerprints_cannot_replace_the_accepted_content_ident
 
     def fingerprint():
         if inside_operation:
+
             def read():
                 source.prepare_identity(True)
                 return path.read_text()

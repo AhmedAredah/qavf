@@ -8,6 +8,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from qavf.engine.cleanup import attempt_cleanup, raise_cleanup_errors
 from qavf.engine.observation import Observation
 from qavf.engine.projection import selected_columns
 from qavf.sources.base import SourceError
@@ -26,9 +27,7 @@ class ObservationView(Observation):
         if missing:
             raise ValueError(f"observation does not contain columns {missing!r}")
         self._parent = parent
-        super().__init__(
-            parent._ctx, frame=parent._frame, files=parent._files, columns=selected
-        )
+        super().__init__(parent._ctx, frame=parent._frame, files=parent._files, columns=selected)
 
     def _check(self) -> None:
         super()._check()
@@ -172,8 +171,10 @@ class ObservationPlan:
     @contextlib.contextmanager
     def contract(self, index: int) -> Iterator[ContractObservations]:
         self._check()
-        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(
-            self._contracts
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < len(self._contracts)
         ):
             raise IndexError("invalid observation contract index")
         if index in self._started:
@@ -189,22 +190,28 @@ class ObservationPlan:
             for name in selections:
                 self._remaining[name] -= 1
                 if self._remaining[name] == 0:
-                    self._observed.pop(name, None)
                     self._failures.pop(name, None)
-                    owner = self._owners.pop(name, None)
+                    owner = self._owners.get(name)
                     if owner is not None:
                         owner.close()
+                    self._observed.pop(name, None)
+                    self._owners.pop(name, None)
 
     def close(self) -> None:
-        if self._closed:
-            return
         self._closed = True
-        try:
-            self._stack.close()
-        finally:
-            self._observed.clear()
-            self._owners.clear()
-            self._failures.clear()
+        failures = attempt_cleanup([self._stack.close])
+        # ExitStack consumes callbacks even when they raise. Keep the actual
+        # observation owners reachable so their failed close can be retried.
+        for name, observed in tuple(self._observed.items()):
+            try:
+                observed.close()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                self._observed.pop(name)
+                self._owners.pop(name, None)
+        self._failures.clear()
+        raise_cleanup_errors("observation plan could not be fully released", failures)
 
     def __enter__(self) -> ObservationPlan:
         self._check()

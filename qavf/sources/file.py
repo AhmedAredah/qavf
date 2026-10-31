@@ -34,6 +34,7 @@ from qavf.sources.csv_probe import (
     ReadFailure,
     TypedColumns,
     read_rejects,
+    rejection_capture_limit,
 )
 from qavf.sources.errors import redacted_error
 from qavf.sources.formats import (
@@ -78,6 +79,7 @@ class FileSource(DataSource[FileParams]):
     Params: ClassVar[type[SourceParams]] = FileParams
     _file_rows: tuple[tuple[str, int], ...] | None
     """Rows per file of a multi-file read, once counted (see :meth:`file_rows`)."""
+
     @property
     def _identity_session(self) -> IdentitySession:
         with self._state_lock:
@@ -120,21 +122,9 @@ class FileSource(DataSource[FileParams]):
         if is_remote(location):
             self._manifest: tuple[Path, ...] | None = None
             return None
-        paths: tuple[Path, ...]
-        if Path(location).is_file():
-            paths = (Path(location),)
-        elif GLOB_PATTERN.search(location):
-            paths = tuple(
-                sorted(
-                    {
-                        Path(p)
-                        for p in glob.iglob(location, recursive=True, include_hidden=True)
-                        if Path(p).is_file()
-                    }
-                )
-            )
-        else:
-            paths = ()
+        from qavf.sources.local_files import LocalManifest, discover_local_files
+
+        paths = discover_local_files(location)
         if not paths:
             raise SourceNotFoundError(f"file not found: {redact_text(location)}")
         if self.params.min_files is not None and len(paths) < self.params.min_files:
@@ -143,7 +133,7 @@ class FileSource(DataSource[FileParams]):
                 f"expected at least {self.params.min_files}"
             )
         self._manifest = paths
-        self._manifest_stats = {path: self._file_stat(path) for path in paths}
+        self._local_manifest = LocalManifest.capture(paths, self._file_stat)
         return paths
 
     @staticmethod
@@ -152,17 +142,9 @@ class FileSource(DataSource[FileParams]):
         return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino
 
     def _assert_unchanged(self) -> None:
-        for path, original in getattr(self, "_manifest_stats", {}).items():
-            try:
-                current = self._file_stat(path)
-            except OSError:
-                raise SourceIntegrityError(
-                    f"input file disappeared during validation: {redact_text(str(path))}"
-                ) from None
-            if current != original:
-                raise SourceIntegrityError(
-                    f"input file changed during validation: {redact_text(str(path))}"
-                )
+        manifest = getattr(self, "_local_manifest", None)
+        if manifest is not None:
+            manifest.verify(self._file_stat)
 
     def verify_identity(self) -> None:
         self._files()
@@ -330,6 +312,11 @@ class FileSource(DataSource[FileParams]):
         if count_rejects:
             options.pop("ignore_errors", None)
             options["store_rejects"] = True
+            options["rejects_limit"] = rejection_capture_limit(
+                location, params.rejects_budget, int(options.get("rejects_limit", 0))
+            )
+            notes["rejection_entry_budget"] = params.rejects_budget
+            notes["rejection_capture_limit_per_file"] = options["rejects_limit"]
         if fmt == "ndjson":
             options.setdefault("format", "newline_delimited")
         if (
@@ -382,7 +369,8 @@ class FileSource(DataSource[FileParams]):
             sql = f"SELECT {select} FROM {READERS[fmt]}($path{args})"
             parameters = {"path": location}
         if typed:
-            sql = typed.wrap(sql)  # converted in the same streaming scan
+            available = params.columns or self._header_probe(location, options).header()
+            sql = typed.wrap(sql, available)  # converted in the same streaming scan
         plan = ScanPlan(sql, parameters) if parameters else ScanPlan(sql)
         return plan, notes, count_rejects, trim_excel
 
@@ -606,7 +594,7 @@ class FileSource(DataSource[FileParams]):
                     con,
                     str(self.params.options.get("rejects_table", "reject_errors")),
                     str(self.params.options.get("rejects_scan", "reject_scans")),
-                    int(self.params.options.get("rejects_limit", 0)),
+                    int(notes["rejection_capture_limit_per_file"]),
                     REJECTED_SAMPLE,
                 )
                 with self._state_lock:

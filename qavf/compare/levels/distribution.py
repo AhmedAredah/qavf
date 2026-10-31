@@ -33,6 +33,7 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from qavf.compare.comparators import Materiality
+from qavf.compare.evidence import keep_models
 from qavf.compare.levels import (
     SIDES,
     ComparisonLevel,
@@ -67,8 +68,10 @@ from qavf.compare.significance import (
 )
 from qavf.compare.significance import label as member_label
 from qavf.compare.spec import InferenceParams, Side
+from qavf.engine.cache_ownership import retained_size
 from qavf.engine.registry import RuleParams
 from qavf.inference.categorical import chi_square, g_test
+from qavf.inference.decision import needs_test
 from qavf.inference.effects import (
     EmpiricalDistributions,
     jensen_shannon,
@@ -78,9 +81,8 @@ from qavf.inference.effects import (
 from qavf.inference.registry import TESTS, TestInput
 from qavf.inference.results import TestResult
 from qavf.inference.results import not_assessed as untested
-from qavf.key_codec import canonical_key
 from qavf.rules._grouped import ProjectedRelation
-from qavf.rules.helpers import plural
+from qavf.rules.helpers import BoundedEvidence, fresh_internal, plural
 from qavf.statistics.ordered import bin_index, power_of_two, quantile_cutpoints
 
 
@@ -171,15 +173,30 @@ class DistributionParams(InferenceParams):
 class _Measured:
     """One member's distribution metrics, its evidence record and its test."""
 
-    member: DistributionMember
+    member: DistributionMember | None
+    group: dict[str, Any]
     record: dict[str, Any]
     material: bool
     magnitude: float
     run: Callable[[], TestResult]
 
-    @property
-    def group(self) -> dict[str, Any]:
-        return dict(self.member.group)
+
+def _completed_test(
+    run: Callable[[], TestResult], inference: Inference, material: bool
+) -> Callable[[], TestResult]:
+    """Retain one test result instead of arrays captured by a deferred closure.
+
+    The decision's complete correction family is still formed later. Tests the
+    policy would not run are not evaluated here either.
+    """
+    result = run() if inference.tests and needs_test(inference.decision, material) else None
+
+    def completed() -> TestResult:
+        if result is None:
+            raise RuntimeError("the decision policy did not request this test")
+        return result
+
+    return completed
 
 
 def _float(value: Any) -> float | None:
@@ -328,6 +345,9 @@ class DistributionLevel(ComparisonLevel):
         keys = aligned.keys
         lossy = [aligned.columns[side][roles["lossy"]] for side in SIDES]
         values = [aligned.columns[side][roles["values"]] for side in SIDES]
+        detail_budget = BoundedEvidence(
+            inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes
+        )
         selected = precise_frame(aligned.both.select([*keys, *lossy, *values]), keys)
         for position, row in enumerate(selected.iter_rows()):
             group = dict(zip(keys, row[: len(keys)], strict=True))
@@ -341,9 +361,25 @@ class DistributionLevel(ComparisonLevel):
                 reason = f"fewer than min_values {params.min_values} values on a side"
                 unmeasured.append({**group, "column": column, "reason": reason})
                 continue
-            measured.append(
-                self._numeric_member(params, column, group, b, c, judged, inference, position)
+            item = self._numeric_member(
+                params,
+                column,
+                group,
+                b,
+                c,
+                judged,
+                inference,
+                position,
+                keep_detail=bool(
+                    inputs.ctx.evidence_bytes and len(detail_budget.records) < detail_budget.limit
+                ),
             )
+            before = len(detail_budget.records)
+            if item.member is not None:
+                detail_budget.append(item.member.model_dump(mode="python"))
+            if len(detail_budget.records) == before:
+                item = replace(item, member=None)
+            measured.append(item)
         plan = MeasureTest(params.test, None)
         return self._column(inputs, params, column, "numeric", measured, unmeasured, plan)
 
@@ -357,6 +393,8 @@ class DistributionLevel(ComparisonLevel):
         judged: Materiality | None,
         inference: Inference,
         position: int,
+        *,
+        keep_detail: bool = True,
     ) -> _Measured:
         thresholds = params.thresholds
         labels, b_counts, c_counts = numeric_bins(b, c, params.bins, display_limit=params.bins * 2)
@@ -366,14 +404,21 @@ class DistributionLevel(ComparisonLevel):
         ks = functions.ks_distance()
         distance = functions.wasserstein()
         quantiles = []
+        quantiles_changed = False
         if params.quantiles is not None and judged is not None:
             for p, qb, qc in quantile_deltas(b, c, params.quantiles.probabilities):
-                quantiles.append(
-                    QuantileDelta(
-                        p=p, baseline=qb, candidate=qc, delta=qc - qb,
-                        material=judged.material(qb, qc),
+                changed = judged.material(qb, qc)
+                quantiles_changed |= changed
+                if keep_detail:
+                    quantiles.append(
+                        QuantileDelta(
+                            p=p,
+                            baseline=qb,
+                            candidate=qc,
+                            delta=qc - qb,
+                            material=changed,
+                        )
                     )
-                )  # fmt: skip
         material = [
             name
             for name, value, limit in (
@@ -384,21 +429,25 @@ class DistributionLevel(ComparisonLevel):
             )
             if limit is not None and value > limit
         ]
-        if any(q.material for q in quantiles):
+        if quantiles_changed:
             material.append("quantiles")
-        member = DistributionMember(
-            column=column,
-            kind="numeric",
-            group=group,
-            baseline_n=len(b),
-            candidate_n=len(c),
-            psi=_float(psi),
-            ks=_float(ks),
-            wasserstein=_float(distance),
-            jensen_shannon=_float(js),
-            quantiles=quantiles,
-            bins=_shares(labels, b_counts, c_counts),
-            material=material,
+        member = (
+            DistributionMember(
+                column=column,
+                kind="numeric",
+                group=group,
+                baseline_n=len(b),
+                candidate_n=len(c),
+                psi=_float(psi),
+                ks=_float(ks),
+                wasserstein=_float(distance),
+                jensen_shannon=_float(js),
+                quantiles=quantiles,
+                bins=_shares(labels, b_counts, c_counts),
+                material=material,
+            )
+            if keep_detail
+            else None
         )
         test = TESTS.create(params.test)
         data = TestInput(
@@ -410,10 +459,17 @@ class DistributionLevel(ComparisonLevel):
                 return test.equivalent(data)
             return test.run(data)
 
-        record = {**group, "column": column, "psi": member.psi, "ks": member.ks,
-                  "wasserstein": member.wasserstein, "jensen_shannon": member.jensen_shannon,
+        record = {**group, "column": column, "psi": _float(psi), "ks": _float(ks),
+                  "wasserstein": _float(distance), "jensen_shannon": _float(js),
                   "material": ", ".join(material) or "none"}  # fmt: skip
-        return _Measured(member, record, bool(material), max(psi, 0.0), run)
+        return _Measured(
+            member,
+            group,
+            record,
+            bool(material),
+            max(psi, 0.0),
+            _completed_test(run, inference, bool(material)),
+        )
 
     # ---------------------------------------------------------- categorical
     def _categorical(
@@ -443,22 +499,60 @@ class DistributionLevel(ComparisonLevel):
             rows = rows.join(both, on=keys, how="semi", nulls_equal=True)
         elif not members.both.height:
             rows = rows.clear()
-        tables: dict[bytes, tuple[tuple[Any, ...], list[tuple[Any, int, int]]]] = {}
-        member_keys = precise_frame(members.both.select(keys)).iter_rows() if keys else [()]
-        for key in member_keys:
-            tables[canonical_key(key)] = (key, [])
-        for row in precise_frame(rows.select([*keys, column, left, right])).iter_rows():
-            key = tuple(row[: len(keys)])
-            tables.setdefault(canonical_key(key), (key, []))[1].append(
-                (row[len(keys)], int(row[-2] or 0), int(row[-1] or 0))
+        if rows.height > inference.max_work:
+            raise ValueError(
+                f"{rows.height:,} group/category pairs exceed max_work {inference.max_work:,}"
             )
+        # Carry native member ordinals, including members with only missing
+        # categories. Only one group's Python category table is alive at once.
+        ordinal = fresh_internal("distribution_member", rows.columns)
+        if keys:
+            indexed = members.both.select(keys).with_row_index(ordinal)
+            # Sorted-merge joins in supported Polars versions can miss NaN
+            # keys. Canonicalizing NaNs clears stale sorted metadata while
+            # preserving native grouping identity (including signed zeros).
+            normalize = [
+                pl.col(key).fill_nan(float("nan")) for key in keys if rows.schema[key].is_float()
+            ]
+            if normalize:
+                indexed = indexed.with_columns(normalize)
+                rows = rows.with_columns(normalize)
+            rows = indexed.join(
+                rows.select([*keys, column, left, right]), on=keys, how="left", nulls_equal=True
+            ).sort([ordinal, column], nulls_last=True)
+        else:
+            rows = rows.select(column, left, right).with_columns(pl.lit(0).alias(ordinal))
+            if rows.is_empty():
+                rows = pl.DataFrame({ordinal: [0], column: [None], left: [None], right: [None]})
+        inputs.ctx.check_materialization("categorical distribution groups", rows)
+        selected = [ordinal, *keys, column, left, right]
+
+        def grouped_rows():
+            for batch in rows.select(selected).iter_slices(8192):
+                yield from precise_frame(batch).iter_rows()
+
         measured: list[_Measured] = []
         unmeasured: list[dict[str, Any]] = []
         evidence = inputs.evidence()
         changed = {"appeared": 0, "disappeared": 0}
         limit = inputs.ctx.evidence_limit
-        for position, (key, table) in enumerate(tables.values()):
-            group = dict(zip(keys, key, strict=True))
+        detail_budget = BoundedEvidence(limit, byte_limit=inputs.ctx.evidence_bytes)
+        family_bytes = 0
+        for position, entries in itertools.groupby(grouped_rows(), key=lambda row: row[0]):
+            table: list[tuple[Any, int, int]] = []
+            group: dict[str, Any] = {}
+            table_bytes = 0
+            for row in entries:
+                if not group:
+                    group = dict(zip(keys, row[1 : len(keys) + 1], strict=True))
+                if row[-2] is None and row[-1] is None:
+                    continue
+                entry = row[-3], int(row[-2] or 0), int(row[-1] or 0)
+                table_bytes += retained_size(entry) + 64  # list slot and numeric/test workspace
+                inputs.ctx.check_retained_bytes(
+                    "categorical distribution group and family", family_bytes + table_bytes
+                )
+                table.append(entry)
             b_counts = np.array([t[1] for t in table])
             c_counts = np.array([t[2] for t in table])
             appeared = [t[0] for t in table if not t[1] and t[2]]
@@ -471,12 +565,27 @@ class DistributionLevel(ComparisonLevel):
                 reason = f"fewer than min_values {params.min_values} values on a side"
                 unmeasured.append({**group, "column": column, "reason": reason})
                 continue
-            measured.append(
-                self._categorical_member(
-                    params, column, group, table, appeared[:limit], disappeared[:limit],
-                    inference, position,
-                )
-            )  # fmt: skip
+            item = self._categorical_member(
+                params,
+                column,
+                group,
+                table,
+                appeared[:limit],
+                disappeared[:limit],
+                inference,
+                position,
+                keep_detail=bool(
+                    inputs.ctx.evidence_bytes and len(detail_budget.records) < detail_budget.limit
+                ),
+            )
+            before = len(detail_budget.records)
+            if item.member is not None:
+                detail_budget.append(item.member.model_dump(mode="python"))
+            if len(detail_budget.records) == before:
+                item = replace(item, member=None)
+            family_bytes += retained_size(item.record) + 512
+            inputs.ctx.check_retained_bytes("categorical distribution family", family_bytes)
+            measured.append(item)
         plan = MeasureTest(params.categorical_test, None)
         summary, results, found = self._column(
             inputs, params, column, "categorical", measured, unmeasured, plan
@@ -506,6 +615,8 @@ class DistributionLevel(ComparisonLevel):
         disappeared: list[Any],
         inference: Inference,
         position: int,
+        *,
+        keep_detail: bool = True,
     ) -> _Measured:
         thresholds = params.thresholds
         b_counts = np.array([t[1] for t in table], dtype=float)
@@ -521,20 +632,28 @@ class DistributionLevel(ComparisonLevel):
             )
             if limit is not None and value > limit
         ]
-        order = np.argsort(-(b_counts / totals[0] + c_counts / totals[1]), kind="stable")
+        order = (
+            np.argsort(-(b_counts / totals[0] + c_counts / totals[1]), kind="stable")
+            if keep_detail
+            else np.empty(0, dtype=int)
+        )
         labels = [str(table[i][0]) for i in order[: params.bins * 2]]
-        member = DistributionMember(
-            column=column,
-            kind="categorical",
-            group=group,
-            baseline_n=int(totals[0]),
-            candidate_n=int(totals[1]),
-            psi=_float(psi),
-            jensen_shannon=_float(js),
-            bins=_shares(labels, b_counts[order], c_counts[order]),
-            appeared=appeared,
-            disappeared=disappeared,
-            material=material,
+        member = (
+            DistributionMember(
+                column=column,
+                kind="categorical",
+                group=group,
+                baseline_n=int(totals[0]),
+                candidate_n=int(totals[1]),
+                psi=_float(psi),
+                jensen_shannon=_float(js),
+                bins=_shares(labels, b_counts[order], c_counts[order]),
+                appeared=appeared,
+                disappeared=disappeared,
+                material=material,
+            )
+            if keep_detail
+            else None
         )
         counts = np.vstack([b_counts, c_counts])
         homogeneity = chi_square if params.categorical_test == "chi_square" else g_test
@@ -545,10 +664,17 @@ class DistributionLevel(ComparisonLevel):
                 return untested(method, f"{method} has no equivalence form")
             return homogeneity(counts)
 
-        record = {**group, "column": column, "psi": member.psi,
-                  "jensen_shannon": member.jensen_shannon,
+        record = {**group, "column": column, "psi": _float(psi),
+                  "jensen_shannon": _float(js),
                   "material": ", ".join(material) or "none"}  # fmt: skip
-        return _Measured(member, record, bool(material), max(psi, 0.0), run)
+        return _Measured(
+            member,
+            group,
+            record,
+            bool(material),
+            max(psi, 0.0),
+            _completed_test(run, inference, bool(material)),
+        )
 
     # -------------------------------------------------------------- family
     @staticmethod
@@ -582,15 +708,21 @@ class DistributionLevel(ComparisonLevel):
             noun,
             magnitudes=[item.magnitude for item in measured],
             unmeasured=unmeasured,
+            byte_limit=inputs.ctx.evidence_bytes,
         )
         tests = check.significance.tests if check.significance is not None else []
         by_label = {test.label: test for test in tests}
-        found = [
-            item.member.model_copy(update={"test": by_label[member.label]})
-            if member.label in by_label
-            else item.member
-            for item, member in zip(measured, members, strict=True)
-        ]
+        found = keep_models(
+            (
+                item.member.model_copy(update={"test": by_label[member.label]})
+                if member.label in by_label
+                else item.member
+                for item, member in zip(measured, members, strict=True)
+                if item.member is not None
+            ),
+            inputs.ctx.evidence_limit,
+            inputs.ctx.evidence_bytes,
+        )
         summary = ColumnDistribution(
             column=column,
             kind=kind,

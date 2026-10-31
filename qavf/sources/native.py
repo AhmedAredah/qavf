@@ -62,6 +62,7 @@ class OwnedConnection:
         self._owner = owner
         self._token = token
         self._closed = False
+        self._connection_closed = False
         self._close_lock = threading.Lock()
         try:
             register = getattr(owner, "register_connection", None)
@@ -108,16 +109,16 @@ class OwnedConnection:
         with self._close_lock:
             if self._closed:
                 return
-            self._closed = True
-            try:
+            if not self._connection_closed:
                 self._connection.close()
-            finally:
-                try:
-                    unregister = getattr(self._owner, "unregister_connection", None)
-                    if unregister is not None:
-                        unregister(self._token)
-                finally:
-                    self._owner.release(self._token)
+                self._connection_closed = True
+            # Do not lose the only owner or release its reservation while a
+            # failed native close may still retain buffers and file handles.
+            unregister = getattr(self._owner, "unregister_connection", None)
+            if unregister is not None:
+                unregister(self._token)
+            self._owner.release(self._token)
+            self._closed = True
 
     def __enter__(self) -> OwnedConnection:
         return self

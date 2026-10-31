@@ -20,7 +20,7 @@ from pydantic import model_validator
 
 from qavf.aggregation import exact_sum_expr as exact_sum_expr
 from qavf.aggregation import narrow_integer, numeric_expr
-from qavf.audit_codec import evidence_json_size
+from qavf.audit_codec import AuditSizeError, iter_audit_json
 from qavf.engine.context import DataContext, stable_order
 from qavf.engine.registry import Finding, RuleParams
 from qavf.keys import KeyTypeError as KeyTypeError
@@ -436,20 +436,39 @@ class LargestEvidence:
 
     limit: int
     _heap: list[tuple[float, int, dict[str, Any]]] = field(default_factory=list)
+    byte_limit: int | None = None
+    _bytes: int = 0
+    _sizes: dict[int, int] = field(default_factory=dict)
 
     def admits(self, magnitude: float, ordinal: int) -> bool:
-        if not self.limit:
+        if not self.limit or self.byte_limit == 0:
             return False
         return len(self._heap) < self.limit or (magnitude, -ordinal) > self._heap[0][:2]
 
     def add(self, magnitude: float, ordinal: int, record: dict[str, Any]) -> None:
         if not self.admits(magnitude, ordinal):
             return
+        size = 0
+        if self.byte_limit is not None:
+            try:
+                size = sum(
+                    len(part)
+                    for part in iter_audit_json(record, max_bytes=max(0, self.byte_limit - 2))
+                )
+            except AuditSizeError:
+                return
         item = (magnitude, -ordinal, record)
         if len(self._heap) < self.limit:
             heapq.heappush(self._heap, item)
         else:
-            heapq.heapreplace(self._heap, item)
+            removed = heapq.heapreplace(self._heap, item)
+            self._bytes -= self._sizes.pop(-removed[1], 0)
+        self._sizes[ordinal] = size
+        self._bytes += size
+        if self.byte_limit is not None:
+            while self._heap and self._bytes + len(self._heap) + 1 > self.byte_limit:
+                removed = heapq.heappop(self._heap)
+                self._bytes -= self._sizes.pop(-removed[1], 0)
 
     @property
     def records(self) -> list[dict[str, Any]]:
@@ -481,11 +500,21 @@ class BoundedEvidence:
             return False
         if self.byte_limit is None:
             return True
-        size = evidence_json_size(dict(record))
-        if self.bytes_used + size > self.byte_limit:
+        framing = 2 if not self.records else 1
+        try:
+            size = sum(
+                len(part)
+                for part in iter_audit_json(
+                    record, max_bytes=max(0, self.byte_limit - self.bytes_used - framing)
+                )
+            )
+        except AuditSizeError:
             self.limit = len(self.records)  # later, smaller records stay out: order is kept
             return False
-        self.bytes_used += size
+        if self.bytes_used + size + framing > self.byte_limit:
+            self.limit = len(self.records)
+            return False
+        self.bytes_used += size + framing
         return True
 
     def append(self, record: Mapping[str, Any]) -> None:

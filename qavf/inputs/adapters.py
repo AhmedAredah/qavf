@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, ClassVar
 
 import duckdb
@@ -10,11 +12,11 @@ import polars as pl
 
 from qavf.settings import SourcePolicy
 from qavf.sources.base import DataSource, ScanPlan, SourceEnvironment, SourceError, SourceParams
-from qavf.sources.frames import as_polars, known_rows
+from qavf.sources.frames import admitted_frame
 from qavf.sources.native import budgeted, check_budget, connect
 from qavf.sources.sql import normalize_sql_paths, referenced_connections
 
-from .descriptors import Loader, Query
+from .descriptors import BatchSource, Loader, Query
 
 
 class _QueryInput(DataSource[SourceParams]):
@@ -121,14 +123,13 @@ class _FrameInput(DataSource[SourceParams]):
         return type(self)(self.frame, self.bound_environment(env), policy)
 
     def load(self) -> pl.DataFrame:
-        budget = self.params.row_budget
-        rows = known_rows(self.frame)
-        if budget is not None and rows is not None and rows > budget:
-            raise SourceError(f"{self.describe()} has more than {budget:,} rows (row_budget)")
-        return check_budget(as_polars(self.frame), budget, self.describe())
+        return admitted_frame(self.frame, self.params.row_budget, self.describe())
 
     def describe(self) -> str:
         return f"in-memory {type(self.frame).__name__}"
+
+    def scan_polars(self) -> pl.LazyFrame | None:
+        return self.frame.clone() if isinstance(self.frame, pl.LazyFrame) else None
 
 
 class _LoaderInput(DataSource[SourceParams]):
@@ -165,8 +166,83 @@ class _LoaderInput(DataSource[SourceParams]):
             # of accepting a truncated dataset, without materializing all rows.
             budget = self.params.row_budget
             return value.limit(budget + 1) if budget is not None else value
-        return check_budget(as_polars(value), self.params.row_budget, self.describe())
+        return admitted_frame(value, self.params.row_budget, self.describe())
 
     def describe(self) -> str:
         function = self.loader.function
         return f"loader: {getattr(function, '__qualname__', type(function).__name__)}"
+
+
+class _BatchInput(DataSource[SourceParams]):
+    """The run-local lifecycle of a validated owned batch factory."""
+
+    kind: ClassVar[str] = "batch_input"
+    Params: ClassVar[type[SourceParams]] = SourceParams
+
+    def __init__(
+        self, batch: BatchSource, env: SourceEnvironment, policy: SourcePolicy | None = None
+    ) -> None:
+        super().__init__(
+            SourceParams(
+                type=self.kind, **(policy.model_dump(exclude_unset=True) if policy else {})
+            ),
+            env,
+        )
+        self.batch = batch
+        self.retry_safe = batch.replayable and batch.retry_safe
+        self._opened = False
+        self.load_notes.update(
+            replayable=batch.replayable,
+            retry_safe=batch.retry_safe,
+            execution="owned_batch_snapshot",
+        )
+
+    def bind(self, env: SourceEnvironment) -> _BatchInput:
+        policy = SourcePolicy.model_validate(self.params.model_dump(exclude={"type"}))
+        return type(self)(self.batch, self.bound_environment(env), policy)
+
+    def batch_schema(self) -> dict[str, pl.DataType]:
+        return dict(pl.Schema(self.batch.schema))
+
+    @contextmanager
+    def open_batches(self) -> Iterator[Iterator[pl.DataFrame]]:
+        with self._state_lock:
+            if self._opened and not self.retry_safe:
+                raise SourceError("BatchSource stream was already opened and is not retry-safe")
+            self._opened = True
+        manager = self.batch.factory(**self.batch.kwargs)
+        if not callable(getattr(manager, "__enter__", None)) or not callable(
+            getattr(manager, "__exit__", None)
+        ):
+            # A factory returning a raw reader did not establish the promised
+            # ownership contract. Close it if possible rather than leak it.
+            close = getattr(manager, "close", None)
+            if callable(close):
+                close()
+            raise SourceError("BatchSource.factory must return an owned context manager")
+        with manager as batches:
+
+            def converted() -> Iterator[pl.DataFrame]:
+                for batch in batches:
+                    if isinstance(batch, pl.LazyFrame):
+                        raise SourceError("BatchSource batches must be eager typed tables")
+                    frame = admitted_frame(batch, self.params.row_budget, self.describe())
+                    if dict(frame.schema) != self.batch_schema():
+                        raise SourceError(
+                            "BatchSource batch schema/order differs from its declaration"
+                        )
+                    # Dict equality ignores order; column order is part of this contract.
+                    if frame.columns != list(self.batch.schema):
+                        raise SourceError(
+                            "BatchSource batch schema/order differs from its declaration"
+                        )
+                    yield frame
+
+            yield converted()
+
+    def load(self) -> pl.DataFrame:
+        raise SourceError("BatchSource requires QAVF's managed observation engine")
+
+    def describe(self) -> str:
+        factory = self.batch.factory
+        return f"batch source: {getattr(factory, '__qualname__', type(factory).__name__)}"

@@ -171,7 +171,7 @@ def test_cancellation_stops_owned_process_and_propagates(monkeypatch, tmp_path):
 
     process = SimpleNamespace(wait=interrupt_wait)
     monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: process)
-    monkeypatch.setattr(runner, "_stop_process", stopped.append)
+    monkeypatch.setattr(runner, "_stop_process", lambda process, job=None: stopped.append(process))
     with pytest.raises(KeyboardInterrupt):
         runner.execute_worker(
             ["python", "driver.py"],
@@ -211,3 +211,118 @@ def test_nonfinite_result_rejected(tmp_path):
     result_path.write_text('{"id":"x","status":"passed","value":NaN}')
     with pytest.raises(ValueError, match="Non-finite"):
         runner._read_result(result_path, "x")
+
+
+def test_job_owner_terminates_descendants_and_reaps_unjoined_bootstrap():
+    events = []
+    job = SimpleNamespace(terminate=lambda: events.append("tree"), active_processes=lambda: 0)
+    process = SimpleNamespace(
+        poll=lambda: None,
+        kill=lambda: events.append("bootstrap"),
+        wait=lambda: events.append("reap"),
+    )
+    runner._stop_process(process, job)
+    assert events == ["tree", "bootstrap", "reap"]
+
+
+def test_job_termination_failure_still_reaps_bootstrap():
+    events = []
+
+    def fail():
+        raise OSError("job unavailable")
+
+    job = SimpleNamespace(terminate=fail)
+    process = SimpleNamespace(
+        poll=lambda: None,
+        kill=lambda: events.append("bootstrap"),
+        wait=lambda: events.append("reap"),
+    )
+    with pytest.raises(OSError, match="job unavailable"):
+        runner._stop_process(process, job)
+    assert events == ["bootstrap", "reap"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows Job Object contract")
+def test_real_windows_timeout_reaps_grandchild_and_releases_files(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+
+    child = tmp_path / "grandchild.py"
+    child.write_text("""import msvcrt, os, pathlib, time
+root = pathlib.Path(__file__).parent
+with (root / 'locked.tmp').open('w+b') as stream:
+    stream.write(b'x'); stream.flush(); stream.seek(0)
+    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    (root / 'grandchild.pid').write_text(str(os.getpid()))
+    time.sleep(120)
+""")
+    driver = tmp_path / "driver.py"
+    driver.write_text("""import pathlib, subprocess, sys, time
+root = pathlib.Path(__file__).parent
+subprocess.Popen([sys.executable, str(root / 'grandchild.py')])
+while not (root / 'grandchild.pid').exists():
+    time.sleep(0.01)
+time.sleep(120)
+""")
+    result = runner.execute_worker(
+        [sys.executable, str(driver)],
+        {"id": "windows-tree"},
+        tmp_path / "run",
+        timeout_s=5,
+        environment=dict(os.environ),
+    )
+    assert result["status"] == "timed_out"
+    assert result["termination_method"] == "Windows Job Object (kill-on-close)"
+    pid = int((tmp_path / "grandchild.pid").read_text())
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    if handle:
+        try:
+            assert kernel32.WaitForSingleObject(handle, 0) == 0
+        finally:
+            kernel32.CloseHandle(handle)
+    # A surviving grandchild would keep this file locked on Windows.
+    (tmp_path / "locked.tmp").unlink()
+
+
+def test_windows_ownership_failure_prevents_workload_launch(monkeypatch, tmp_path):
+    monkeypatch.setattr(runner, "sys", SimpleNamespace(platform="win32"))
+
+    def unavailable(argv, directory):
+        raise OSError("nested job ownership unavailable")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("workload launched without an owned job")
+
+    monkeypatch.setattr(runner, "_windows_launch", unavailable)
+    monkeypatch.setattr(runner.subprocess, "Popen", unexpected)
+    result = runner.execute_worker(
+        ["python", "driver.py"], {"id": "unowned"}, tmp_path, timeout_s=1, environment={}
+    )
+    assert result["status"] == "crashed" and result["error_kind"] == "launch_failed"
+    assert "nested job ownership unavailable" in result["error"]
+
+
+def test_windows_bootstrap_resolves_installed_job_module(monkeypatch, tmp_path):
+    from qavf.execution import _windows_job
+
+    class Owner:
+        def __init__(self, name, **limits):
+            self.name = name
+
+        def close(self):
+            pytest.fail("successful preparation prematurely closed ownership")
+
+    monkeypatch.setattr(_windows_job, "Job", Owner)
+    argv, owner = runner._windows_launch([sys.executable, "worker.py"], tmp_path)
+    assert argv[1] == "-S"
+    assert Path(argv[2]).name == "_job_bootstrap.py"
+    control = json.loads(Path(argv[3]).read_text())
+    assert control["job"] == owner.name
+    assert Path(control["job_module"]) == Path(_windows_job.__file__).resolve()
+    assert control["argv"] == [sys.executable, "worker.py"]

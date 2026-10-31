@@ -182,8 +182,7 @@ def test_descendants_stop_on_success_and_timeout(tmp_path, monkeypatch, finish):
         tmp_path,
         monkeypatch,
         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
-        f"Path({str(pid_path)!r}).write_text(str(child.pid))\n"
-        + finish,
+        f"Path({str(pid_path)!r}).write_text(str(child.pid))\n" + finish,
     )
     settings = _settings(tmp_path, run_timeout_s=0.5)
     if "sleep" in finish:
@@ -208,7 +207,8 @@ def test_os_cpu_limit_stops_busy_native_independent_work(tmp_path, monkeypatch):
 @pytest.mark.skipif(sys.platform == "darwin", reason="macOS does not enforce address space")
 def test_os_address_space_rejects_large_allocation(tmp_path, monkeypatch):
     _worker(
-        tmp_path, monkeypatch,
+        tmp_path,
+        monkeypatch,
         "allocation = bytearray(256 * 1024 * 1024)\nPath(result_path).write_text('{}')",
     )
     with pytest.raises(ExecutionLimitError, match="MemoryError"):

@@ -56,6 +56,9 @@ from qavf.inference.resampling import (
 from qavf.inference.results import Alternative, Dependence, TestResult
 from qavf.stats import center_scale_observations
 
+DEFAULT_MAX_SLOPE_BYTES = 256 * 1024 * 1024
+"""Maximum seasonal slope values and per-season numeric workspace, not process RSS."""
+
 
 @assessed("kendall_tau")
 def kendall_tau(
@@ -226,13 +229,22 @@ def seasonal_kendall(
     *,
     alternative: Alternative = "two-sided",
     max_work: int = DEFAULT_MAX_WORK,
+    max_slope_bytes: int = DEFAULT_MAX_SLOPE_BYTES,
 ) -> TestResult:
     """Seasonal Kendall test: Mann-Kendall within each season, summed.
 
     ``S`` and its tie-corrected variance add over seasons (seasons treated as
     independent); the effect is the seasonal Sen slope, the median of
     within-season pairwise slopes. Seasons with one value contribute nothing.
+    ``max_slope_bytes`` admits the slope array and per-season numeric workspace
+    separately from pairwise work; it is not a limit on caller or process RAM.
     """
+    if (
+        isinstance(max_slope_bytes, bool)
+        or not isinstance(max_slope_bytes, int)
+        or max_slope_bytes < 0
+    ):
+        raise ValueError("max_slope_bytes must be a nonnegative integer")
     y = observations(values, "values")
     x = (
         np.arange(len(y), dtype=float)
@@ -254,9 +266,23 @@ def seasonal_kendall(
     if not pairs:
         raise Unassessable("no season has two values", n=n)
     check_work(pairs, max_work, "seasonal Kendall")
+    largest = max(map(len, groups.values()))
+    # The dominant retained buffer is exact; the per-season allowance covers
+    # coordinate gathers, tie counting/sorting and one denominator vector.
+    # Native allocator overhead and caller/whole-input storage are not an RSS cap.
+    required = pairs * np.dtype(np.float64).itemsize + largest * 96
+    if required > max_slope_bytes:
+        raise Unassessable(
+            f"seasonal Kendall slope workspace needs {required:,} bytes, "
+            f"above max_slope_bytes={max_slope_bytes:,}",
+            n=n,
+        )
+    if pairs > np.iinfo(np.intp).max // np.dtype(np.float64).itemsize:
+        raise Unassessable("seasonal Kendall slope array exceeds supported indexing", n=n)
     x, y, x_unit, y_unit = _slope_coordinates(x, y)
     s, variance = 0, 0.0
-    slopes = []
+    slopes = np.empty(pairs, dtype=np.float64)
+    offset = 0
     for members in groups.values():
         if len(members) < 2:
             continue
@@ -265,7 +291,11 @@ def seasonal_kendall(
         s += part
         variance += var
         for i in range(len(xs) - 1):
-            slopes.append((ys[i + 1 :] - ys[i]) / (xs[i + 1 :] - xs[i]))
+            count = len(xs) - i - 1
+            target = slopes[offset : offset + count]
+            np.subtract(ys[i + 1 :], ys[i], out=target)
+            np.divide(target, xs[i + 1 :] - xs[i], out=target)
+            offset += count
     z = _z(s, variance)
     return TestResult(
         method="seasonal_kendall",
@@ -273,7 +303,7 @@ def seasonal_kendall(
         statistic_name="S",
         p_value=normal_p_value(z, alternative) if variance else 1.0,
         alternative=alternative,
-        effect=_slope_units(float(np.median(np.concatenate(slopes))), y_unit, x_unit),
+        effect=_slope_units(float(np.median(slopes, overwrite_input=True)), y_unit, x_unit),
         effect_name="seasonal_sen_slope",
         n=n,
         assumptions=["independent seasons", "no serial correlation within a season"],

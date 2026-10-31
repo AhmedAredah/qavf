@@ -324,14 +324,17 @@ class _Check:
         plan = MeasureTest(method, None)
         if method == "none":
             plan = MeasureTest(method, None, False, f"no sound test for {self.name}")
-        judgement = judge(plan, self.inference, self.members, limit)
+        judgement = judge(
+            plan, self.inference, self.members, limit, byte_limit=self.evidence.byte_limit
+        )
         self.results = judgement.results
         self.significance = judgement.significance
+        unassessed = BoundedEvidence(limit, byte_limit=self.evidence.byte_limit)
         for position, decision in enumerate(judgement.decisions):
             if not decision.assessed:
                 self.not_assessed += 1
-                if len(self.unassessed) < limit:
-                    self.unassessed.append({**self.records[position], "decision": decision.reason})
+                unassessed.append({**self.records[position], "decision": decision.reason})
+                self.unassessed = unassessed.records
                 continue
             self.assessed += 1
             if decision.failed:
@@ -434,6 +437,7 @@ class SeriesShapeLevel(ComparisonLevel):
         one_sided, short = inputs.evidence(), inputs.evidence()
         only: dict[Side, int] = {"baseline": 0, "candidate": 0}
         shapes: list[SeriesShape] = []
+        details = BoundedEvidence(inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes)
         compared = too_short = 0
         # The descriptive screens (lag search, level-shift splits) of every series
         # and side share one budget, admitted before each runs.
@@ -457,12 +461,20 @@ class SeriesShapeLevel(ComparisonLevel):
                 too_short += 1
                 short.append({**group, "common_buckets": len(common)})
                 continue
-            kept = len(shapes) if len(shapes) < inputs.ctx.evidence_limit else -1
+            kept = len(shapes) if len(shapes) < details.limit and details.byte_limit else -1
             shape = self._shape(
                 params, group, b, c, common, period, checks, budget, tests, compared - 1, kept
             )
             if kept >= 0:
-                shapes.append(shape)
+                assert shape is not None
+                details.append(shape.model_dump(mode="python"))
+                if len(details.records) > len(shapes):
+                    shapes.append(shape)
+                else:
+                    # Prefix admission is now closed. Remove rejected detail
+                    # indices from deferred test attachments.
+                    for check in checks.values():
+                        check.series = [-1 if index == kept else index for index in check.series]
         for check in checks.values():
             check.decide(inputs.ctx.evidence_limit)
             for index, test in zip(check.series, check.results, strict=True):
@@ -576,7 +588,7 @@ class SeriesShapeLevel(ComparisonLevel):
         inference: Inference | None = None,
         ordinal: int = 0,
         position: int = -1,
-    ) -> SeriesShape:
+    ) -> SeriesShape | None:
         """Every enabled shape metric of one series, tallied into ``checks``.
 
         With ``inference`` each check that has a test records it, to run when the
@@ -753,7 +765,7 @@ class SeriesShapeLevel(ComparisonLevel):
             shape["level_shifts"] = labels
             found = {"baseline_shift": labels["baseline"], "candidate_shift": labels["candidate"]}
             checks["level shift"].record(differs, {**group, **found}, position, None, name)
-        return SeriesShape(**shape)
+        return SeriesShape(**shape) if position >= 0 else None
 
 
 def _profile_distance(b: _Series, c: _Series, common: list[int]) -> Fraction:

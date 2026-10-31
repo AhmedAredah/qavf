@@ -66,9 +66,11 @@ def layer_rings(
     tolerance = float(max(extent[1] - extent[0], extent[3] - extent[2]) * SIMPLIFY_FRACTION)
     geometry = "ST_SimplifyPreserveTopology(geom, ?)"
     if max_vertices is not None:
-        vertices = int(con.execute(
-            f"SELECT coalesce(sum(ST_NPoints({geometry})), 0) FROM {name}", [tolerance]
-        ).fetchone()[0])
+        vertices = int(
+            con.execute(
+                f"SELECT coalesce(sum(ST_NPoints({geometry})), 0) FROM {name}", [tolerance]
+            ).fetchone()[0]
+        )
         if vertices > max_vertices:
             raise OutlineLimitExceeded(vertices, max_vertices)
     query = con.sql(

@@ -31,6 +31,7 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from fractions import Fraction
+from functools import partial
 from itertools import combinations
 from typing import Any, ClassVar, Literal
 
@@ -38,6 +39,7 @@ import numpy as np
 import polars as pl
 from pydantic import Field, model_validator
 
+from qavf.compare.evidence import append_model, keep_models
 from qavf.compare.levels import SIDES, ComparisonLevel, LevelInputs, not_assessed, register_level
 from qavf.compare.levels.groups import (
     MeasureSpec,
@@ -74,7 +76,7 @@ from qavf.inference.trend import FIELLER_VARIANCE, compare_correlations
 from qavf.keys import align_keys
 from qavf.numeric import count_input, exact_rational, report_number
 from qavf.rules._grouped import ProjectedRelation
-from qavf.rules.helpers import fresh_internal, plural
+from qavf.rules.helpers import BoundedEvidence, fresh_internal, plural
 from qavf.statistics.series import pearson, spearman
 
 
@@ -277,7 +279,7 @@ class RelationshipsLevel(ComparisonLevel):
                 found = [not_assessed("correlation", str(exc).rstrip("."))]
                 changes = []
             checks.extend(found)
-            details["correlations"] = changes[:limit]
+            details["correlations"] = keep_models(changes, limit, inputs.ctx.evidence_bytes)
         ratios: list[RatioChange] = []
         for ratio in params.ratios:
             try:
@@ -289,13 +291,16 @@ class RelationshipsLevel(ComparisonLevel):
                 ratio_changes = []
             checks.append(check)
             ratios.extend(ratio_changes)
-        details["ratios"] = ratios[:limit]
+        details["ratios"] = keep_models(ratios, limit, inputs.ctx.evidence_bytes)
         if params.agreement is not None:
             try:
                 found, agreement, matched = self._agreement(
                     inputs, params.agreement, sides, relations, inference
                 )
-                details |= {"agreement": agreement[:limit], "matched": matched}
+                details |= {
+                    "agreement": keep_models(agreement, limit, inputs.ctx.evidence_bytes),
+                    "matched": matched,
+                }
             except ValueError as exc:
                 found = [not_assessed("agreement", str(exc).rstrip("."))]
             checks.extend(found)
@@ -332,6 +337,7 @@ class RelationshipsLevel(ComparisonLevel):
             noun,
             magnitudes=family.magnitudes,
             unmeasured=family.unmeasured,
+            byte_limit=inputs.ctx.evidence_bytes,
         )
 
     # ---------------------------------------------------------- correlations
@@ -380,6 +386,9 @@ class RelationshipsLevel(ComparisonLevel):
         for method in check.methods:
             family = _Family()
             found: list[CorrelationChange] = []
+            detail_budget = BoundedEvidence(
+                inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes
+            )
             for group, index, correlations in measured:
                 a, b = pairs[index]
                 nb, rb_ = correlations["baseline"][0], correlations["baseline"][1][method]
@@ -420,8 +429,7 @@ class RelationshipsLevel(ComparisonLevel):
                     filter(None, [member_label(keys, list(group.values())), f"{a}~{b}"])
                 )
                 family.add(material, label, {**record, "change": change}, abs(change), run)
-                found.append(
-                    CorrelationChange(
+                append_model(found, detail_budget, partial(CorrelationChange,
                         group=group, method=method, columns=[a, b], baseline=rb,
                         candidate=rc, pairs=sizes, change=change, material=material,
                     )
@@ -475,6 +483,9 @@ class RelationshipsLevel(ComparisonLevel):
         )
         family = _Family()
         found: list[RatioChange] = []
+        detail_budget = BoundedEvidence(
+            inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes
+        )
         for position, (row, numbers) in enumerate(zip(rows, parts, strict=True)):
             group = dict(zip(keys, row[: len(keys)], strict=True))
             nb, nc, db, dc = numbers
@@ -502,8 +513,7 @@ class RelationshipsLevel(ComparisonLevel):
 
             name = member_label(keys, list(group.values()))
             family.add(material, name, record, float(abs(after - before)), run)
-            found.append(
-                RatioChange(
+            append_model(found, detail_budget, partial(RatioChange,
                     name=ratio.label, group=group, baseline=float(before),
                     candidate=float(after), change=float(after - before), material=material,
                 )
@@ -562,6 +572,9 @@ class RelationshipsLevel(ComparisonLevel):
         for column in check.columns:
             family = _Family()
             found: list[Agreement] = []
+            detail_budget = BoundedEvidence(
+                inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes
+            )
             for key, frame in ordered:
                 group = dict(zip(members, key, strict=True))
                 pair = frame.select(renamed[column], column).drop_nulls()
@@ -627,7 +640,7 @@ class RelationshipsLevel(ComparisonLevel):
                 if hard:
                     record["hard_limits"] = ", ".join(hard)
                 family.add(bool(measured.material), name, record, magnitude, None if hard else run)
-                found.append(measured)
+                append_model(found, detail_budget, partial(lambda value: value, measured))
             plan = MeasureTest("identity_fit", None)
             what = f"Agreement of {column}"
             decided = self._decide(
@@ -834,5 +847,5 @@ def _with_tests[T: (CorrelationChange, RatioChange, Agreement)](
     labelled = [m.label for m in family.members]
     return [
         item.model_copy(update={"test": by_label[name]}) if name in by_label else item
-        for item, name in zip(found, labelled, strict=True)
+        for item, name in zip(found, labelled, strict=False)
     ]

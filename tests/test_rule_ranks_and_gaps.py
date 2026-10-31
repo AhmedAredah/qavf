@@ -22,9 +22,7 @@ from qavf.settings import QAVFSettings
     "probability",
     [0, 1, 1 / 3, 2 / 3, Decimal("1e-200"), Decimal("0." + "3" * 100)],
 )
-def test_grouped_quantile_ranks_match_arbitrary_precision_oracle(
-    storage, probability, tmp_path
-):
+def test_grouped_quantile_ranks_match_arbitrary_precision_oracle(storage, probability, tmp_path):
     values = list(range(3000))
     frame = pl.DataFrame(
         {"g": ["long"] * len(values) + ["short"] * 3 + ["empty"], "v": [*values, 2, 4, 9, None]}

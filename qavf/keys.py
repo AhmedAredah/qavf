@@ -122,7 +122,9 @@ def cast_key(series: pl.Series, target: pl.DataType) -> pl.Series:
     if series.dtype == target:
         return series
     key_casts(
-        series.name, series.dtype, target,
+        series.name,
+        series.dtype,
+        target,
         exact_float=lambda: _integral_and_exact(series),
     )
     try:

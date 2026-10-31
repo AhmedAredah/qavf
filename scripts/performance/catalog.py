@@ -28,6 +28,14 @@ TABULAR = (
     ("eager", "csv"),
 )
 CASES = (
+    Case("many_small_files", "stress", (("native", "parquet"),)),
+    Case("huge_cells", "stress", (("native", "parquet"),)),
+    Case("resampling_inference", "stress", (("native", "parquet"),)),
+    Case("dataset_records", "breadth", (("native", "parquet"),)),
+    Case("temporal_buckets", "breadth", (("native", "parquet"),)),
+    Case("spatial_locations", "breadth", (("native", "parquet"),)),
+    Case("dirty_csv", "breadth", (("native", "csv"),)),
+    Case("report_rendering", "breadth", (("native", "parquet"),)),
     Case("wide_validation", "validation", TABULAR),
     Case("relational_validation", "validation", TABULAR),
     Case("grouped_reconciliation", "validation", TABULAR),
@@ -52,7 +60,15 @@ def selected_cases(names: list[str] | None) -> list[Case]:
 
 def prepare_fixture(family: str, directory: Path, **options: Any) -> dict[str, Any]:
     name = "fixtures" if family == "validation" else family
-    if family not in {"validation", "regression", "cache", "streaming", "capacity"}:
+    if family not in {
+        "validation",
+        "regression",
+        "cache",
+        "streaming",
+        "capacity",
+        "breadth",
+        "stress",
+    }:
         raise ValueError(f"Unknown fixture family: {family}")
     module = import_module(f"{__package__}.{name}")
     return module.prepare_fixture(directory, **options)
@@ -73,6 +89,6 @@ def build_workload(
         actual = "wide_validation" if case == "hashed_validation" else case
         return module.build_workload(actual, fixture, work_dir, options)
     module = import_module(f"{__package__}.{selected.family}")
-    if selected.family == "capacity":
+    if selected.family in {"capacity", "breadth", "stress"}:
         return module.build_workload(case, fixture, work_dir, options)
     return module.build_workload(fixture, work_dir, options)

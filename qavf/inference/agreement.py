@@ -139,7 +139,8 @@ def fit_line(
         # intercept. Only this exceptional conversion needs exact arithmetic.
         try:
             intercept = float(
-                Fraction(origin_c) - Fraction(slope) * Fraction(origin_b)
+                Fraction(origin_c)
+                - Fraction(slope) * Fraction(origin_b)
                 + Fraction(local_intercept) * Fraction(unit)
             )
         except (OverflowError, ValueError):

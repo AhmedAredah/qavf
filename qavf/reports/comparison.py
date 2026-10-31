@@ -143,6 +143,7 @@ class ChartBudget:
     def __init__(self, limits: HtmlLimits) -> None:
         self.limits = limits
         self.used = 0
+        self.state = charts.RenderState()
 
     def chart(
         self, title: str, marks: int, build: Callable[[], Markup], note: str | None = None
@@ -173,9 +174,11 @@ class ChartBudget:
         return ChartView(title, load=load)
 
 
-def partial_chart(chart: Callable[..., Markup], *args: Any) -> Callable[[], Markup]:
+def partial_chart(
+    chart: Callable[..., Markup], *args: Any, state: charts.RenderState
+) -> Callable[[], Markup]:
     """A chart drawn only once the budget admits it."""
-    return lambda: chart(*args)
+    return lambda: chart(*args, state=state)
 
 
 def _text(value: Any) -> str:
@@ -264,7 +267,9 @@ def _waterfall(
     steps = [charts.WaterfallStep("baseline", start, "total")]
     steps += [charts.WaterfallStep(label, value) for label, value in changes]
     steps.append(charts.WaterfallStep("candidate", end, "total"))
-    return budget.chart(title, len(steps), lambda: charts.waterfall(steps, title), note)
+    return budget.chart(
+        title, len(steps), lambda: charts.waterfall(steps, title, state=budget.state), note
+    )
 
 
 def _member(group: Mapping[str, Any], keys: Sequence[str]) -> str:
@@ -403,9 +408,11 @@ def _heat(budget: ChartBudget, title: str, heat: HeatCells, note: str | None) ->
     columns = sorted(dict.fromkeys(column for _, column in cells))
     labels = len(rows) * len(columns) <= 300
     return budget.chart(
-        title, len(rows) * len(columns),
-        lambda: charts.heat_map(rows, columns, cells, title, labels=labels), note,
-    )  # fmt: skip
+        title,
+        len(rows) * len(columns),
+        lambda: charts.heat_map(rows, columns, cells, title, labels=labels, state=budget.state),
+        note,
+    )
 
 
 def _series_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
@@ -438,10 +445,12 @@ def _series_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
             title = f"{values.measure} per {bucket}" + (f" ({name})" if groups else "")
             views.append(
                 budget.chart(
-                    title, 2 * len(labels), partial_chart(charts.series_lines, labels, b, c, title),
+                    title,
+                    2 * len(labels),
+                    partial_chart(charts.series_lines, labels, b, c, title, state=budget.state),
                     partial,
                 )
-            )  # fmt: skip
+            )
         if groups and len(series) > _SERIES_GROUPS:
             views.append(
                 ChartView(
@@ -476,7 +485,7 @@ def _spatial_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
             title, marks,
             lambda: charts.choropleth(
                 outlines.paths, outlines.centres, values, (outlines.width, outlines.height),
-                title, labels=labels,
+                title, labels=labels, state=budget.state,
             ), note,
         )
     ]  # fmt: skip
@@ -494,7 +503,7 @@ def _distribution_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
             views.append(
                 budget.chart(
                     title, 2 * len(labels),
-                    partial_chart(charts.paired_bars, labels, b, c, title),
+                    partial_chart(charts.paired_bars, labels, b, c, title, state=budget.state),
                 )
             )  # fmt: skip
         if member.quantiles:
@@ -503,9 +512,11 @@ def _distribution_charts(level: Any, budget: ChartBudget) -> list[ChartView]:
             values = [q.delta for q in member.quantiles]
             views.append(
                 budget.chart(
-                    title, len(labels), partial_chart(charts.deltas, labels, values, title),
+                    title,
+                    len(labels),
+                    partial_chart(charts.deltas, labels, values, title, state=budget.state),
                 )
-            )  # fmt: skip
+            )
     if len(level.members) > _DISTRIBUTION_MEMBERS:
         views.append(
             ChartView(
@@ -603,7 +614,9 @@ def _structured_identity(result: RuleResult) -> tuple[str, str, str] | None:
     if isinstance(value, Mapping):
         name, level, check = (value.get(key) for key in ("name", "level", "check"))
         if (
-            isinstance(name, str) and isinstance(level, str) and isinstance(check, str)
+            isinstance(name, str)
+            and isinstance(level, str)
+            and isinstance(check, str)
             and result.check == f"{name}: {level}: {check}"
         ):
             return name, level, check
@@ -736,7 +749,6 @@ def iter_comparison(
     from qavf.reports.html import iter_template
 
     limits = limits or HtmlLimits()
-    charts.reset_ids()
     view = comparison_view(result, ChartBudget(limits))
     context = {
         "title": title or f"Dataset comparison: {result.name}",

@@ -52,6 +52,7 @@ class _Column:
     max_length: int | None = None
     rounded_datetime: bool = False
     categories: set[str] | None = field(default_factory=set)
+    category_probe: bool = True
 
     def update(self, series: pl.Series, *, bounds: bool) -> None:
         values = series.drop_nulls()
@@ -108,7 +109,18 @@ class _Column:
         if cast(int, text.str.len_bytes().max() or 0) > self.category_value_bytes:
             self._discard_categories("category value byte limit")
             return
-        candidates = text.unique().head(self.category_limit + 1)
+        # A small native prefix can prove that enumeration is already too large
+        # without building a hash table for every distinct value in the batch.
+        # Probe once per column: low-cardinality streams retain the efficient
+        # full native kernel on subsequent batches instead of paying repeatedly.
+        probe_rows = min(len(text), max(256, min(4096, (self.category_limit + 1) * 4)))
+        if self.category_probe and probe_rows < len(text):
+            candidates = text.head(probe_rows).unique().head(self.category_limit + 1)
+            self.category_probe = False
+            if len(candidates) <= self.category_limit:
+                candidates = text.unique().head(self.category_limit + 1)
+        else:
+            candidates = text.unique().head(self.category_limit + 1)
         if len(candidates) > self.category_limit:
             self._discard_categories()
             return

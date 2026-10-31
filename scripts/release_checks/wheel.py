@@ -14,11 +14,13 @@ from .provenance import file_digest, repository_identity, timestamp, write_json
 from .runner import clean_environment, run_tests
 
 TEST_INPUTS = (
+    ".github",
     "tests",
     "scripts",
     "config",
     "docs",
     "README.md",
+    "README_UPGRADE.md",
     "CHANGELOG.md",
     "LICENSE",
     "pyproject.toml",

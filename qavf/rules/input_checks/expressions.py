@@ -35,6 +35,7 @@ from ._datasets import (
 
 logger = logging.getLogger(__name__)
 
+
 class ExpressionRule(_SelectsDatasets):
     """Row-level SQL expressions hold for every row."""
 

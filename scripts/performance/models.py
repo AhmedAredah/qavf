@@ -31,8 +31,12 @@ class WorkloadOptions:
             raise ValueError("evidence limits must be nonnegative")
         for name in ("memory_budget_bytes", "cache_max_bytes", "spill_max_bytes"):
             value = getattr(self, name)
-            if value is not None and value < 0:
-                raise ValueError(f"{name} must be nonnegative")
+            minimum = 1 if name == "memory_budget_bytes" else 0
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < minimum
+            ):
+                kind = "positive" if minimum else "nonnegative"
+                raise ValueError(f"{name} must be a {kind} integer")
 
 
 @dataclass(frozen=True)

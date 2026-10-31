@@ -35,8 +35,7 @@ _SIMPLE_SCOPE = re.compile(
 
 
 def exceeds_missing_fraction(check: ColumnCheck | None, missing: int, applicable: int) -> bool:
-    """Whether ``check``'s ``max_null_fraction`` fails. A reduction that finds it does
-    defers to the exact kernel, which lists the missing rows as evidence."""
+    """Whether the complete applicable population exceeds its missing-value limit."""
     if check is None or check.max_null_fraction is None:
         return False
     return (missing / applicable if applicable else 0.0) > check.max_null_fraction
@@ -341,7 +340,7 @@ def reduce_captured_columns(
         for name in jobs[index].reducers:
             column = f"c{index}_{name}"
             values = pl.col(column)
-            if name == "sample":
+            if name.endswith("sample"):
                 records = values.explode().drop_nulls()
                 merged.append(
                     records.sort_by(records.struct.field(inputs.row))
@@ -362,7 +361,7 @@ def reduce_captured_columns(
             summary = {}
             for name in jobs[index].reducers:
                 series = reduced[f"c{index}_{name}"]
-                if name == "sample":
+                if name.endswith("sample"):
                     # Keep Arrow/Polars types intact, including nanosecond times.
                     size = int(series.list.len().item())
                     summary[name] = series.explode().struct.unnest().head(size)

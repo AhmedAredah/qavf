@@ -16,6 +16,8 @@ from typing import Any, Literal
 
 import polars as pl
 
+from qavf.scalars import normalize_scalar
+
 RowTest = Callable[[str], pl.Expr]
 Ambiguous = Literal["raise", "earliest", "latest", "null"]
 _SHORT_LIST = 32
@@ -107,6 +109,7 @@ def members(values: Sequence[Any], dtype: pl.DataType) -> tuple[list[Any], list[
     usable: list[Any] = []
     foreign: list[Any] = []
     for value in values:
+        value = normalize_scalar(value)
         if value is None or is_nan(value):
             continue
         number = isinstance(value, int | float | Decimal) and not isinstance(value, bool)

@@ -32,7 +32,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ValidationError
 
-from qavf.engine.registry import RuleParams
+from qavf.parameters import RuleParams
 from qavf.plugins.transactions import (
     LOCK,
     installed_origin,
@@ -155,7 +155,7 @@ class ComponentRegistry[C: Component]:
                     f"{component.__module__}.{component.__qualname__}"
                 )
             target = installed if installed_origin() else components
-            target[name] = component  # type: ignore[assignment]
+            target[name] = component
         return component
 
     def register_module(self, module: ModuleType) -> list[type[C]]:
@@ -264,14 +264,20 @@ class ComponentRegistry[C: Component]:
         Raises:
             KeyError: naming the available components.
         """
-        visible = self._visible()
-        try:
-            return visible[name]
-        except KeyError:
+        self.discover()
+        with LOCK:
+            components = mapping(self, "_components")
+            installed = mapping(self, "_installed")
+            if name in components:
+                return components[name]
+            if installed_visible() and name in installed:
+                return installed[name]
+            # A snapshot is needed only for the diagnostic, never for a hit.
+            visible = components.keys() | (installed.keys() if installed_visible() else set())
             available = ", ".join(sorted(visible)) or "none"
             hint = (
                 "; installed plugins are disabled (plugins.entry_points: false)"
-                if name in self._installed and not installed_visible()
+                if name in installed and not installed_visible()
                 else ""
             )
             raise KeyError(f"unknown {self.kind} {name!r}; available: {available}{hint}") from None
@@ -301,10 +307,21 @@ class ComponentRegistry[C: Component]:
         return iter([visible[name] for name in sorted(visible)])
 
     def __contains__(self, name: object) -> bool:
-        return name in self._visible()
+        self.discover()
+        with LOCK:
+            return name in mapping(self, "_components") or (
+                installed_visible() and name in mapping(self, "_installed")
+            )
 
     def __len__(self) -> int:
-        return len(self._visible())
+        self.discover()
+        with LOCK:
+            components = mapping(self, "_components")
+            if not installed_visible():
+                return len(components)
+            return len(components) + sum(
+                name not in components for name in mapping(self, "_installed")
+            )
 
 
 def _same_class(a: type, b: type) -> bool:

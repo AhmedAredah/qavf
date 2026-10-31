@@ -25,8 +25,9 @@ def spec(**values: object) -> SecretSpec:
 
 def test_s3_secret_sql_escapes_values_and_creates_one_secret_per_scope():
     # List-valued SCOPE is not accepted by every supported DuckDB version.
-    secret = spec(**S3, endpoint="minio:9000", url_style="path", use_ssl=False,
-                  scope=["s3://a", "s3://b/x"])
+    secret = spec(
+        **S3, endpoint="minio:9000", url_style="path", use_ssl=False, scope=["s3://a", "s3://b/x"]
+    )
     options = (
         "TYPE s3, PROVIDER config, KEY_ID 'AKIAEXAMPLEKEYID', SECRET 's3cr''et-value', "
         "REGION 'us-east-1', ENDPOINT 'minio:9000', URL_STYLE 'path', USE_SSL false"
@@ -42,18 +43,19 @@ def test_s3_secret_sql_escapes_values_and_creates_one_secret_per_scope():
 def test_credential_chain_and_azure_secret_sql():
     chained = spec(type="s3", provider="credential_chain", chain="env")
     assert create_secret_statements("c", chained) == [
-        "CREATE OR REPLACE SECRET \"__qavf_secret_63_0\" "
+        'CREATE OR REPLACE SECRET "__qavf_secret_63_0" '
         "(TYPE s3, PROVIDER credential_chain, CHAIN 'env')"
     ]
     assert create_secret_statements(
         "b", spec(type="azure", provider="credential_chain", account_name="acct")
     ) == [
-        "CREATE OR REPLACE SECRET \"__qavf_secret_62_0\" (TYPE azure, PROVIDER credential_chain, "
+        'CREATE OR REPLACE SECRET "__qavf_secret_62_0" (TYPE azure, PROVIDER credential_chain, '
         "ACCOUNT_NAME 'acct')"
     ]
-    assert "CONNECTION_STRING 'DefaultEndpointsProtocol=http;" in create_secret_statements(
-        "b", spec(type="azure", connection_string=AZURE)
-    )[0]
+    assert (
+        "CONNECTION_STRING 'DefaultEndpointsProtocol=http;"
+        in create_secret_statements("b", spec(type="azure", connection_string=AZURE))[0]
+    )
 
 
 @pytest.mark.parametrize(
@@ -106,8 +108,7 @@ def test_url_selects_longest_scope_then_the_unscoped_secret_of_its_type():
 
 
 def test_polars_options_mirror_the_duckdb_secret():
-    secret = spec(**S3, session_token="tok", endpoint="minio:9000", url_style="path",
-                  use_ssl=False)
+    secret = spec(**S3, session_token="tok", endpoint="minio:9000", url_style="path", use_ssl=False)
     assert storage_options("s3://b/x.parquet", {"s": secret}) == {
         "aws_access_key_id": "AKIAEXAMPLEKEYID",
         "aws_secret_access_key": "s3cr'et-value",

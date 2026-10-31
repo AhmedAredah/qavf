@@ -1,0 +1,241 @@
+"""Data-free public explanations of configured checks and unresolved source work."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
+from pydantic import Field
+
+from qavf.engine.compilation import (
+    ConfigurationError,
+    build_registry,
+    build_source_registry,
+    compile_rules,
+)
+from qavf.engine.planning import build_plan
+from qavf.engine.registry import RuleRegistry, default_registry
+from qavf.inputs.normalize import Configuration, prepare_configuration
+from qavf.inputs.resources import ResourceLimits
+from qavf.plugins.transactions import visibility
+from qavf.profiles import ProfileName, apply_profile
+from qavf.redaction import exception_details
+from qavf.settings import QAVFSettings, SchemaSpec
+from qavf.snapshots import SnapshotModel
+from qavf.sources.base import SourceRegistry
+
+if TYPE_CHECKING:
+    from qavf._input_types import ValidationInput
+
+
+class DatasetExplanation(SnapshotModel):
+    """Declared metadata only; schema and dimensions have not been read."""
+
+    name: str
+    input_kind: str
+    declared_columns: tuple[str, ...] = ()
+    row_budget: int | None = None
+    observed_schema: None = None
+    source_evaluations: None = None
+    notes: tuple[str, ...] = ()
+
+
+class RuleExplanation(SnapshotModel):
+    rule_id: str
+    name: str
+    severity: str
+    datasets: tuple[str, ...]
+    columns: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    dependency_mode: str
+    work: tuple[str, ...]
+
+
+class ValidationPlan(SnapshotModel):
+    """Inspectable planning facts, with unknown costs explicitly left unknown."""
+
+    datasets: tuple[DatasetExplanation, ...]
+    rules: tuple[RuleExplanation, ...]
+    excluded: dict[str, str] = Field(default_factory=dict)
+    unresolved: tuple[str, ...] = ()
+    resources: dict[str, Any] = Field(default_factory=dict)
+    profile: ProfileName | None = None
+    data_read: bool = False
+    complete: bool = True
+    notes: tuple[str, ...] = (
+        "No input data, file schemas, queries, or loader functions were evaluated.",
+        "Declared dependencies do not estimate native working memory or physical I/O.",
+        "Input validity and change from a baseline are distinct checks.",
+    )
+
+
+def _work(rule_id: str) -> tuple[str, ...]:
+    if rule_id in {"INP-002", "INP-003"}:
+        return ("coherent value reductions where required", "bounded failure evidence")
+    if rule_id in {"INP-004", "INP-005", "REG-001", "CMP-001"}:
+        return ("key/group alignment or indexing may require spill", "exact typed fallback")
+    if rule_id.startswith(("TMP-", "SPT-", "STA-")):
+        return ("grouped/ordered or numerical work", "work admission depends on observed size")
+    return ("execution depends on the configured contract and observed source schema",)
+
+
+def _registered_rule_gaps(settings: QAVFSettings, registry: RuleRegistry) -> list[str]:
+    """Disclose active in-code rules without invoking their configuration hooks.
+
+    The runner merges the process registry even when no plugin discovery was
+    requested. Reading class metadata is sufficient to identify that omitted
+    work, including registrations that would conflict before rule filtering.
+    """
+    with visibility(settings.plugins.entry_points):
+        registered = tuple(default_registry)
+    engine = settings.engine
+    gaps = []
+    for rule in registered:
+        if rule.rule_id in registry:
+            builtin = registry.get(rule.rule_id)
+            if (rule.__module__, rule.__qualname__) != (builtin.__module__, builtin.__qualname__):
+                gaps.append(f"registered rule {rule.rule_id!r} conflicts with a built-in rule")
+            continue
+        # Explicit custom rules are already disclosed as unresolved below,
+        # including disabled rules whose supplied parameters still need checks.
+        if rule.rule_id in settings.rules or not engine.run_unconfigured_rules:
+            continue
+        if (
+            engine.include_categories is not None and rule.category not in engine.include_categories
+        ) or rule.category in engine.exclude_categories:
+            continue
+        gaps.append(
+            f"registered rule {rule.rule_id!r} was not planned; "
+            "load_plugins=True allows its configuration hooks"
+        )
+    return gaps
+
+
+def explain(
+    data: ValidationInput = None,
+    *,
+    schema: SchemaSpec | Mapping[str, Any] | None = None,
+    config: Configuration = None,
+    resources: ResourceLimits | None = None,
+    profile: ProfileName | None = None,
+    load_plugins: bool = False,
+) -> ValidationPlan:
+    """Explain checks without reading data or adapting caller-owned inputs.
+
+    The default does not import configured/installed plugin code. Unknown plugin
+    checks are disclosed as unresolved. ``load_plugins=True`` opts into normal
+    plugin import and rule-configuration hooks. QAVF does not request dataset
+    evaluation, but trusted plugin hooks can perform arbitrary Python I/O.
+    No filesystem/source inspection is performed; file-based configuration itself
+    is read when ``config`` names a configuration file.
+    """
+    if not isinstance(load_plugins, bool):
+        raise TypeError("load_plugins must be a boolean")
+    settings, inputs = prepare_configuration(
+        data, schema=schema, config=config, resources=resources
+    )
+    if profile is not None:
+        settings = apply_profile(settings, profile)
+    descriptions = []
+    for name, spec in settings.datasets.items():
+        source = spec.source_config() or {}
+        kind = type(inputs[name]).__name__ if name in inputs else str(source.get("type", "unbound"))
+        notes = ["Schema and row count require execution; declared columns are not a projection."]
+        if kind in {"Loader", "BatchSource", "LazyFrame"}:
+            notes.append("A coherent owned observation may require memory or temporary disk.")
+        descriptions.append(
+            DatasetExplanation(
+                name=name,
+                input_kind=kind,
+                declared_columns=tuple(spec.schema_spec.columns) if spec.schema_spec else (),
+                row_budget=spec.effective_load_policy().row_budget,
+                notes=tuple(notes),
+            )
+        )
+    unresolved: list[str] = []
+    if load_plugins:
+        registry, sources = build_registry(settings), build_source_registry(settings)
+        planned_settings = settings
+    else:
+        registry = RuleRegistry().discover(packages=("qavf.rules",), use_entry_points=False)
+        sources = SourceRegistry().discover(use_entry_points=False)
+        known = {rule.rule_id for rule in registry}
+        unresolved.extend(_registered_rule_gaps(settings, registry))
+        unresolved.extend(
+            f"plugin rule {rule_id!r} was not imported"
+            for rule_id in sorted(set(settings.rules) - known)
+        )
+        plugins = settings.plugins
+        if (
+            plugins.entry_points
+            or plugins.modules
+            or plugins.paths
+            or (set(plugins.packages) - {"qavf.rules"})
+            or plugins.required
+        ):
+            unresolved.append("Configured or installed plugin discovery was not performed.")
+        planned_settings = settings.model_copy(
+            update={
+                "rules": {key: value for key, value in settings.rules.items() if key in known},
+                "plugins": plugins.model_copy(
+                    update={
+                        "packages": ["qavf.rules"],
+                        "modules": [],
+                        "paths": [],
+                        "entry_points": False,
+                        "required": [],
+                    }
+                ),
+            }
+        )
+    rules: list[RuleExplanation] = []
+    excluded: dict[str, str] = {}
+    try:
+        compiled = compile_rules(planned_settings, registry, sources)
+        dependencies = build_plan(compiled.rules, planned_settings, settings.datasets).describe()
+        for rule, dependency in zip(compiled.rules, dependencies, strict=True):
+            rules.append(
+                RuleExplanation(
+                    rule_id=rule.rule_id,
+                    name=rule.name,
+                    severity=rule.severity.value,
+                    datasets=tuple(dependency["datasets"]),
+                    columns=dependency["columns"],
+                    dependency_mode=dependency["dependency_mode"],
+                    work=_work(rule.rule_id),
+                )
+            )
+        excluded = dict(compiled.excluded)
+        unresolved.extend(
+            f"{rule_id} requires parameters: {', '.join(fields)}"
+            for rule_id, fields in compiled.needs_configuration.items()
+        )
+    except ConfigurationError as exc:
+        if load_plugins:
+            raise
+        unresolved.append(f"Plan could not be fully compiled: {exception_details(exc)}")
+    limits = settings.engine
+    return ValidationPlan(
+        datasets=tuple(descriptions),
+        rules=tuple(rules),
+        excluded=excluded,
+        unresolved=tuple(unresolved),
+        complete=not unresolved,
+        profile=profile,
+        resources={
+            key: getattr(limits, key)
+            for key in (
+                "memory_budget_bytes",
+                "cache_max_bytes",
+                "spill_max_bytes",
+                "max_workers",
+                "native_threads",
+                "max_affected_records",
+                "max_evidence_bytes",
+                "max_report_bytes",
+                "execution_mode",
+            )
+        },
+    )
+
+
+__all__ = ["DatasetExplanation", "RuleExplanation", "ValidationPlan", "explain"]

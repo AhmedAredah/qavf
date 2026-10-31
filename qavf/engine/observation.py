@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, cast
-from uuid import uuid4
 
 import polars as pl
 
 from qavf.engine.cache_ownership import compact_polars, compact_polars_with_size
+from qavf.engine.cleanup import raise_cleanup_errors
 from qavf.engine.owned_ipc import _SCAN_OPTIONS
 from qavf.engine.projection import selected_columns
 from qavf.engine.retention import RetainedLease
@@ -50,9 +51,11 @@ class Observation:
         self._files = tuple(files)
         self._columns = None if columns is None else selected_columns(columns)
         self._closed = False
+        self._close_lock = threading.RLock()
         self._retained_lease = retained_lease or (
             RetainedLease(ctx._resources.retained_budget, retained_bytes)
-            if retained_bytes else None
+            if retained_bytes
+            else None
         )
 
     def _check(self) -> None:
@@ -74,23 +77,57 @@ class Observation:
     def schema(self) -> dict[str, pl.DataType]:
         return dict(self.scan().collect_schema())
 
+    @contextlib.contextmanager
+    def native_binding(self, columns: Iterable[str]) -> Iterator[object]:
+        """Lease a repeatable Arrow binding without collecting a spilled observation.
+
+        The consumer must prove that its native engine represents the selected
+        types exactly before binding. A table borrows immutable retained buffers;
+        an IPC dataset scans owned files in their observation order. Neither may
+        outlive this scope, including native readers created from the binding.
+        """
+        import pyarrow.dataset as ds
+
+        selected = selected_columns(columns)
+        with self.borrow(selected) as borrowed:
+            if borrowed._frame is not None:
+                yield borrowed._frame.select(selected).to_arrow()
+            else:
+                dataset = ds.dataset([str(owned.path) for owned in borrowed._files], format="ipc")
+                yield dataset.scanner(
+                    columns=list(selected),
+                    use_threads=False,
+                    batch_readahead=1,
+                    fragment_readahead=1,
+                )
+
     def borrow(self, columns: Iterable[str] | None = None) -> Observation:
         """Lease the same immutable values independently of the original owner."""
-        self._check()
-        selected = self._columns if columns is None else selected_columns(columns)
-        if selected is not None:
-            missing = set(selected) - self.schema().keys()
-            if missing:
-                raise ValueError(f"observation does not contain columns {sorted(missing)!r}")
-        return Observation(
-            self._ctx,
-            frame=None if self._frame is None else self._frame.clone(),
-            files=[owned.borrow() for owned in self._files],
-            columns=selected,
-            retained_lease=(
-                self._retained_lease.borrow() if self._retained_lease is not None else None
-            ),
-        )
+        with self._close_lock, contextlib.ExitStack() as acquired:
+            self._check()
+            selected = self._columns if columns is None else selected_columns(columns)
+            if selected is not None:
+                missing = set(selected) - self.schema().keys()
+                if missing:
+                    raise ValueError(f"observation does not contain columns {sorted(missing)!r}")
+            files = []
+            for owned in self._files:
+                lease = owned.borrow()
+                acquired.callback(lease.close)
+                files.append(lease)
+            retained = None
+            if self._retained_lease is not None:
+                retained = self._retained_lease.borrow()
+                acquired.callback(retained.release)
+            result = Observation(
+                self._ctx,
+                frame=None if self._frame is None else self._frame.clone(),
+                files=files,
+                columns=selected,
+                retained_lease=retained,
+            )
+            acquired.pop_all()
+            return result
 
     def collect(self, plan: pl.LazyFrame) -> pl.DataFrame:
         self._check()
@@ -165,16 +202,26 @@ class Observation:
                 yield frame
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._frame = None
-        if self._retained_lease is not None:
-            self._retained_lease.release()
-            self._retained_lease = None
-        for owned in self._files:
-            owned.close()
-        self._files = ()
+        with self._close_lock:
+            self._closed = True
+            self._frame = None
+            failures: list[Exception] = []
+            if self._retained_lease is not None:
+                try:
+                    self._retained_lease.release()
+                except Exception as exc:
+                    failures.append(exc)
+                else:
+                    self._retained_lease = None
+            pending = []
+            for owned in self._files:
+                try:
+                    owned.close()
+                except Exception as exc:
+                    failures.append(exc)
+                    pending.append(owned)
+            self._files = tuple(pending)
+            raise_cleanup_errors("observation could not be fully released", failures)
 
     def __enter__(self) -> Observation:
         self._check()
@@ -185,37 +232,15 @@ class Observation:
 
 
 def _file(ctx: DataContext) -> SpillFile:
-    return SpillFile(
-        ctx._resources.directory / "observations" / f"{uuid4().hex}.arrow",
-        ctx._resources.spill_budget,
-    )
+    return ctx.observation_storage.new_file()
 
 
 def _sink(ctx: DataContext, plan: pl.LazyFrame) -> SpillFile:
-    ctx._check_cancelled()
-    owned = _file(ctx)
-    try:
-        with owned.writer() as writer:
-            plan.sink_ipc(
-                writer, compression="uncompressed", maintain_order=True, engine="streaming"
-            )
-        ctx._check_cancelled()
-        return owned
-    except BaseException:
-        owned.close()
-        raise
+    return ctx.observation_storage.sink(plan)
 
 
 def _write_batch(ctx: DataContext, frame: pl.DataFrame) -> SpillFile:
-    ctx._check_cancelled()
-    owned = _file(ctx)
-    try:
-        with owned.writer() as writer:
-            frame.write_ipc(writer, compression="uncompressed")
-        return owned
-    except BaseException:
-        owned.close()
-        raise
+    return ctx.observation_storage.write(frame)
 
 
 class _ObservationBuilder:
@@ -227,12 +252,15 @@ class _ObservationBuilder:
         self.files: list[SpillFile] = []
         self.bytes = 0
         self.spilling = False
+        from qavf.engine.observation_store import BatchSpool
+
+        self.spool = BatchSpool(ctx.observation_storage, self.files.append)
 
     def append(self, frame: pl.DataFrame) -> None:
         self.ctx._check_cancelled()
         if not frame.height:
             return
-        if not self.spilling:
+        if not self.spilling and self.ctx.observation_storage.retained.remaining > 0:
             owned, size = compact_polars_with_size(frame)
             frame = cast(pl.DataFrame, owned)
             size += sys.getsizeof(frame) + 8  # retained wrapper and chunk-list slot
@@ -248,9 +276,16 @@ class _ObservationBuilder:
                 self.frames.clear()
                 self.ctx._resources.retained_budget.release(self.bytes)
                 self.bytes = 0
-        self.files.append(_write_batch(self.ctx, frame))
+        self.spilling = True
+        if self.frames:
+            self.files.append(_sink(self.ctx, pl.concat(self.frames, rechunk=False).lazy()))
+            self.frames.clear()
+            self.ctx.observation_storage.retained.release(self.bytes)
+            self.bytes = 0
+        self.spool.append(frame)
 
     def finish(self, schema: Mapping[str, pl.DataType]) -> Observation:
+        self.spool.flush()
         frame = pl.concat(self.frames, rechunk=False) if self.frames else None
         if frame is None and not self.files:
             frame = pl.DataFrame(schema=schema)
@@ -260,17 +295,29 @@ class _ObservationBuilder:
             files=self.files,
             retained_bytes=self.bytes,
         )
-        self.frames, self.files, self.bytes = [], [], 0
+        # The spool publishes into this list across reset/retry cycles. Keep its
+        # identity stable while transferring ownership into Observation tuples.
+        self.frames.clear()
+        self.files.clear()
+        self.bytes = 0
         return result
 
     def close(self) -> None:
+        self.spool.close()
         self.frames.clear()
         self.ctx._resources.retained_budget.release(self.bytes)
         self.bytes = 0
+        pending = []
+        failures = []
         for owned in self.files:
-            owned.close()
-        self.files.clear()
+            try:
+                owned.close()
+            except Exception as exc:
+                pending.append(owned)
+                failures.append(exc)
+        self.files[:] = pending
         self.spilling = False
+        raise_cleanup_errors("observation builder could not be fully released", failures)
 
 
 def _observe_plan(ctx: DataContext, plan: pl.LazyFrame) -> Observation:
@@ -349,9 +396,7 @@ def _native(
         builder.close()
 
 
-def _stored(
-    ctx: DataContext, name: str, columns: Iterable[str] | None
-) -> Observation:
+def _stored(ctx: DataContext, name: str, columns: Iterable[str] | None) -> Observation:
     """Share the exact admitted cache allocation, including its retained charge."""
     frame, lease = ctx._frames.observe(name)
     try:
@@ -379,6 +424,9 @@ def observe(
     """Snapshot selected columns once, enforcing complete-source result policy."""
     ctx._check_cancelled()
     ctx._require_available(name)
+    source = ctx.source(name)
+    if source is not None and source.batch_schema() is not None:
+        ctx._batch_observation(name, source)
     observation: Observation | None = None
     attempts: list[Observation] = []
     try:
@@ -435,7 +483,17 @@ def observe_source(
         attempts.clear()
         source.prepare_identity(hash_contents=True)
         plan = source.scan_polars() if source.snapshot_connection() is None else None
-        if plan is not None:
+        if source.batch_schema() is not None:
+            from qavf.engine.batch_input import observe_batches
+
+            current = observe_batches(ctx, source)
+            if columns is not None:
+                try:
+                    selected = current.borrow(selected_columns(columns))
+                finally:
+                    current.close()
+                current = selected
+        elif plan is not None:
             current = _lazy(ctx, plan, columns, source.params.row_budget)
         elif source.snapshot_connection() is None and source.scan() is not None:
             alias = "__qavf_observation"

@@ -265,9 +265,13 @@ def load_zones(
 
     def offenders(condition: str) -> tuple[int, list[Any]]:
         count = int(con.execute(f"SELECT count(*) FROM {name} WHERE {condition}").fetchone()[0])
-        rows = fetch(
-            con, f"SELECT zone_order FROM {name} WHERE {condition} ORDER BY zone_order LIMIT 5"
-        ) if count else None
+        rows = (
+            fetch(
+                con, f"SELECT zone_order FROM {name} WHERE {condition} ORDER BY zone_order LIMIT 5"
+            )
+            if count
+            else None
+        )
         orders = rows["zone_order"].to_list() if rows is not None else []
         return count, frame[ZONE].gather(orders).to_list()
 

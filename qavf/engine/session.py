@@ -8,6 +8,8 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from qavf.engine.cleanup import raise_cleanup_errors
+
 
 @dataclass(eq=False, slots=True)
 class Invocation:
@@ -25,6 +27,7 @@ class RunSession:
         self.closed = False
         self.active: dict[int, Invocation] = {}
         self.connections: dict[object, tuple[int, Any]] = {}
+        self._closing = threading.RLock()
 
     def check(self) -> None:
         from qavf.engine.resources import ResourceLimitError
@@ -83,20 +86,30 @@ class RunSession:
             return not self.active
 
     def close_worker_connections(self, owner: int) -> None:
-        with self.lock:
-            keys = [key for key, value in self.connections.items() if value[0] == owner]
-            connections = [self.connections.pop(key)[1] for key in keys]
-        for connection in connections:
-            with contextlib.suppress(Exception):
-                connection.close()
+        self._close_connections(owner)
 
     def close_connections(self) -> None:
-        with self.lock:
-            connections = [value[1] for value in self.connections.values()]
-            self.connections.clear()
-        for connection in connections:
-            with contextlib.suppress(Exception):
-                connection.close()
+        self._close_connections(None)
+
+    def _close_connections(self, owner: int | None) -> None:
+        with self._closing:
+            with self.lock:
+                connections = [
+                    (key, connection)
+                    for key, (worker, connection) in self.connections.items()
+                    if owner is None or worker == owner
+                ]
+            failures = []
+            for key, connection in connections:
+                try:
+                    connection.close()
+                except Exception as exc:
+                    failures.append(exc)
+                else:
+                    with self.lock:
+                        if self.connections.get(key, (None, None))[1] is connection:
+                            self.connections.pop(key)
+            raise_cleanup_errors("native connections could not be fully released", failures)
 
 
 class KeyedLocks:

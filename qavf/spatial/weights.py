@@ -300,6 +300,7 @@ def nearest(
     geographic: bool,
     max_edges: int = DEFAULT_MAX_EDGES,
     max_work: int = DEFAULT_MAX_WORK,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> SpatialWeights:
     """The exact ``k`` nearest other locations, with index-stable distance ties.
 
@@ -309,7 +310,14 @@ def nearest(
     instructions within the index; ``max_edges`` bounds retained directed pairs.
     """
     rows = nearest_graph(
-        x, y, len(ids), k, geographic=geographic, max_edges=max_edges, max_work=max_work
+        x,
+        y,
+        len(ids),
+        k,
+        geographic=geographic,
+        max_edges=max_edges,
+        max_work=max_work,
+        check_cancelled=check_cancelled,
     )
     return SpatialWeights(ids, rows, f"{k} nearest neighbours")
 

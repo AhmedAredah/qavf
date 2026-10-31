@@ -256,10 +256,7 @@ def test_dictionary_encoded_parquet_string_keys_remain_exact_under_nocase(tmp_pa
     keys = ["A", "a", r"\x41", "é", "e\u0301", "a\x00b", None]
     baseline = pl.DataFrame({"id": keys, "text": ["payload"] * len(keys)})
     candidate = baseline.reverse().with_columns(
-        pl.when(pl.col("id") == "é")
-        .then(pl.lit("changed"))
-        .otherwise(pl.col("text"))
-        .alias("text")
+        pl.when(pl.col("id") == "é").then(pl.lit("changed")).otherwise(pl.col("text")).alias("text")
     )
     expected = compare_frames(baseline, candidate, "id")
     paths = [tmp_path / "baseline.parquet", tmp_path / "candidate.parquet"]

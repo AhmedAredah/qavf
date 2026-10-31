@@ -37,7 +37,7 @@ classifiers = [
 # The installed floor gate exercises the declared direct dependency minima.
 # Routine CI tests the committed lockfile and a core-only installed distribution.
 dependencies = [
-    "duckdb>=1.2",
+    "duckdb>=1.3.0",
     "jinja2>=3.1",
     "markupsafe>=2.1",
     "numpy>=1.26",
@@ -91,7 +91,7 @@ packages = ["qavf"]
 
 [tool.hatch.build.targets.sdist]
 # Root anchors prevent historical files with matching names entering the sdist.
-include = ["/qavf", "/tests", "/config", "/docs", "/scripts", "/.github", "/.gitattributes", "/.gitignore", "/pyproject.toml", "/uv.lock", "/README.md", "/CHANGELOG.md", "/LICENSE"]
+include = ["/qavf", "/tests", "/config", "/docs", "/scripts", "/.github", "/.gitattributes", "/.gitignore", "/pyproject.toml", "/uv.lock", "/README.md", "/README_UPGRADE.md", "/CHANGELOG.md", "/LICENSE"]
 exclude = ["**/__pycache__", "**/*.pyc", "**/.pytest_cache"]
 
 [tool.uv]

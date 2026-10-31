@@ -62,7 +62,7 @@ def compare_datasets(
             if keys or columns is not None or levels is not None or name is not None or options:
                 raise ValueError("configuration cannot be combined with comparison keywords")
             configured = (
-                configuration.model_dump()
+                {field: getattr(configuration, field) for field in type(configuration).model_fields}
                 if isinstance(configuration, ComparisonSpec)
                 else dict(configuration)
             )
@@ -104,7 +104,15 @@ def _compare(
     )
     if settings.engine.execution_mode == "isolated":
         from qavf.execution.dispatch import compare_datasets_isolated
+        from qavf.inputs.normalize import _check_configured_auxiliary_inputs
 
+        try:
+            _check_configured_auxiliary_inputs(spec)
+        except ValueError as exc:
+            raise ValueError(
+                "isolated comparisons require serializable auxiliary inputs; "
+                "use crosswalk.path instead of live Crosswalk.data, or run in process"
+            ) from exc
         return compare_datasets_isolated(settings, frames, spec)
     from qavf.compare.engine import compare_in_context
     from qavf.engine.context import DataContext

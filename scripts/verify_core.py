@@ -54,9 +54,20 @@ def check_unavailable_statistics() -> None:
             "plugins": {"entry_points": False},
             "engine": {"parallel": False, "run_unconfigured_rules": False},
             "datasets": {"reference": {}, "current": {}},
-            "rules": {"STA-002": {"params": {"comparisons": [{
-                "dataset": "current", "reference": "reference", "column": "x", "method": "ks",
-            }]}}},
+            "rules": {
+                "STA-002": {
+                    "params": {
+                        "comparisons": [
+                            {
+                                "dataset": "current",
+                                "reference": "reference",
+                                "column": "x",
+                                "method": "ks",
+                            }
+                        ]
+                    }
+                }
+            },
         },
     )
     results = report.results_for("STA-002")
@@ -88,8 +99,10 @@ def main() -> None:
     check_unavailable_statistics()
     check_core_coordinate_systems()
     require("pandas" not in sys.modules, "ordinary core validation initialized pandas")
-    print("Core-only installed-wheel checks passed: valid/invalid inputs, temporal ticks, "
-          "core CRS resolution, and explicit unavailable-dependency errors.")
+    print(
+        "Core-only installed-wheel checks passed: valid/invalid inputs, temporal ticks, "
+        "core CRS resolution, and explicit unavailable-dependency errors."
+    )
 
 
 if __name__ == "__main__":

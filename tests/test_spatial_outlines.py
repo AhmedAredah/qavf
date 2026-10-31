@@ -22,10 +22,12 @@ from qavf.spatial.outlines import (
 
 def test_projection_preserves_holes_parts_empty_rings_order_and_rounded_centres():
     rings = {
-        "west": [[], [(0.0, 0.0), (0.0, 4.0), (4.0, 4.0), (4.0, 0.0)],
-                 [(1.0, 1.0), (2.0, 1.0), (1.0, 2.0)]],
-        42: [[(8.0, 2.0), (12.0, 2.0), (12.0, 4.0)],
-             [(8.0, 0.0), (9.0, 0.0), (9.0, 1.0)]],
+        "west": [
+            [],
+            [(0.0, 0.0), (0.0, 4.0), (4.0, 4.0), (4.0, 0.0)],
+            [(1.0, 1.0), (2.0, 1.0), (1.0, 2.0)],
+        ],
+        42: [[(8.0, 2.0), (12.0, 2.0), (12.0, 4.0)], [(8.0, 0.0), (9.0, 0.0), (9.0, 1.0)]],
         "empty": [[]],
     }
     drawn = view_paths(rings, width=120.0)
@@ -79,8 +81,16 @@ def test_grid_budget_does_not_hide_malformed_labels():
 
 def test_public_map_budget_preserves_checks_and_complete_count(monkeypatch):
     frame = pl.DataFrame({"zone": ["0_0", "1_0", "1_1"], "value": [1.0, 2.0, 3.0]})
-    level = {"level": "spatial", "grid": {"size": 1}, "measures": ["sum(value)"],
-             "moran": None, "lisa": None, "shares": None, "rank": None, "expected": False}
+    level = {
+        "level": "spatial",
+        "grid": {"size": 1},
+        "measures": ["sum(value)"],
+        "moran": None,
+        "lisa": None,
+        "shares": None,
+        "rank": None,
+        "expected": False,
+    }
     full = compare_datasets(frame, frame, levels=[{**level, "map_vertices": 12}])
 
     def forbid_projection(*args, **kwargs):
@@ -137,9 +147,11 @@ class _Connection:
 
 
 def _extent(monkeypatch):
-    monkeypatch.setattr(outlines, "fetch", lambda *args: pl.DataFrame(
-        {"x0": [0.0], "x1": [10.0], "y0": [0.0], "y1": [5.0]}
-    ))
+    monkeypatch.setattr(
+        outlines,
+        "fetch",
+        lambda *args: pl.DataFrame({"x0": [0.0], "x1": [10.0], "y0": [0.0], "y1": [5.0]}),
+    )
 
 
 def test_native_vertex_budget_precedes_geojson_reader(monkeypatch):
@@ -177,10 +189,14 @@ def test_native_polygon_holes_multipolygon_and_exact_budget():
                 (0, ST_GeomFromText('POLYGON ((0 0,4 0,4 4,0 4,0 0),
                     (1 1,1 2,2 2,2 1,1 1))'))) AS t(zone_order, geom)""")
             expected = {
-                "hole": [[(0, 0), (4, 0), (4, 4), (0, 4), (0, 0)],
-                         [(1, 1), (1, 2), (2, 2), (2, 1), (1, 1)]],
-                "multi": [[(6, 0), (8, 0), (8, 2), (6, 2), (6, 0)],
-                          [(6, 4), (7, 4), (7, 5), (6, 5), (6, 4)]],
+                "hole": [
+                    [(0, 0), (4, 0), (4, 4), (0, 4), (0, 0)],
+                    [(1, 1), (1, 2), (2, 2), (2, 1), (1, 1)],
+                ],
+                "multi": [
+                    [(6, 0), (8, 0), (8, 2), (6, 2), (6, 0)],
+                    [(6, 4), (7, 4), (7, 5), (6, 5), (6, 4)],
+                ],
             }
             ids = pl.Series(["hole", "multi"])
             assert layer_rings(con, "zones", ids, max_vertices=20) == expected
@@ -194,15 +210,13 @@ def test_native_polygon_holes_multipolygon_and_exact_budget():
         pytest.skip(str(exc))
 
 
-@pytest.mark.parametrize("point", [(float("nan"), 0.0), (0.0, float("inf")),
-                                   (float("-inf"), 0.0)])
+@pytest.mark.parametrize("point", [(float("nan"), 0.0), (0.0, float("inf")), (float("-inf"), 0.0)])
 def test_nonfinite_interior_coordinate_refuses_the_complete_map(point):
     with pytest.raises(ValueError, match="nonfinite outline coordinates"):
         view_paths({"a": [[(0.0, 0.0), (1.0, 1.0), point]]})
 
 
-@pytest.mark.parametrize("points", [[(-1e308, 0.0), (1e308, 1.0)],
-                                    [(0.0, 0.0), (5e-324, 0.0)]])
+@pytest.mark.parametrize("points", [[(-1e308, 0.0), (1e308, 1.0)], [(0.0, 0.0), (5e-324, 0.0)]])
 def test_unrepresentable_projection_refuses_instead_of_emitting_nan(points):
     with pytest.raises(ValueError, match=r"finite extent|projection range"):
         view_paths({"a": [points]})
@@ -215,7 +229,8 @@ def test_small_positive_width_is_still_accepted():
 
 
 def test_huge_finite_view_keeps_finite_centres():
-    drawn = view_paths({"all": [[(0.0, 0.0), (1.0, 1.0)]],
-                        "corner": [[(0.9, 0.0), (1.0, 1.0)]]}, width=1e308)
+    drawn = view_paths(
+        {"all": [[(0.0, 0.0), (1.0, 1.0)]], "corner": [[(0.9, 0.0), (1.0, 1.0)]]}, width=1e308
+    )
     assert drawn.centres == {"all": [5e307, 5e307], "corner": [9.5e307, 5e307]}
     assert drawn.width == drawn.height == 1e308

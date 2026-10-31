@@ -44,7 +44,7 @@ from qavf.inference.results import (
     not_assessed,
 )
 from qavf.rules._grouped import ProjectedRelation
-from qavf.rules.helpers import LargestEvidence, plural
+from qavf.rules.helpers import BoundedEvidence, LargestEvidence, plural
 from qavf.stats import checked_float_series
 
 type Extra = Callable[[ProjectedRelation, bool], pl.Expr]
@@ -368,6 +368,8 @@ def judge(
     inference: Inference,
     members: Sequence[Member],
     limit: int,
+    *,
+    byte_limit: int | None = None,
 ) -> Judgement:
     """Test, correct and decide one family; ``limit`` bounds the tests kept as evidence.
 
@@ -406,7 +408,7 @@ def judge(
         for member, result, testable in zip(members, results, applicable, strict=True)
     ]
     tested = [result for result in results if result is not None]
-    summary = _summary(plan, inference, decisions, tested, family, limit)
+    summary = _summary(plan, inference, decisions, tested, family, limit, byte_limit)
     return Judgement(decisions, results, summary)
 
 
@@ -417,7 +419,11 @@ def _summary(
     tested: list[TestResult],
     size: int,
     limit: int,
+    byte_limit: int | None = None,
 ) -> Significance:
+    from qavf.compare.evidence import keep_models
+
+    kept = tested[:limit] if byte_limit is None else keep_models(tested, limit, byte_limit)
     return Significance(
         method=plan.name,
         decision=inference.decision,
@@ -429,7 +435,7 @@ def _summary(
         significant=sum(bool(result.significant) for result in tested),
         failed=sum(decision.failed for decision in decisions),
         not_assessed=sum(not decision.assessed for decision in decisions),
-        tests=tested[:limit],
+        tests=kept,
     )
 
 
@@ -473,6 +479,7 @@ def family_check(
     noun: str,
     magnitudes: Sequence[float] | None = None,
     unmeasured: Sequence[dict[str, Any]] = (),
+    byte_limit: int | None = None,
 ) -> CheckResult:
     """Judge one family and grade it; failing members carry their test as evidence.
 
@@ -488,16 +495,18 @@ def family_check(
     if not members and not unmeasured:
         return not_assessed(check, f"no {noun} to compare on both sides")
     sizes = list(magnitudes) if magnitudes is not None else [0.0] * len(records)
-    leaders = LargestEvidence(limit)
+    leaders = LargestEvidence(limit, byte_limit=byte_limit)
     significance: Significance | None = None
     metrics: dict[str, Any] = {}
     reason = None
     if inference.tests:
-        judgement = judge(plan, inference, members, limit)
+        judgement = judge(plan, inference, members, limit, byte_limit=byte_limit)
         failing, unassessed = judgement.failed, judgement.unassessed
         significance = judgement.significance
         metrics = summary_metrics(significance)
         for position in failing or unassessed:
+            if not leaders.admits(sizes[position], position):
+                continue
             record = records[position] | evidence_fields(
                 judgement.results[position], judgement.decisions[position]
             )
@@ -511,7 +520,10 @@ def family_check(
             leaders.add(sizes[position], position, records[position])
     total = len(members) + len(unmeasured)
     if (unassessed or unmeasured) and not failing:
-        evidence = [*leaders.records, *unmeasured][:limit]
+        retained = BoundedEvidence(limit, byte_limit=byte_limit)
+        retained.extend(leaders.records)
+        retained.extend(unmeasured)
+        evidence = retained.records
         if unassessed:
             message = (
                 f"Not assessed: {check}: {plural(len(unassessed), noun)} need a "

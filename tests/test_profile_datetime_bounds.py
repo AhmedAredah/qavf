@@ -1,4 +1,5 @@
 """Profiled datetime bounds must contain the physical observations."""
+
 from datetime import UTC, datetime
 
 import polars as pl

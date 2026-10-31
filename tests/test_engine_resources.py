@@ -173,9 +173,9 @@ def test_snapshot_groups_obey_serial_loads():
         def __init__(self, name):
             super().__init__()
             self.name = name
-            self.env = SourceEnvironment(connections={
-                name: ConnectionSpec(type="duckdb", path="mock.duckdb")
-            })
+            self.env = SourceEnvironment(
+                connections={name: ConnectionSpec(type="duckdb", path="mock.duckdb")}
+            )
 
         def bind(self, env):
             bound = type(self)(self.name)

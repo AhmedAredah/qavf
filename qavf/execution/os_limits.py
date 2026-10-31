@@ -44,9 +44,7 @@ def _validate(requested: Mapping[str, Any]) -> None:
             raise ValueError(f"{name} must be a nonnegative integer")
 
 
-def apply_limits(
-    requested: Mapping[str, Any], job: str | None = None
-) -> dict[str, dict[str, int]]:
+def apply_limits(requested: Mapping[str, Any], job: str | None = None) -> dict[str, dict[str, int]]:
     """Lower both soft and hard limits; never relax an inherited restriction.
 
     On Windows, ``job`` names the parent's Job Object; joining it applies limits.

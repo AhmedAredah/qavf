@@ -21,7 +21,10 @@ _MEMORY_SCOPE = {
     "win32": "Windows job committed memory per worker process; not aggregate RSS",
 }
 _HARD_FIELDS = (
-    "run_timeout_s", "process_address_space_bytes", "process_cpu_time_s", "process_file_bytes"
+    "run_timeout_s",
+    "process_address_space_bytes",
+    "process_cpu_time_s",
+    "process_file_bytes",
 )
 
 
@@ -64,11 +67,13 @@ def run(request_path: Path | str, result_path: Path | str, control: dict[str, An
             runner = QARunner(local)
             report = runner.run(frames=frames)
             config = redact(settings.model_dump(mode="python", by_alias=True))
-            metadata = report.metadata.model_copy(update={
-                "config": config,
-                "config_digest": config_digest(config),
-                "resource_usage": {**report.metadata.resource_usage, **usage},
-            })
+            metadata = report.metadata.model_copy(
+                update={
+                    "config": config,
+                    "config_digest": config_digest(config),
+                    "resource_usage": {**report.metadata.resource_usage, **usage},
+                }
+            )
             report = runner._fit_report_budget(report.model_copy(update={"metadata": metadata}))
             chunks = report.iter_json_chunks()
         elif control["operation"] == "compare":
@@ -107,9 +112,10 @@ def run(request_path: Path | str, result_path: Path | str, control: dict[str, An
         write_result(result_path, chunks, int(control["max_report_bytes"]))
     except Exception as exc:
         message = exception_details(exc)[:1500]
-        error = json.dumps({
-            "phase": "execution", "error_type": type(exc).__name__, "message": message
-        }, ensure_ascii=True).encode()
+        error = json.dumps(
+            {"phase": "execution", "error_type": type(exc).__name__, "message": message},
+            ensure_ascii=True,
+        ).encode()
         # Failure to write (e.g. RLIMIT_FSIZE/ENOMEM) is still a nonzero exit;
         # the parent will reject the missing result without guessing the cause.
         Path(control["error_path"]).write_bytes(error[:8192])

@@ -12,7 +12,7 @@ import shutil
 import tempfile
 import threading
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, MutableMapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -24,7 +24,8 @@ from qavf.engine.cache_ownership import (
     compact_polars_with_size,
     retained_size,
 )
-from qavf.engine.owned_ipc import project_ipc, read_owned_ipc, reduce_ipc
+from qavf.engine.cleanup import attempt_cleanup, raise_cleanup_errors
+from qavf.engine.owned_ipc import _OwnedIpcFrame, project_ipc, read_owned_ipc, reduce_ipc
 from qavf.engine.retention import RetainedBudget, RetainedLease
 from qavf.engine.session import KeyedLocks, RunSession
 from qavf.engine.spill import SpillBudget, SpillFile, SpillLease
@@ -80,9 +81,7 @@ class ByteCache(MutableMapping):
         size = retained_size(key) + retained_size(value)
         if size > self.limit:
             return
-        while self.data and (
-            self.bytes + size > self.limit or size > self.budget.remaining
-        ):
+        while self.data and (self.bytes + size > self.limit or size > self.budget.remaining):
             _, (_, removed) = self.data.popitem(last=False)
             self.bytes -= removed
             self.budget.release(removed)
@@ -136,6 +135,9 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         retained_budget: RetainedBudget | None = None,
     ) -> None:
         self.lock = threading.RLock()
+        self._writes = threading.RLock()
+        """Serialize publication/eviction, never block memory hits on disk I/O."""
+        self._closed = False
         self._reads = KeyedLocks()
         """One reader per spilled key at a time, so parallel hits read it once."""
         self.limit = cache_bytes
@@ -143,6 +145,7 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         self.spill_budget = spill_budget or SpillBudget(spill_bytes)
         self.retained_budget = retained_budget or RetainedBudget(cache_bytes)
         self._spill_files: dict[str, SpillFile] = {}
+        self._retired: set[SpillFile] = set()
         self.directory = directory / "frames"
         self.directory.mkdir(parents=True, exist_ok=True)
         self.materialization_bytes = materialization_bytes
@@ -180,17 +183,24 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
                 self.spill_read_count += 1
                 self.spill_read_bytes += lease.path.stat().st_size
             try:
-                frame = read_owned_ipc(lease.path)
+                payload = read_owned_ipc(lease.path)
             finally:
                 lease.close()
             with self.lock:
-                if self._spill_files.get(key) is spill:
-                    promoted = self._promote(key, frame)
+                promote = (
+                    self._spill_files.get(key) is spill
+                    and self.sizes[key] <= self.limit - self.bytes
+                )
+            if promote:
+                payload = payload.measured()
+            with self.lock:
+                if promote and self._spill_files.get(key) is spill:
+                    promoted = self._promote(key, payload)
                     if promoted is not None:
                         return promoted
-            return frame
+            return payload.frame
 
-    def _promote(self, key: str, frame: pl.DataFrame) -> pl.DataFrame | None:
+    def _promote(self, key: str, payload: _OwnedIpcFrame) -> pl.DataFrame | None:
         """Keep a read spill in memory when it fits existing free space (lock held).
 
         A hit must not trigger eviction, extra writes or ping-pong between two
@@ -198,8 +208,8 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         """
         if self.sizes[key] > self.limit - self.bytes:
             return None
-        compacted, size = compact_polars_with_size(frame)
-        owned = cast(pl.DataFrame, compacted)
+        owned, size = payload.frame, payload.size
+        assert size is not None
         if size > self.limit - self.bytes or not self.retained_budget.reserve(size):
             return None
         self.data[key] = owned
@@ -207,13 +217,10 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         self.sizes[key] = size
         self.bytes += size
         self.peak_bytes = max(self.peak_bytes, self.bytes)
-        path = self.paths.pop(key)
-        self.spill_bytes -= path.stat().st_size
-        self._spill_files.pop(key).close()
+        self._release_spill(key)
         self.spill_promotions += 1
         return owned.clone()
 
-    @_locked
     def project(self, key: str, columns: Iterable[str]) -> pl.DataFrame:
         """Read only selected IPC columns; never promote or map an owned spill.
 
@@ -223,11 +230,16 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         full-buffer byte counter.
         """
         selected = list(columns)
-        if key in self.data:
-            self.data.move_to_end(key)
-            return self.data[key].select(selected)
-        self.spill_project_count += 1
-        return project_ipc(self.paths[key], selected)
+        with self.lock:
+            if key in self.data:
+                self.data.move_to_end(key)
+                return self.data[key].select(selected)
+            lease = self._spill_files[key].borrow()
+            self.spill_project_count += 1
+        try:
+            return project_ipc(lease.path, selected)
+        finally:
+            lease.close()
 
     def reduce(self, key: str, build: Callable[[pl.LazyFrame], pl.LazyFrame]) -> pl.DataFrame:
         """Lease input storage, then build and collect without holding the cache lock.
@@ -249,9 +261,7 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
                 lease.close()
 
     @_locked
-    def observe(
-        self, key: str
-    ) -> tuple[pl.DataFrame | None, SpillLease | RetainedLease | None]:
+    def observe(self, key: str) -> tuple[pl.DataFrame | None, SpillLease | RetainedLease | None]:
         """Lease immutable buffers/IPC for one scoped lazy reduction operation.
 
         A spill lease survives eviction, promotion and release of its cache entry.
@@ -263,8 +273,12 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         self.spill_reduce_count += 1
         return None, self._spill_files[key].borrow()
 
-    @_locked
     def __setitem__(self, key: str, value: pl.DataFrame) -> None:
+        # Compaction can traverse a large native payload. Neither it nor IPC
+        # writes hold the metadata lock used by unrelated cache hits.
+        with self.lock:
+            if self._closed:
+                raise ResourceLimitError("frame store has been closed")
         owned, size = compact_polars_with_size(value)
         value = cast(pl.DataFrame, owned)
         if self.materialization_bytes is not None and size > self.materialization_bytes:
@@ -272,26 +286,116 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
                 f"dataset {key!r} materializes {size} bytes; "
                 f"memory target is {self.materialization_bytes}"
             )
-        if key in self:
-            del self[key]
-        while self.data and (
-            self.bytes + size > self.limit or size > self.retained_budget.remaining
-        ):
-            old, frame = next(iter(self.data.items()))
-            self._spill(old, frame)
-            self.data.pop(old)
-            self.bytes -= self.sizes[old]
-            self._memory_leases.pop(old).release()
-        if size > self.limit or not self.retained_budget.reserve(size):
-            self._spill(key, value)
-        else:
-            self.data[key] = value
-            self._memory_leases[key] = RetainedLease(self.retained_budget, size)
-            self.bytes += size
-            self.peak_bytes = max(self.peak_bytes, self.bytes)
-        self.sizes[key] = size
+        with self._writes:
+            with self.lock:
+                if self._closed:
+                    raise ResourceLimitError("frame store has been closed")
+            if key in self:
+                del self[key]
+            while True:
+                with self.lock:
+                    if not self.data or (
+                        self.bytes + size <= self.limit and size <= self.retained_budget.remaining
+                    ):
+                        break
+                    old, frame = next(iter(self.data.items()))
+                spill = self._write_spill(frame)
+                with self.lock:
+                    self._publish_spill(old, spill)
+                    self.data.pop(old)
+                    self.bytes -= self.sizes[old]
+                    self._memory_leases.pop(old).release()
+            with self.lock:
+                retained = size <= self.limit - self.bytes and self.retained_budget.reserve(size)
+                if retained:
+                    self.data[key] = value
+                    self._memory_leases[key] = RetainedLease(self.retained_budget, size)
+                    self.bytes += size
+                    self.peak_bytes = max(self.peak_bytes, self.bytes)
+                    self.sizes[key] = size
+            if not retained:
+                spill = self._write_spill(value)
+                with self.lock:
+                    self._publish_spill(key, spill)
+                    self.sizes[key] = size
 
-    def _spill(self, key: str, frame: pl.DataFrame) -> None:
+    def publish(
+        self,
+        frames: Mapping[str, pl.DataFrame],
+        publish_metadata: Callable[[], None],
+        publication_guard: contextlib.AbstractContextManager,
+    ) -> None:
+        """Publish a complete admitted group and its catalog metadata atomically.
+
+        The writer lock serializes ownership changes. Private staging shares the
+        run budgets and writes without the catalog/cache metadata locks. Commit
+        acquires the catalog guard before the cache lock, matching reader order.
+        Native readers may promote existing entries while staging, so admission
+        is checked again before ownership transfers.
+        """
+        with self._writes:
+            with self.lock:
+                if self._closed:
+                    raise ResourceLimitError("frame store has been closed")
+                available = max(0, self.limit - self.bytes)
+            staging = FrameStore(
+                available,
+                self.spill_limit,
+                self.directory.parent,
+                self.materialization_bytes,
+                self.spill_budget,
+                self.retained_budget,
+            )
+            try:
+                for key, frame in frames.items():
+                    staging[key] = frame
+                while True:
+                    with publication_guard, self.lock:
+                        if self._closed:
+                            raise ResourceLimitError("frame store has been closed")
+                        if self.bytes + staging.bytes <= self.limit:
+                            for key in frames:
+                                self.discard(key)
+                            self.data.update(staging.data)
+                            self._memory_leases.update(staging._memory_leases)
+                            self.paths.update(staging.paths)
+                            self._spill_files.update(staging._spill_files)
+                            self.sizes.update(staging.sizes)
+                            self.bytes += staging.bytes
+                            self.spill_bytes += staging.spill_bytes
+                            self.peak_bytes = max(self.peak_bytes, self.bytes)
+                            self.peak_spill_bytes = max(self.peak_spill_bytes, self.spill_bytes)
+                            self.spill_write_count += staging.spill_write_count
+                            self.spill_write_bytes += staging.spill_write_bytes
+                            staging.data.clear()
+                            staging._memory_leases.clear()
+                            staging.paths.clear()
+                            staging._spill_files.clear()
+                            staging.sizes.clear()
+                            staging.bytes = staging.spill_bytes = 0
+                            try:
+                                publish_metadata()
+                            except BaseException:
+                                failures = attempt_cleanup(
+                                    functools.partial(self.discard, key) for key in frames
+                                )
+                                raise_cleanup_errors(
+                                    "failed publication could not be released", failures
+                                )
+                                raise
+                            return
+                    # A concurrent promotion consumed space initially available
+                    # to staging. Spill one staged entry before trying to commit.
+                    key, frame = next(iter(staging.data.items()))
+                    spill = staging._write_spill(frame)
+                    staging._publish_spill(key, spill)
+                    del staging.data[key]
+                    staging.bytes -= staging.sizes[key]
+                    staging._memory_leases.pop(key).release()
+            finally:
+                staging.close()
+
+    def _write_spill(self, frame: pl.DataFrame) -> SpillFile:
         if frame.estimated_size() > min(
             self.spill_limit - self.spill_bytes, self.spill_budget.remaining
         ):
@@ -300,30 +404,47 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
         try:
             with owned.writer() as handle:
                 frame.write_ipc(handle, compression="uncompressed")
-            self.paths[key] = owned.path
-            self._spill_files[key] = owned
-            self.spill_bytes += owned.size
-            self.peak_spill_bytes = max(self.peak_spill_bytes, self.spill_bytes)
-            self.spill_write_count += 1
-            self.spill_write_bytes += owned.size
+            return owned
         except BaseException:
             owned.close()
             raise
 
-    @_locked
+    def _publish_spill(self, key: str, owned: SpillFile) -> None:
+        """Publish an admitted, completed write while holding the metadata lock."""
+        self.paths[key] = owned.path
+        self._spill_files[key] = owned
+        self.spill_bytes += owned.size
+        self.peak_spill_bytes = max(self.peak_spill_bytes, self.spill_bytes)
+        self.spill_write_count += 1
+        self.spill_write_bytes += owned.size
+
+    def _release_spill(self, key: str) -> None:
+        """Detach a cache entry; the budget owns failed deletion and live leases."""
+        owned = self._spill_files[key]
+        size = owned.size
+        try:
+            owned.close()
+        except Exception:
+            self._retired.add(owned)
+            raise
+        finally:
+            # Even if unlink failed, SpillBudget retains this owner for retry.
+            self._spill_files.pop(key)
+            self.paths.pop(key)
+            self.spill_bytes -= size
+
     def __delitem__(self, key: str) -> None:
-        if key in self.data:
-            del self.data[key]
-            size = self.sizes.pop(key)
-            self.bytes -= size
-            self._memory_leases.pop(key).release()
-        elif key in self.paths:
-            path = self.paths.pop(key)
-            self.sizes.pop(key)
-            self.spill_bytes -= path.stat().st_size
-            self._spill_files.pop(key).close()
-        else:
-            raise KeyError(key)
+        with self._writes, self.lock:
+            if key in self.data:
+                del self.data[key]
+                size = self.sizes.pop(key)
+                self.bytes -= size
+                self._memory_leases.pop(key).release()
+            elif key in self.paths:
+                self.sizes.pop(key)
+                self._release_spill(key)
+            else:
+                raise KeyError(key)
 
     @_locked
     def __iter__(self) -> Iterator[str]:
@@ -337,23 +458,36 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
     def __contains__(self, key: object) -> bool:
         return key in self.data or key in self.paths
 
-    @_locked
     def clear(self) -> None:
-        for owned in self._spill_files.values():
-            owned.close()
-        self._spill_files.clear()
-        for lease in self._memory_leases.values():
-            lease.release()
-        self._memory_leases.clear()
-        self.data.clear()
-        self.paths.clear()
-        self.sizes.clear()
-        self.bytes = self.spill_bytes = 0
+        with self._writes:
+            failures = []
+            for owned in tuple(self._retired):
+                try:
+                    owned.close()
+                except Exception as exc:
+                    failures.append(exc)
+                else:
+                    self._retired.discard(owned)
+            with self.lock:
+                keys = tuple(self)
+            for key in keys:
+                try:
+                    del self[key]
+                except Exception as exc:
+                    failures.append(exc)
+            raise_cleanup_errors("frame cache could not be fully released", failures)
 
-    @_locked
+    def close(self) -> None:
+        """Stop publication before draining cache ownership; retry on every call."""
+        with self._writes:
+            with self.lock:
+                self._closed = True
+            self.clear()
+
     def discard(self, key: str) -> None:
-        if key in self:
-            del self[key]
+        with self._writes:
+            if key in self:
+                del self[key]
 
 
 class RunResources:
@@ -366,6 +500,7 @@ class RunResources:
         memory_bytes: int | None,
         temp_directory: Path | None = None,
         connection_slots: int = 16,
+        max_spill_files: int = 4096,
     ) -> None:
         if temp_directory is not None:
             Path(temp_directory).mkdir(parents=True, exist_ok=True)
@@ -388,7 +523,19 @@ class RunResources:
                 min(cache_bytes, memory_bytes // 2) if memory_bytes is not None else cache_bytes
             )
             self.retained_budget = RetainedBudget(cache_bytes)
-            self.spill_budget = SpillBudget(spill_bytes // 2)
+            self.spill_budget = SpillBudget(spill_bytes // 2, max_spill_files)
+            self.spool_budget = RetainedBudget(
+                min(16 * 1024**2, memory_bytes // 8) if memory_bytes is not None else 16 * 1024**2
+            )
+            from qavf.engine.observation_store import ObservationStorage
+
+            self.observations = ObservationStorage(
+                self.directory / "observations",
+                self.retained_budget,
+                self.spool_budget,
+                self.spill_budget,
+                self.session.check,
+            )
             try:
                 self.frames = FrameStore(
                     cache_bytes * 3 // 4,
@@ -409,6 +556,9 @@ class RunResources:
             self.eager_fallbacks: set[str] = set()
             self.lock = threading.RLock()
             self.closed = False
+            self.cleanup_complete = False
+            self._cleanup_lock = threading.RLock()
+            self._cleanup_owners: set[Any] = set()
             self._last_usage: dict[str, Any] = {}
             self.usage()
             setup.pop_all()
@@ -437,6 +587,24 @@ class RunResources:
         with self.lock:
             self.reservations.discard(str(token))
 
+    def own_cleanup(self, owner: Any) -> None:
+        """Keep work-store cleanup reachable until its own completion boundary."""
+        with self.lock:
+            if self.closed:
+                raise ResourceLimitError("run resources have been closed")
+            self._cleanup_owners.add(owner)
+
+    def release_cleanup(self, owner: Any) -> None:
+        with self.lock:
+            self._cleanup_owners.discard(owner)
+
+    def _close_owners(self) -> None:
+        with self.lock:
+            owners = tuple(self._cleanup_owners)
+        raise_cleanup_errors(
+            "work stores could not be released", attempt_cleanup(owner.close for owner in owners)
+        )
+
     def register_connection(self, token: object, connection: Any) -> None:
         self.session.register_connection(token, connection)
 
@@ -460,6 +628,10 @@ class RunResources:
             cached = self.frames.bytes + self.pandas.bytes + self.memo.bytes
             retained, retained_peak = self.retained_budget.snapshot()
         result = {
+            **self.spill_budget.file_usage(),
+            "spool_working_bytes": self.spool_budget.snapshot()[0],
+            "peak_spool_working_bytes": self.spool_budget.snapshot()[1],
+            "spool_working_budget_bytes": self.spool_budget.limit,
             "resource_usage_pending": False,
             "active_connection_reservations": len(self.reservations),
             "peak_connection_reservations": self.peak_connections,
@@ -511,31 +683,39 @@ class RunResources:
         A run directory that could not be removed is retried by the next ``close``.
         """
         with self.lock:
-            first = not self.closed
             self.closed = True
         # Native close may call release(); never hold the resource lock while
         # waiting on a handle another thread may already be closing.
-        steps = (
-            [
-                self.session.request_close,
-                self.session.close_connections,
-                self.frames.clear,
-                self.pandas.clear,
-                self.memo.clear,
-            ]
-            if first
-            else []
-        )
-        failures: list[Exception] = []
-        for step in [*steps, self._remove_directory]:
-            try:
-                step()
-            except Exception as exc:
-                failures.append(exc)
-        if len(failures) == 1:
-            raise failures[0]
-        if failures:
-            raise ExceptionGroup("run resources could not be fully released", failures)
+        with self._cleanup_lock:
+            failures = attempt_cleanup(
+                [
+                    self.session.request_close,
+                    self.session.close_connections,
+                    self.frames.close,
+                    self.pandas.clear,
+                    self.memo.clear,
+                    self._close_owners,
+                ]
+            )
+            # Retry unpublished/independent owners too. Preserve any failure
+            # already observed, even if a transient second attempt succeeds.
+            failures.extend(attempt_cleanup([self.spill_budget.close_files]))
+            if (
+                not failures
+                and not self.spill_budget.has_files
+                and not self.session.connections
+                and not self._cleanup_owners
+            ):
+                failures.extend(attempt_cleanup([self._remove_directory]))
+            self.cleanup_complete = (
+                not failures
+                and not self.directory.exists()
+                and not self.retained_budget.snapshot()[0]
+                and not self.spill_budget.has_files
+                and not self.session.connections
+                and not self._cleanup_owners
+            )
+            raise_cleanup_errors("run resources could not be fully released", failures)
 
     def _remove_directory(self) -> None:
         if self.directory.exists():

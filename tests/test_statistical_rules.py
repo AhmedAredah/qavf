@@ -75,7 +75,11 @@ def test_outlier_verdict_and_original_evidence_independent_of_extra_columns(name
         assert record[value] == 100.0 and record[group] == "a"
         assert record[row_name] == 7
         for diagnostic in (
-            "score", "lower_bound", "upper_bound", "group_median", "relative_deviation"
+            "score",
+            "lower_bound",
+            "upper_bound",
+            "group_median",
+            "relative_deviation",
         ):
             output = f"qavf_{diagnostic}" if diagnostic == name else diagnostic
             assert record[output] == expected[diagnostic]

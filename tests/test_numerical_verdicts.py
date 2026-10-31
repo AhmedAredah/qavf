@@ -55,9 +55,7 @@ def test_subnormal_normalization_cannot_merge_materially_different_ratios():
         "d": pl.DataFrame({"id": range(8), "w": [1e308] * 8}),
     }
     assert Fraction(7.3e-16) / Fraction(2.6e-16) > 2
-    results = rule_results(
-        "SPA-002", frames, {"metrics": [metric({"dataset": "d", "value": "w"})]}
-    )
+    results = rule_results("SPA-002", frames, {"metrics": [metric({"dataset": "d", "value": "w"})]})
     assert {r.status for r in results} == {Status.ERROR}
     assert "subnormal-value precision" in results[0].message
 
@@ -66,11 +64,9 @@ def test_exact_subnormal_normalization_remains_supported():
     smallest = math.ldexp(1.0, -1074)
     frames = {
         "n": pl.DataFrame({"id": range(8), "v": [smallest] * 7 + [smallest * 100]}),
-        "d": pl.DataFrame({"id": range(8), "w": [1.] * 8}),
+        "d": pl.DataFrame({"id": range(8), "w": [1.0] * 8}),
     }
-    results = rule_results(
-        "SPA-002", frames, {"metrics": [metric({"dataset": "d", "value": "w"})]}
-    )
+    results = rule_results("SPA-002", frames, {"metrics": [metric({"dataset": "d", "value": "w"})]})
     assert {r.status for r in results} == {Status.FAIL}
     assert results[0].affected_count == 1
 

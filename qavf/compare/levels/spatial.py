@@ -539,7 +539,9 @@ class SpatialLevel(ComparisonLevel):
         ok = f"No zone's share changed by more than {check.max_change:g} ({len(values):,} zones)."
         bad = "{count} changed share by more than " + f"{check.max_change:g}."
         if not inference.tests:
-            leaders = LargestEvidence(inputs.ctx.evidence_limit)
+            leaders = LargestEvidence(
+                inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes
+            )
             for position, record in enumerate(records):
                 if members[position].material:
                     leaders.add(magnitudes[position], position, record)
@@ -561,6 +563,7 @@ class SpatialLevel(ComparisonLevel):
             bad,
             "zone",
             magnitudes=magnitudes,
+            byte_limit=inputs.ctx.evidence_bytes,
         )
 
     # ----------------------------------------------------------------- clusters
@@ -596,7 +599,14 @@ class SpatialLevel(ComparisonLevel):
                 )
             else:
                 x, y = cell_centres(ids, grid)
-                weights = self._by_distance(ids, x, y, spec, is_geographic(source.crs))
+                weights = self._by_distance(
+                    ids,
+                    x,
+                    y,
+                    spec,
+                    is_geographic(source.crs),
+                    check_cancelled=inputs.ctx._check_cancelled,
+                )
         elif source.layer is not None:
             with spatial_connection(inputs.ctx) as con:
                 loaded = load_zones(con, inputs.ctx, source.layer)
@@ -624,7 +634,14 @@ class SpatialLevel(ComparisonLevel):
                         f'ST_Y(ST_Centroid(geom)) AS y FROM "{loaded.table}" ORDER BY zone_order',
                     )
                     x, y = centres["x"].to_numpy()[keep], centres["y"].to_numpy()[keep]
-                    weights = self._by_distance(ids, x, y, spec, is_geographic(loaded.crs))
+                    weights = self._by_distance(
+                        ids,
+                        x,
+                        y,
+                        spec,
+                        is_geographic(loaded.crs),
+                        check_cancelled=inputs.ctx._check_cancelled,
+                    )
         else:
             raise ValueError(
                 "no neighbours for the zones: set the level's 'layer' or 'grid', zones from an "
@@ -634,7 +651,13 @@ class SpatialLevel(ComparisonLevel):
 
     @staticmethod
     def _by_distance(
-        ids: pl.Series, x: Any, y: Any, spec: WeightsSpec, geographic: bool
+        ids: pl.Series,
+        x: Any,
+        y: Any,
+        spec: WeightsSpec,
+        geographic: bool,
+        *,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> SpatialWeights:
         if spec.method == "knn":
             return nearest(
@@ -642,6 +665,7 @@ class SpatialLevel(ComparisonLevel):
                 x,
                 y,
                 spec.k,
+                check_cancelled=check_cancelled,
                 geographic=geographic,
                 max_edges=spec.max_edges,
                 max_work=spec.max_work,
@@ -828,7 +852,7 @@ class SpatialLevel(ComparisonLevel):
         check = family_check(
             "lisa", MeasureTest("local_morans_i", None), inference, members, records, limit, ok,
             bad, "zone", magnitudes=magnitudes,
-        )  # fmt: skip
+         byte_limit=inputs.ctx.evidence_bytes)  # fmt: skip
         details["clusters"] = [
             {key: record[key] for key in (column, "cluster", "quadrant", "local_i", "p_value",
                                           "adjusted_p", params.difference)}

@@ -155,17 +155,29 @@ def build_workload(fixture: Path, work_dir: Path, options: WorkloadOptions) -> P
             summaries["load_b"] = _summary(ctx.get("b"), seed)
             snapshots["load_b"] = _snapshot(ctx, temporary)
             metadata = [info.model_dump(mode="json") for info in ctx.describe()]
-            for name in ("read_a_1", "read_a_2"):
-                summaries[name] = _summary(ctx.get("a"), seed)
-                snapshots[name] = _snapshot(ctx, temporary)
-            ctx.release(["b"])
-            snapshots["release_b"] = _snapshot(ctx, temporary)
-            summaries["promote_a"] = _summary(ctx.get("a"), seed)
-            snapshots["promote_a"] = _snapshot(ctx, temporary)
-            summaries["hit_a"] = _summary(ctx.get("a"), seed)
-            snapshots["hit_a"] = _snapshot(ctx, temporary)
+            # Retention policies may spill the older or incoming frame. Locate
+            # the cold source through public observations, then require the
+            # same physical reads/promotion on either implementation. A missing
+            # read counter cannot pass the strict transition oracle below.
+            probe = ctx.get("a")
+            if ctx.resource_usage()["frame_spill_read_count"] == 1:
+                spilled, resident, first = "a", "b", probe
+            else:
+                spilled, resident, first = "b", "a", ctx.get("b")
+            summaries["read_spilled_1"] = _summary(first, seed)
+            snapshots["read_spilled_1"] = _snapshot(ctx, temporary)
+            del probe, first
+            summaries["read_spilled_2"] = _summary(ctx.get(spilled), seed)
+            snapshots["read_spilled_2"] = _snapshot(ctx, temporary)
+            ctx.release([resident])
+            snapshots["release_resident"] = _snapshot(ctx, temporary)
+            summaries["promote_spilled"] = _summary(ctx.get(spilled), seed)
+            snapshots["promote_spilled"] = _snapshot(ctx, temporary)
+            summaries["hit_spilled"] = _summary(ctx.get(spilled), seed)
+            snapshots["hit_spilled"] = _snapshot(ctx, temporary)
             final_metadata = [info.model_dump(mode="json") for info in ctx.describe()]
         return {
+            "spill_selection": {"spilled": spilled, "resident": resident},
             "summaries": summaries,
             "snapshots": snapshots,
             "metadata": metadata,
@@ -176,7 +188,14 @@ def build_workload(fixture: Path, work_dir: Path, options: WorkloadOptions) -> P
         }
 
     def verify(result: dict[str, Any]) -> dict[str, Any]:
-        stages = {"load_a", "load_b", "read_a_1", "read_a_2", "promote_a", "hit_a"}
+        stages = {
+            "load_a",
+            "load_b",
+            "read_spilled_1",
+            "read_spilled_2",
+            "promote_spilled",
+            "hit_spilled",
+        }
         if set(result["summaries"]) != stages or any(
             value != expected for value in result["summaries"].values()
         ):
@@ -189,11 +208,11 @@ def build_workload(fixture: Path, work_dir: Path, options: WorkloadOptions) -> P
         transitions = {
             "load_a": (0, 0, 0, 0),
             "load_b": (1, 0, 0, physical_bytes),
-            "read_a_1": (1, 1, 0, physical_bytes),
-            "read_a_2": (1, 2, 0, physical_bytes),
-            "release_b": (1, 2, 0, physical_bytes),
-            "promote_a": (1, 3, 1, 0),
-            "hit_a": (1, 3, 1, 0),
+            "read_spilled_1": (1, 1, 0, physical_bytes),
+            "read_spilled_2": (1, 2, 0, physical_bytes),
+            "release_resident": (1, 2, 0, physical_bytes),
+            "promote_spilled": (1, 3, 1, 0),
+            "hit_spilled": (1, 3, 1, 0),
         }
         for name, (writes, reads, promotions, retained) in transitions.items():
             snapshot = snapshots[name]

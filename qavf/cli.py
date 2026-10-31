@@ -215,26 +215,28 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if json_path is None and settings.report.json_:
         json_path = output_dir / "qa_report.json"
     _check_report_destinations(html_path, json_path)
-    ProtectedInputs.of_settings(settings, args.config).check(html_path, json_path)
+    protected = ProtectedInputs.of_settings(settings, args.config)
+    protected.check(html_path, json_path)
     report = QARunner(settings).run()
     fail_on = settings.engine.fail_on
-    written = []
-    if html_path is not None:
-        written.append(
-            write_html(
-                report,
-                html_path,
-                settings.report.title,
-                fail_on,
-                limits=HtmlLimits(
-                    max_cells=settings.report.html_max_cells,
-                    max_columns=settings.report.html_max_columns,
-                    max_output_bytes=settings.report.html_max_bytes,
-                ),
+    with protected.publication():
+        written = []
+        if html_path is not None:
+            written.append(
+                write_html(
+                    report,
+                    html_path,
+                    settings.report.title,
+                    fail_on,
+                    limits=HtmlLimits(
+                        max_cells=settings.report.html_max_cells,
+                        max_columns=settings.report.html_max_columns,
+                        max_output_bytes=settings.report.html_max_bytes,
+                    ),
+                )
             )
-        )
-    if json_path is not None:
-        written.append(report.write_json(json_path))
+        if json_path is not None:
+            written.append(report.write_json(json_path))
 
     summary = report.summary
     print(
@@ -437,7 +439,8 @@ def _cmd_compare_datasets(args: argparse.Namespace) -> int:
     from qavf.compare.api import compare_datasets
 
     _check_report_destinations(args.html, args.json)
-    ProtectedInputs([args.config, args.baseline, args.candidate]).check(args.html, args.json)
+    protected = ProtectedInputs([args.config, args.baseline, args.candidate])
+    protected.check(args.html, args.json)
     options = _comparison_spec(args.config)
     for argument in (args.baseline, args.candidate):
         local = "://" not in argument and not any(c in argument for c in "*?[")
@@ -446,11 +449,12 @@ def _cmd_compare_datasets(args: argparse.Namespace) -> int:
     result = compare_datasets(
         args.baseline, args.candidate, entry_points=not args.no_plugins, **options
     )
-    written = []
-    if args.html:
-        written.append(result.write_html(args.html, args.title))
-    if args.json:
-        written.append(result.write_json(args.json))
+    with protected.publication():
+        written = []
+        if args.html:
+            written.append(result.write_html(args.html, args.title))
+        if args.json:
+            written.append(result.write_json(args.json))
     print(result.summary())
     for level in result.levels:
         for check in level.checks:

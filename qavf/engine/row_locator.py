@@ -45,18 +45,23 @@ class FileIndex:
         return self.files[index], position - self.starts[index]
 
     def annotate(
-        self, affected: pl.DataFrame | Sequence[Mapping[str, Any]]
+        self, affected: pl.DataFrame | Sequence[Mapping[str, Any]], row_column: str = ROW
     ) -> pl.DataFrame | list[dict[str, Any]]:
+        from qavf.rules.helpers import annotate, fresh_internal, present
+
         if isinstance(affected, pl.DataFrame):
-            located = [self.locate(int(p)) for p in affected[ROW].to_list()]
-            return affected.with_columns(
-                pl.Series(FILE, [file for file, _ in located], dtype=pl.String),
-                pl.Series(FILE_ROW, [row for _, row in located], dtype=pl.Int64),
+            located = [self.locate(int(p)) for p in affected[row_column].to_list()]
+            file_column = fresh_internal("file", affected.columns)
+            file_row_column = fresh_internal("file_row", [*affected.columns, file_column])
+            located_frame = affected.with_columns(
+                pl.Series(file_column, [file for file, _ in located], dtype=pl.String),
+                pl.Series(file_row_column, [row for _, row in located], dtype=pl.Int64),
             )
+            return present(located_frame, {file_column: FILE, file_row_column: FILE_ROW})
         records = []
         for record in affected:
-            file, row = self.locate(int(record[ROW]))
-            records.append({**record, FILE: file, FILE_ROW: row})
+            file, row = self.locate(int(record[row_column]))
+            records.append(annotate(record, **{FILE: file, FILE_ROW: row}))
         return records
 
 
@@ -69,7 +74,7 @@ class RowLocator:
     def locate(self, finding: Finding) -> Finding:
         """``finding`` with located evidence; unchanged when there is nothing to
         locate or locating fails (evidence keeps ``_row`` either way)."""
-        if len(finding.datasets) != 1 or not self._positioned(finding.affected):
+        if len(finding.datasets) != 1 or not self._positioned(finding.affected, finding.row_column):
             return finding
         dataset = finding.datasets[0]
         source = self.ctx.source(dataset)
@@ -80,7 +85,10 @@ class RowLocator:
             if not files:
                 return finding
             assert finding.affected is not None
-            return replace(finding, affected=FileIndex(files).annotate(finding.affected))
+            assert finding.row_column is not None
+            return replace(
+                finding, affected=FileIndex(files).annotate(finding.affected, finding.row_column)
+            )
         except Exception as exc:
             logger.warning(
                 "%s", redact_text(f"Files of evidence rows in {dataset}: {exception_details(exc)}")
@@ -88,9 +96,12 @@ class RowLocator:
             return finding
 
     @staticmethod
-    def _positioned(affected: pl.DataFrame | Sequence[Mapping[str, Any]] | None) -> bool:
-        if affected is None or len(affected) == 0:
+    def _positioned(
+        affected: pl.DataFrame | Sequence[Mapping[str, Any]] | None,
+        row_column: str | None = ROW,
+    ) -> bool:
+        if affected is None or len(affected) == 0 or row_column is None:
             return False
         if isinstance(affected, pl.DataFrame):
-            return ROW in affected.columns
-        return all(isinstance(record, Mapping) and ROW in record for record in affected)
+            return row_column in affected.columns
+        return all(isinstance(record, Mapping) and row_column in record for record in affected)

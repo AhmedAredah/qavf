@@ -170,10 +170,12 @@ def _deadline_runner(*rules, timeout=10):
     registry = RuleRegistry()
     for rule in rules or (_ReadsSQL,):
         registry.register(rule)
-    settings = QAVFSettings.model_validate({
-        "plugins": {"entry_points": False},
-        "engine": {"parallel": False, "rule_timeout_s": timeout, "timeout_grace_s": 0.01},
-    })
+    settings = QAVFSettings.model_validate(
+        {
+            "plugins": {"entry_points": False},
+            "engine": {"parallel": False, "rule_timeout_s": timeout, "timeout_grace_s": 0.01},
+        }
+    )
     return QARunner(settings, registry)
 
 
@@ -503,7 +505,8 @@ def test_owned_relations_preserve_values_and_direct_relation_arguments():
         assert left.columns == ["x"]
         assert left.join(right, "x = y").fetchall() == [(1, 1)]
         assert left.union(union_rel=connection.sql("SELECT 2 AS x")).order("x").fetchall() == [
-            (1,), (2,)
+            (1,),
+            (2,),
         ]
 
 

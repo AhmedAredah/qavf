@@ -1,4 +1,5 @@
 """Input source selection, projection and typed reader boundaries."""
+
 from __future__ import annotations
 
 import threading
@@ -39,9 +40,7 @@ def test_projection_never_resolves_a_differently_cased_name(tmp_path, suffix, co
 def test_native_projection_preserves_exact_case_order_and_quoted_names(tmp_path):
     path = tmp_path / "names.csv"
     pl.DataFrame({"Mixed": [1], "a'b": [2], "last": [3]}).write_csv(path)
-    source = FileSource(
-        FileParams(path=str(path), columns=["a'b", "Mixed"]), SourceEnvironment()
-    )
+    source = FileSource(FileParams(path=str(path), columns=["a'b", "Mixed"]), SourceEnvironment())
     assert source.load().to_dicts() == [{"a'b": 2, "Mixed": 1}]
 
 

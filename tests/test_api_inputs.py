@@ -121,9 +121,7 @@ def test_configured_query_obeys_snapshot_connection(tmp_path):
         Query("SELECT x FROM warehouse.readings", connection="warehouse"),
         schema=SCHEMA,
         config={
-            "connections": {
-                "warehouse": {"type": "duckdb", "path": str(path), "snapshot": True}
-            }
+            "connections": {"warehouse": {"type": "duckdb", "path": str(path), "snapshot": True}}
         },
     )
     assert any(r.rule_id == "INP-003" and r.status is Status.FAIL for r in report.results)
@@ -186,9 +184,14 @@ def test_configuration_file_controls_relative_paths(tmp_path, monkeypatch):
 
 def test_resource_limits_use_binary_and_decimal_units_and_preserve_settings():
     resources = ResourceLimits(
-        target_memory="2GiB", cache_memory="1MB", max_spill=0,
-        evidence_rows=0, evidence_bytes="1KiB", report_bytes="2MiB",
-        max_workers=1, native_threads=1,
+        target_memory="2GiB",
+        cache_memory="1MB",
+        max_spill=0,
+        evidence_rows=0,
+        evidence_bytes="1KiB",
+        report_bytes="2MiB",
+        max_workers=1,
+        native_threads=1,
     )
     report = validate(pl.DataFrame({"x": [-1]}), schema=SCHEMA, resources=resources)
     engine = report.metadata.config["engine"]
@@ -200,11 +203,19 @@ def test_resource_limits_use_binary_and_decimal_units_and_preserve_settings():
     assert all(not r.affected_records for r in report.results)
 
 
-@pytest.mark.parametrize("options", [
-    {"target_memory": 0}, {"max_spill": -1}, {"evidence_rows": -1},
-    {"max_workers": True}, {"native_threads": 0}, {"cache_memory": "invalid"},
-    {"evidence_bytes": "0.1B"}, {"report_bytes": 0},
-])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"target_memory": 0},
+        {"max_spill": -1},
+        {"evidence_rows": -1},
+        {"max_workers": True},
+        {"native_threads": 0},
+        {"cache_memory": "invalid"},
+        {"evidence_bytes": "0.1B"},
+        {"report_bytes": 0},
+    ],
+)
 def test_invalid_resource_limits_are_rejected(options):
     with pytest.raises(ValueError):
         ResourceLimits(**options)

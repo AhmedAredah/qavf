@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import functools
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -77,6 +78,12 @@ def _iter_snapshot_json(value: Any) -> Iterator[bytes]:
     a plugin result's) is serialized by Pydantic, for that field alone.
     """
     if isinstance(value, SnapshotModel):
+        analysis = value.analyze() if isinstance(value, QAReport) else None
+        derived = (
+            {"summary": analysis.summary, "acceptance": analysis.acceptance}
+            if analysis is not None
+            else {}
+        )
         model = type(value)
         audited = model.audit_fields
         serialized = _serialized_fields(model)
@@ -92,7 +99,9 @@ def _iter_snapshot_json(value: Any) -> Iterator[bytes]:
                 yield b","
             yield from iter_json_string(name)
             yield b":"
-            if name in _AUDIT_JSON_FIELDS or name in audited:
+            if name in derived:
+                yield from _iter_snapshot_json(derived[name])
+            elif name in _AUDIT_JSON_FIELDS or name in audited:
                 yield from iter_audit_json(getattr(value, name))
             elif name in serialized:
                 yield _json(value.model_dump(mode="json", include={name})[name])
@@ -152,6 +161,10 @@ class RuleResult(SnapshotModel):
     affected_count: int = 0
     """Total number of offending items, counted in :attr:`unit` (may exceed
     ``len(affected_records)``, which is a sample)."""
+    affected_count_exact: bool = True
+    """False when ``affected_count`` is a verified lower bound, not an exact total.
+    This decision-critical field is retained independently of optional evidence.
+    """
     total_records: int | None = None
     """Number of items the rule examined, in the same :attr:`unit`, when meaningful.
     ``None`` when there is no meaningful denominator (e.g. column-level problems)."""
@@ -326,6 +339,55 @@ class Recommendation(SnapshotModel):
     """Failed checks of the rule this advice covers."""
 
 
+@dataclass(frozen=True)
+class ReportAnalysis:
+    """A presentation's policy and roll-up, shared without caching mutable drafts.
+
+    The source results already belong to an immutable QAReport. Recommendations
+    are computed only if requested, and cached on this analysis, not globally.
+    """
+
+    summary: ReportSummary
+    acceptance: Acceptance
+    results: Sequence[RuleResult]
+
+    @functools.cached_property
+    def failure_indices(self) -> tuple[int, ...]:
+        """Severity order preserves each occurrence, including repeated objects."""
+        return tuple(
+            sorted(
+                (index for index, result in enumerate(self.results) if result.failed),
+                key=lambda index: (-self.results[index].severity.rank, self.results[index].rule_id),
+            )
+        )
+
+    @functools.cached_property
+    def failures(self) -> tuple[RuleResult, ...]:
+        return tuple(self.results[index] for index in self.failure_indices)
+
+    @functools.cached_property
+    def recommendations(self) -> tuple[Recommendation, ...]:
+        advice: dict[str, RuleResult] = {}
+        checks: dict[str, list[str]] = {}
+        for index in self.failure_indices:
+            result = self.results[index]
+            if not result.recommendation:
+                continue
+            advice.setdefault(result.rule_id, result)
+            if result.check:
+                checks.setdefault(result.rule_id, []).append(result.check)
+        return tuple(
+            Recommendation(
+                rule_id=rule_id,
+                name=result.name,
+                severity=result.severity,
+                text=result.recommendation,
+                checks=checks.get(rule_id, []),
+            )
+            for rule_id, result in advice.items()
+        )
+
+
 #: Version of the JSON report layout; incremented when fields change meaning or are removed.
 REPORT_FORMAT_VERSION = 5
 
@@ -363,7 +425,7 @@ class QAReport(SnapshotModel):
             skipped=by_status[Status.SKIPPED],
             errored=by_status[Status.ERROR],
             failures_by_severity=by_severity,
-            highest_severity=highest_severity(r.severity for r in self.results if r.failed),
+            highest_severity=highest_severity(s for s, count in by_severity.items() if count),
             by_category=by_category,
         )
 
@@ -372,12 +434,27 @@ class QAReport(SnapshotModel):
     def acceptance(self) -> Acceptance:
         """Verdict and exit code under the run's own policy (``fail_on``,
         ``fail_on_incomplete``), recorded so the JSON is self-describing."""
-        return Acceptance(
-            verdict=self.verdict(),
-            exit_code=self.exit_code(),
-            fail_on=self.metadata.fail_on,
-            fail_on_incomplete=self.metadata.fail_on_incomplete,
+        return self.analyze().acceptance
+
+    def analyze(self, threshold: Severity | None = None) -> ReportAnalysis:
+        """Derive one immutable view under this operation's acceptance policy."""
+        effective = self.metadata.fail_on if threshold is None else threshold
+        summary = self.summary
+        verdict: Literal["passed", "failed", "incomplete"] = (
+            "failed"
+            if self.should_fail(effective)
+            else "incomplete"
+            if summary.errored or not summary.assessed
+            else "passed"
         )
+        incomplete_fails = self.metadata.fail_on_incomplete
+        acceptance = Acceptance(
+            verdict=verdict,
+            exit_code=int(verdict == "failed" or (verdict == "incomplete" and incomplete_fails)),
+            fail_on=effective,
+            fail_on_incomplete=incomplete_fails,
+        )
+        return ReportAnalysis(summary, acceptance, self.results)
 
     def failures(self, min_severity: Severity = Severity.INFO) -> list[RuleResult]:
         """Failed or errored results at or above ``min_severity``, most severe first."""
@@ -386,24 +463,7 @@ class QAReport(SnapshotModel):
 
     def recommendations(self) -> list[Recommendation]:
         """One piece of advice per failed rule (not per check), most severe first."""
-        advice: dict[str, RuleResult] = {}
-        checks: dict[str, list[str]] = {}
-        for result in self.failures():
-            if not result.recommendation:
-                continue
-            advice.setdefault(result.rule_id, result)
-            if result.check:
-                checks.setdefault(result.rule_id, []).append(result.check)
-        return [
-            Recommendation(
-                rule_id=rule_id,
-                name=result.name,
-                severity=result.severity,
-                text=result.recommendation,
-                checks=checks.get(rule_id, []),
-            )
-            for rule_id, result in advice.items()
-        ]
+        return list(self.analyze().recommendations)
 
     def comparisons(self) -> list[Any]:
         """The typed :class:`~qavf.compare.results.DatasetComparison` of each CMP-001
@@ -460,19 +520,12 @@ class QAReport(SnapshotModel):
     ) -> Literal["passed", "failed", "incomplete"]:
         """``failed`` if a failure meets ``threshold``; else ``incomplete`` if checks went
         unassessed (or nothing was assessed); else ``passed``."""
-        if self.should_fail(threshold):
-            return "failed"
-        if self.incomplete:
-            return "incomplete"
-        return "passed"
+        return self.analyze(threshold).acceptance.verdict
 
     def exit_code(self, threshold: Severity | None = None) -> int:
         """Process exit code for CI: ``1`` when the run failed, or was incomplete and
         ``fail_on_incomplete`` is set; else ``0``."""
-        verdict = self.verdict(threshold)
-        if verdict == "failed" or (verdict == "incomplete" and self.metadata.fail_on_incomplete):
-            return 1
-        return 0
+        return self.analyze(threshold).acceptance.exit_code
 
     def iter_json_chunks(self) -> Iterator[bytes]:
         """The canonical compact UTF-8 report encoding, shared by budgets and writes."""

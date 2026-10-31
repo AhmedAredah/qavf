@@ -19,7 +19,7 @@ def test_yaml_merge_and_literal_merge_name_remain_distinct(tmp_path):
 
 @pytest.mark.parametrize(
     "mapping",
-    ['{<<: *base, <<: *base}', '{"<<": first, "<<": second}'],
+    ["{<<: *base, <<: *base}", '{"<<": first, "<<": second}'],
 )
 def test_yaml_duplicate_merge_or_literal_keys_still_rejected(tmp_path, mapping):
     path = tmp_path / "duplicate.yaml"
@@ -68,13 +68,23 @@ def test_numpy_integer_counts_and_budgets_are_supported(monkeypatch):
     ids = pl.Series(range(3))
     coordinates = np.arange(3.0)
     graph = nearest(
-        ids, coordinates, np.zeros(3), np.int64(1), geographic=False,
-        max_edges=np.uint64(3), max_work=np.int64(100),
+        ids,
+        coordinates,
+        np.zeros(3),
+        np.int64(1),
+        geographic=False,
+        max_edges=np.uint64(3),
+        max_work=np.int64(100),
     )
     assert [list(row) for row in graph.neighbours.values()] == [[1], [0], [1]]
     band = distance_band(
-        ids, coordinates, np.zeros(3), 1, geographic=False,
-        max_edges=np.int64(4), max_work=np.uint64(100),
+        ids,
+        coordinates,
+        np.zeros(3),
+        1,
+        geographic=False,
+        max_edges=np.int64(4),
+        max_work=np.uint64(100),
     )
     assert band.pairs == 4
 
@@ -88,7 +98,11 @@ class _NoCoordinates:
 def test_nearest_rejects_known_excess_before_converting_coordinates(budget):
     with pytest.raises(ValueError, match=f"max_{budget}"):
         nearest_graph(
-            _NoCoordinates(), _NoCoordinates(), 100, 4, geographic=False,
+            _NoCoordinates(),
+            _NoCoordinates(),
+            100,
+            4,
+            geographic=False,
             max_edges=399 if budget == "edges" else 400,
             max_work=99 if budget == "work" else 1000,
         )
@@ -97,8 +111,13 @@ def test_nearest_rejects_known_excess_before_converting_coordinates(budget):
 def test_band_rejects_known_excess_before_converting_coordinates():
     with pytest.raises(ValueError, match="max_work"):
         band_graph(
-            _NoCoordinates(), _NoCoordinates(), 100, 1, geographic=False,
-            max_edges=100, max_work=99,
+            _NoCoordinates(),
+            _NoCoordinates(),
+            100,
+            1,
+            geographic=False,
+            max_edges=100,
+            max_work=99,
         )
 
 
@@ -106,6 +125,11 @@ def test_band_rejects_known_excess_before_converting_coordinates():
 def test_noninteger_neighbour_counts_are_rejected_before_conversion(k):
     with pytest.raises(ValueError, match="k must lie"):
         nearest_graph(
-            _NoCoordinates(), _NoCoordinates(), 3, k, geographic=False,
-            max_edges=10, max_work=100,
+            _NoCoordinates(),
+            _NoCoordinates(),
+            3,
+            k,
+            geographic=False,
+            max_edges=10,
+            max_work=100,
         )

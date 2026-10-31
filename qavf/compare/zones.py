@@ -142,6 +142,14 @@ class AssignZonesStep(AlignmentStep):
     Params: ClassVar[type[RuleParams]] = AssignZonesParams
     params: AssignZonesParams
 
+    def describe(self) -> str:
+        """Describe alignment without serializing a live auxiliary input."""
+        options = self.params.model_dump(exclude_defaults=True, exclude={"crosswalk": {"data"}})
+        crosswalk = self.params.crosswalk
+        if crosswalk is not None and crosswalk.data is not None:
+            options.setdefault("crosswalk", {})["data"] = f"<{type(crosswalk.data).__name__} input>"
+        return f"{self.name}: {options}" if options else self.name
+
     def datasets(self) -> frozenset[str]:
         params = self.params
         found: set[str] = set()

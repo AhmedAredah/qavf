@@ -71,7 +71,8 @@ def test_isolation_preserves_automatic_per_connection_thread_sharing(tmp_path, m
     if sys.platform not in SUPPORTED_PLATFORMS:
         with pytest.raises(ExecutionLimitError, match="supports Linux"):
             validate(
-                "unused.parquet", schema={"columns": {"x": {"ge": 0}}},
+                "unused.parquet",
+                schema={"columns": {"x": {"ge": 0}}},
                 resources=ResourceLimits(isolate=True),
             )
         return
@@ -106,8 +107,10 @@ def test_isolation_preserves_automatic_per_connection_thread_sharing(tmp_path, m
         report = validate(
             config=config,
             resources=ResourceLimits(
-                isolate=isolated, wall_time=20 if isolated else None,
-                max_workers=2, temp_dir=tmp_path / "temporary",
+                isolate=isolated,
+                wall_time=20 if isolated else None,
+                max_workers=2,
+                temp_dir=tmp_path / "temporary",
             ),
         )
         assert report.verdict() == "passed"

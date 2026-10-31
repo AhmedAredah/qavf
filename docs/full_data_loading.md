@@ -35,7 +35,9 @@ result = compare_outputs(
     "candidate.parquet",
     keys=["site_id", "year"],
     resources=ResourceLimits(
-        target_memory="1GiB", max_spill="2GiB", evidence_rows=20,
+        target_memory="1GiB",
+        max_spill="2GiB",
+        evidence_rows=20,
         evidence_bytes="64KiB",
     ),
 )

@@ -29,8 +29,9 @@ if TYPE_CHECKING:
     from qavf.engine.runner import QARunner
     from qavf.engine.severity import Severity, Status
     from qavf.execution.errors import ExecutionLimitError
-    from qavf.inputs.descriptors import Dataset, File, Loader, Query
+    from qavf.inputs.descriptors import BatchSource, Dataset, File, Loader, Query
     from qavf.inputs.resources import ResourceLimits
+    from qavf.planning import ValidationPlan, explain
     from qavf.profiling import ProfileResult, profile_input
     from qavf.regression.compare_outputs import (
         assert_outputs_match,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from qavf.sources import DataSource, SourceParams
 
 _EXPORTS = {
+    "BatchSource": "qavf.inputs.descriptors",
     "ComparisonResult": "qavf.regression.models",
     "ConfigurationError": "qavf.engine.compilation",
     "DataContext": "qavf.engine.context",
@@ -68,11 +70,13 @@ _EXPORTS = {
     "Severity": "qavf.engine.severity",
     "SourceParams": "qavf.sources",
     "Status": "qavf.engine.severity",
+    "ValidationPlan": "qavf.planning",
     "assert_outputs_match": "qavf.regression.compare_outputs",
     "build_registry": "qavf.engine.compilation",
     "compare_datasets": "qavf.compare.api",
     "compare_frames": "qavf.regression.compare_outputs",
     "compare_outputs": "qavf.regression.compare_outputs",
+    "explain": "qavf.planning",
     "load_settings": "qavf.settings",
     "profile_input": "qavf.profiling",
     "register": "qavf.engine.registry",
@@ -82,6 +86,7 @@ _EXPORTS = {
 }
 
 __all__ = [
+    "BatchSource",
     "ComparisonResult",
     "ConfigurationError",
     "DataContext",
@@ -106,12 +111,14 @@ __all__ = [
     "Severity",
     "SourceParams",
     "Status",
+    "ValidationPlan",
     "__version__",
     "assert_outputs_match",
     "build_registry",
     "compare_datasets",
     "compare_frames",
     "compare_outputs",
+    "explain",
     "load_settings",
     "profile_input",
     "register",

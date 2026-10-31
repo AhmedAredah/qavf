@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import KW_ONLY, dataclass, field
 from types import MappingProxyType
 from typing import Any
 
 import duckdb
+import polars as pl
 
 from qavf.settings import DatasetSpec, ExpressionCheck, ForeignKeySpec, SchemaSpec, SourcePolicy
 from qavf.sources.base import SourceError
@@ -34,6 +36,7 @@ class File:
     columns: Sequence[str] | None = None
     text_columns: Sequence[str] = ()
     max_rejected_rows: int = 0
+    rejects_budget: int = 1000
     min_files: int | None = None
     acknowledge_lossy: bool = False
 
@@ -51,6 +54,7 @@ class File:
                 "columns": self.columns,
                 "text_columns": list(self.text_columns),
                 "max_rejected_rows": self.max_rejected_rows,
+                "rejects_budget": self.rejects_budget,
                 "min_files": self.min_files,
                 "acknowledge_lossy": self.acknowledge_lossy,
             }
@@ -73,6 +77,7 @@ class File:
                 "columns": self.columns,
                 "text_columns": list(self.text_columns),
                 "max_rejected_rows": self.max_rejected_rows,
+                "rejects_budget": self.rejects_budget,
                 "min_files": self.min_files,
                 "acknowledge_lossy": self.acknowledge_lossy,
             }
@@ -184,7 +189,7 @@ class Loader:
     By default it is invoked once. Retries require an explicit loading policy,
     ``replayable=True``, ``retry_safe=True`` and a retryable SourceError. A borrowed
     one-pass iterator is not an accepted return value: wrap a function that
-    produces a fresh supported dataset or use an explicit source plugin.
+    produces a fresh supported dataset, or use BatchSource for owned batches.
     Keyword bindings are copied and frozen, but nested values and external
     handles are not copied. Keep their state stable while validation is active.
     """
@@ -205,4 +210,51 @@ class Loader:
             raise TypeError("Loader replayable and retry_safe must be booleans")
         if self.retry_safe and not self.replayable:
             raise ValueError("a retry-safe Loader must also be replayable")
+        object.__setattr__(self, "kwargs", MappingProxyType(dict(self.kwargs)))
+
+
+@dataclass(frozen=True, slots=True)
+class BatchSource:
+    """An owned stream factory, snapshotted once by the managed execution engine.
+
+    ``factory(**kwargs)`` returns a context manager yielding an iterable of eager
+    Polars/pandas frames or Arrow tables/record batches. The manager closes the
+    stream on success, error and cancellation. Cancellation is checked between
+    batches; callbacks that block must provide their own interruptible I/O.
+    The declared schema is checked without opening the stream. Every batch must
+    have exactly that schema and order. QAVF retains or spills one coherent
+    snapshot under the run's resource policy for all subsequent checks.
+
+    A fresh stream may be opened after failure only when replayable/retry_safe
+    and a configured retry policy explicitly permit it. Those declarations do
+    not permit different populations to be combined in a successful snapshot.
+    Live factories cannot be transported to isolated execution.
+    """
+
+    factory: Callable[..., AbstractContextManager[Iterable[object]]]
+    schema: Mapping[str, pl.DataType | type[pl.DataType]]
+    kwargs: Mapping[str, Any] = field(default_factory=dict)
+    replayable: bool = False
+    retry_safe: bool = False
+
+    def __post_init__(self) -> None:
+        if not callable(self.factory):
+            raise TypeError("BatchSource.factory must be callable")
+        if not isinstance(self.schema, Mapping) or not self.schema:
+            raise ValueError("BatchSource.schema must be a nonempty column/type mapping")
+        if any(not isinstance(name, str) or not name for name in self.schema):
+            raise TypeError("BatchSource schema column names must be nonempty strings")
+        try:
+            schema = dict(pl.Schema(self.schema))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid BatchSource schema: {exc}") from None
+        if not isinstance(self.kwargs, Mapping) or any(
+            not isinstance(key, str) for key in self.kwargs
+        ):
+            raise TypeError("BatchSource.kwargs must be a mapping with string keys")
+        if not isinstance(self.replayable, bool) or not isinstance(self.retry_safe, bool):
+            raise TypeError("BatchSource replayable and retry_safe must be booleans")
+        if self.retry_safe and not self.replayable:
+            raise ValueError("a retry-safe BatchSource must also be replayable")
+        object.__setattr__(self, "schema", MappingProxyType(schema))
         object.__setattr__(self, "kwargs", MappingProxyType(dict(self.kwargs)))

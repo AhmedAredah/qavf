@@ -104,8 +104,14 @@ def _azure_options(value: str) -> dict[str, str]:
     """Translate blob endpoint identity or reject unsupported modes explicitly."""
     fields = _connection_string(value)
     supported = {
-        "accountname", "accountkey", "sharedaccesssignature", "blobendpoint",
-        "defaultendpointsprotocol", "endpointsuffix", "queueendpoint", "tableendpoint",
+        "accountname",
+        "accountkey",
+        "sharedaccesssignature",
+        "blobendpoint",
+        "defaultendpointsprotocol",
+        "endpointsuffix",
+        "queueendpoint",
+        "tableendpoint",
         "fileendpoint",
     }
     if set(fields) - supported:
@@ -118,9 +124,7 @@ def _azure_options(value: str) -> dict[str, str]:
     if protocol not in ("http", "https"):
         raise SourceError("Azure DefaultEndpointsProtocol must be http or https")
     endpoint = fields.get("blobendpoint")
-    if endpoint is None and (
-        "endpointsuffix" in fields or "defaultendpointsprotocol" in fields
-    ):
+    if endpoint is None and ("endpointsuffix" in fields or "defaultendpointsprotocol" in fields):
         account = fields.get("accountname")
         suffix = fields.get("endpointsuffix", "core.windows.net")
         if not account or not suffix:

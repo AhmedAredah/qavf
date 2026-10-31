@@ -20,8 +20,13 @@ def test_every_host_runs_full_source_and_wheel_modes(platform_checks, tmp_path, 
     plan = dict(platform_checks.command_plan(tmp_path, tmp_path / "evidence", label))
     assert "--optimized" in plan["source-optimized"]
     # Inspect arguments, not substrings of caller-owned absolute paths.
-    expected = ["test", "--id", f"{label}-source", "--output",
-                str(tmp_path / "evidence" / f"{label}-source.json")]
+    expected = [
+        "test",
+        "--id",
+        f"{label}-source",
+        "--output",
+        str(tmp_path / "evidence" / f"{label}-source.json"),
+    ]
     if label == "linux-3.12":
         expected.append("--coverage")
     assert plan["source"][2:] == expected
@@ -30,8 +35,9 @@ def test_every_host_runs_full_source_and_wheel_modes(platform_checks, tmp_path, 
     assert all(isinstance(argv, list) for argv in plan.values())
 
 
-@pytest.mark.parametrize("system,minor", [("FreeBSD", 12), ("Windows", 13),
-                                         ("Darwin", 14), ("Linux", 11)])
+@pytest.mark.parametrize(
+    "system,minor", [("FreeBSD", 12), ("Windows", 13), ("Darwin", 14), ("Linux", 11)]
+)
 def test_unsupported_hosts_are_rejected(platform_checks, monkeypatch, system, minor):
     monkeypatch.setattr(platform_checks.platform, "system", lambda: system)
     monkeypatch.setattr(sys, "version_info", SimpleNamespace(major=3, minor=minor))
@@ -40,7 +46,9 @@ def test_unsupported_hosts_are_rejected(platform_checks, monkeypatch, system, mi
 
 
 def test_failed_build_blocks_stale_artifacts_and_keeps_source_checks(
-    platform_checks, monkeypatch, tmp_path,
+    platform_checks,
+    monkeypatch,
+    tmp_path,
 ):
     calls = []
     monkeypatch.setattr(platform_checks, "host_label", lambda: "linux-3.12")
@@ -73,7 +81,10 @@ def test_evidence_cannot_overwrite_source(platform_checks, monkeypatch, tmp_path
 
 @pytest.mark.parametrize("interrupt", [False, True])
 def test_exit_codes_without_records_never_qualify(
-    platform_checks, monkeypatch, tmp_path, interrupt,
+    platform_checks,
+    monkeypatch,
+    tmp_path,
+    interrupt,
 ):
     monkeypatch.setattr(platform_checks, "host_label", lambda: "linux-3.12")
     monkeypatch.setattr(platform_checks.shutil, "which", lambda _: "uv")
@@ -98,15 +109,18 @@ def test_exit_codes_without_records_never_qualify(
 
 
 def test_unicode_evidence_directory_with_legacy_redirected_output(
-    platform_checks, monkeypatch, tmp_path,
+    platform_checks,
+    monkeypatch,
+    tmp_path,
 ):
     import io
 
     monkeypatch.setattr(platform_checks, "host_label", lambda: "windows-3.12")
     monkeypatch.setattr(platform_checks.shutil, "which", lambda _: "uv")
     monkeypatch.setattr(platform_checks, "repository_identity", lambda _: {})
-    monkeypatch.setattr(platform_checks.subprocess, "run",
-                        lambda *args, **kwargs: SimpleNamespace(returncode=1))
+    monkeypatch.setattr(
+        platform_checks.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=1)
+    )
     buffer = io.BytesIO()
     stream = io.TextIOWrapper(buffer, encoding="ascii", errors="strict")
     monkeypatch.setattr(sys, "stdout", stream)

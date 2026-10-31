@@ -68,15 +68,17 @@ configured QA contracts and common loading safeguards remain in effect.
 ```python
 from qavf import Dataset, File, validate
 
-report = validate({
-    "counts": Dataset(
-        File("counts.csv", options={"delim": ";"}),
-        schema={"columns": {"site_id": {"dtype": "str"}, "count": {"ge": 0}}},
-        foreign_keys=[{"columns": ["site_id"], "ref_dataset": "sites"}],
-        load_policy={"row_budget": 1_000_000},
-    ),
-    "sites": Dataset("sites.parquet", schema={"primary_key": ["site_id"]}),
-})
+report = validate(
+    {
+        "counts": Dataset(
+            File("counts.csv", options={"delim": ";"}),
+            schema={"columns": {"site_id": {"dtype": "str"}, "count": {"ge": 0}}},
+            foreign_keys=[{"columns": ["site_id"], "ref_dataset": "sites"}],
+            load_policy={"row_budget": 1_000_000},
+        ),
+        "sites": Dataset("sites.parquet", schema={"primary_key": ["site_id"]}),
+    }
+)
 ```
 
 `Dataset` associates an input with its `schema`, `rename`, `foreign_keys`,
@@ -225,6 +227,7 @@ example, this method belongs inside a rule that reads only `counts`:
 ```python
 from qavf import DataRequirements
 
+
 def data_requirements(self, settings):
     return DataRequirements(
         frozenset({"counts"}),
@@ -241,3 +244,56 @@ declares availability prerequisites and is not treated as a complete access list
 Built-in rules use the same explicit hook as plugins. Dynamic or incomplete
 declarations remain conservative; the planner never infers ownership from a
 module name or a parameter's spelling.
+
+## Explain checks without reading datasets
+
+```python
+from qavf import explain
+
+plan = explain(
+    "counts.parquet",
+    schema={"columns": {"aadt": {"dtype": "float", "ge": 0}}},
+    profile="validity",
+)
+print(plan.model_dump_json(indent=2))
+```
+
+The immutable `ValidationPlan` lists selected rules, declared dataset/column
+dependencies, known kinds of work, resource settings, excluded checks, and
+unresolved information. It does not open input files, call loaders, collect lazy
+frames, or consume Arrow protocols. File-based configuration itself is read.
+Observed schemas, row counts, exact physical scans, and native working memory
+remain unknown until execution; declared columns do not imply a safe projection.
+
+By default, configured and installed plugin discovery is not performed, and the
+plan discloses this in `unresolved`. `load_plugins=True` opts into ordinary plugin
+imports and configuration hooks, which are trusted Python execution and may do
+their own I/O. QAVF does not request dataset evaluation. `complete` means planning information was resolved,
+not that data has been validated.
+
+## Explicit check profiles
+
+`validate(..., profile="validity")` adds INP-001 through INP-007 for declared
+schema, keys, references, expressions, and assertions. It requires an explicit
+contract and keeps every explicitly configured check. It does not learn limits
+from the same data being assessed. Conflicting disabled checks or category
+filters are configuration errors.
+
+`profile="regression"` also requires enabled `REG-001` with `baselines`;
+`profile="change"` requires enabled `CMP-001` with `comparisons`. Both include
+the declared input checks. Expanded checks appear in the effective configuration
+and profile provenance. Unconfigured unrelated rules are not selected.
+
+For valid and stable geography, declare coordinate/domain bounds and configure
+location comparison. For stable ratios and complete groups, configure both
+relationship and coverage levels. Profiles do not invent those domain rules or
+silently broaden specialized comparisons.
+
+## Editor-visible input contracts
+
+The `validate` and `compare_datasets` stub facades describe supported paths,
+descriptors, Polars frames, compatible pandas/Arrow objects, and named datasets.
+A plain mapping names datasets; it is not a dictionary of dataframe columns.
+The runtime adapter remains authoritative for ownership and supported dtypes.
+Static annotations do not prove replayability or memory limits. A plain
+`import qavf` continues to defer heavyweight integrations.

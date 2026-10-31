@@ -27,8 +27,15 @@ def host_label() -> str:
 def command_plan(root: Path, output: Path, label: str) -> list[tuple[str, list[str]]]:
     python = sys.executable
     release = str(root / "scripts" / "verify_release.py")
-    normal = [python, release, "test", "--id", f"{label}-source",
-              "--output", str(output / f"{label}-source.json")]
+    normal = [
+        python,
+        release,
+        "test",
+        "--id",
+        f"{label}-source",
+        "--output",
+        str(output / f"{label}-source.json"),
+    ]
     if label == "linux-3.12":
         normal.append("--coverage")
     return [
@@ -36,11 +43,33 @@ def command_plan(root: Path, output: Path, label: str) -> list[tuple[str, list[s
         ("payload", [python, str(root / "scripts" / "verify_dist.py")]),
         ("extensions", [python, release, "extensions"]),
         ("source", normal),
-        ("source-optimized", [python, release, "test", "--optimized", "--id",
-                              f"{label}-source-optimized", "--output",
-                              str(output / f"{label}-source-optimized.json")]),
-        ("wheel", [python, release, "installed", "--mode", "locked", "--id",
-                   f"{label}-wheel", "--output-dir", str(output)]),
+        (
+            "source-optimized",
+            [
+                python,
+                release,
+                "test",
+                "--optimized",
+                "--id",
+                f"{label}-source-optimized",
+                "--output",
+                str(output / f"{label}-source-optimized.json"),
+            ],
+        ),
+        (
+            "wheel",
+            [
+                python,
+                release,
+                "installed",
+                "--mode",
+                "locked",
+                "--id",
+                f"{label}-wheel",
+                "--output-dir",
+                str(output),
+            ],
+        ),
     ]
 
 
@@ -57,8 +86,9 @@ def verify_platform(root: Path, output: Path) -> int:
     output.mkdir(parents=True, exist_ok=True)
     identity = repository_identity(root)
     environment = os.environ.copy()
-    environment.update(POLARS_MAX_THREADS="2", OPENBLAS_NUM_THREADS="1",
-                       OMP_NUM_THREADS="1", PYTHONUTF8="1")
+    environment.update(
+        POLARS_MAX_THREADS="2", OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", PYTHONUTF8="1"
+    )
     steps: list[dict[str, Any]] = []
     build_ok = False
     interrupted = False
@@ -70,10 +100,22 @@ def verify_platform(root: Path, output: Path) -> int:
             print(f"Running {name}; log: {str(output / (name + '.log'))!a}", flush=True)
             try:
                 with (output / f"{name}.log").open("wb") as log:
-                    code = subprocess.run(argv, cwd=root, env=environment, stdout=log,
-                                          stderr=subprocess.STDOUT, check=False).returncode
-                steps.append({"name": name, "argv": argv, "exit_code": code,
-                              "status": "passed" if code == 0 else "failed"})
+                    code = subprocess.run(
+                        argv,
+                        cwd=root,
+                        env=environment,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        check=False,
+                    ).returncode
+                steps.append(
+                    {
+                        "name": name,
+                        "argv": argv,
+                        "exit_code": code,
+                        "status": "passed" if code == 0 else "failed",
+                    }
+                )
                 if name == "build":
                     build_ok = code == 0
             except OSError as error:
@@ -90,15 +132,24 @@ def verify_platform(root: Path, output: Path) -> int:
                     records.append(record)
             except (OSError, ValueError):
                 continue
-        expected = {f"{label}-{suffix}" for suffix in (
-            "source", "source-optimized", "wheel", "wheel-optimized", "wheel-setup")}
+        expected = {
+            f"{label}-{suffix}"
+            for suffix in ("source", "source-optimized", "wheel", "wheel-optimized", "wheel-setup")
+        }
         errors = evidence_errors(records, identity, expected)
         if repository_identity(root) != identity:
             errors.append("source changed during verification")
         passed = not interrupted and not errors and all(s["status"] == "passed" for s in steps)
-        write_json(output / "platform-summary.json", {
-            "platform": label, "identity": identity, "steps": steps, "errors": errors,
-            "status": "passed" if passed else "blocked", "interrupted": interrupted,
-            "release_ready": False,
-        })
+        write_json(
+            output / "platform-summary.json",
+            {
+                "platform": label,
+                "identity": identity,
+                "steps": steps,
+                "errors": errors,
+                "status": "passed" if passed else "blocked",
+                "interrupted": interrupted,
+                "release_ready": False,
+            },
+        )
     return 0 if passed else 1

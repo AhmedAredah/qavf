@@ -10,8 +10,7 @@ import polars as pl
 from qavf.redaction import redact_text
 from qavf.sources.base import DataSource, SourceError, SourceParams
 from qavf.sources.errors import redacted_error
-from qavf.sources.frames import as_polars
-from qavf.sources.native import check_budget
+from qavf.sources.frames import admitted_frame
 from qavf.sources.parameters import PythonParams
 
 
@@ -39,7 +38,7 @@ class PythonSource(DataSource[PythonParams]):
                     if self.params.row_budget is not None
                     else result
                 )
-            return check_budget(as_polars(result), self.params.row_budget, self.describe())
+            return admitted_frame(result, self.params.row_budget, self.describe())
         except Exception as exc:
             raise redacted_error(
                 SourceError(

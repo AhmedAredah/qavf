@@ -244,7 +244,10 @@ def test_formats_and_boolean_words_convert_the_same_on_both_paths(tmp_path, kind
     schema = {
         "columns": {
             "day": {
-                "dtype": "date", "format": "%m/%d/%Y", "nullable": True, "ge": date(2024, 2, 1)
+                "dtype": "date",
+                "format": "%m/%d/%Y",
+                "nullable": True,
+                "ge": date(2024, 2, 1),
             },
             "ok": {"dtype": "bool", "true_values": ["Y"], "false_values": ["N"], "nullable": True},
         }

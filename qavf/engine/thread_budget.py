@@ -27,9 +27,7 @@ def startup_threads(explicit: int | None, *, cpu_count: int | None = None) -> in
     return explicit if explicit is not None else max(1, min(8, cpus or 1))
 
 
-def connection_threads(
-    explicit: int | None, workers: int, *, cpu_count: int | None = None
-) -> int:
+def connection_threads(explicit: int | None, workers: int, *, cpu_count: int | None = None) -> int:
     """Share automatic query threads across workers; preserve explicit intent."""
     cpus = cpu_count if cpu_count is not None else os.cpu_count()
     return explicit if explicit is not None else max(1, (cpus or 1) // max(1, workers))

@@ -1,4 +1,5 @@
 """Output path collisions and optional dependency coverage."""
+
 from __future__ import annotations
 
 import json
@@ -20,11 +21,16 @@ def test_report_collision_preserves_existing_file(tmp_path, capsys, command):
     target = tmp_path / "qa_report.json"
     target.write_text("previous report", encoding="utf-8")
     config = tmp_path / "config.json"
-    config.write_text(json.dumps({
-        "datasets": {"data": {"path": str(data), "schema": {"columns": {"x": {"ge": 0}}}}},
-        "plugins": {"entry_points": False},
-        "report": {"output_dir": str(tmp_path)},
-    }), encoding="utf-8")
+    config.write_text(
+        json.dumps(
+            {
+                "datasets": {"data": {"path": str(data), "schema": {"columns": {"x": {"ge": 0}}}}},
+                "plugins": {"entry_points": False},
+                "report": {"output_dir": str(tmp_path)},
+            }
+        ),
+        encoding="utf-8",
+    )
     if command == "compare-datasets":
         arguments = [command, str(data), str(data), "--no-plugins"]
     else:

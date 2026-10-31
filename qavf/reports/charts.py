@@ -12,7 +12,6 @@ a hatch pattern, and each mark has a ``<title>`` with its exact value.
 
 from __future__ import annotations
 
-import itertools
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -127,13 +126,22 @@ def horizontal_bars(rows: Sequence[BarRow], aria_label: str) -> Markup:
 # ------------------------------------------------------ comparison charts
 _PLOT_WIDTH = 560
 _EMPTY = Markup('<p class="empty">Nothing to show.</p>')
-_ids = itertools.count(1)
 
 
-def reset_ids() -> None:
-    """Number pattern ids from 1 again, so one document renders deterministically."""
-    global _ids
-    _ids = itertools.count(1)
+@dataclass(slots=True)
+class RenderState:
+    """One document's deterministic SVG identifiers, including suspended renders.
+
+    Pass the same state when embedding several standalone charts. Without one,
+    each chart is a standalone document with its own identifier namespace.
+    """
+
+    _next_id: int = 1
+
+    def identifier(self, role: str) -> str:
+        identifier = f"{role}-{self._next_id}"
+        self._next_id += 1
+        return identifier
 
 
 def signed(value: float | None, percent: bool = False) -> str:
@@ -155,9 +163,16 @@ def plain(value: float | None) -> str:
     return text[1:] if text.startswith("+") else text
 
 
-def _open(width: float, height: float, aria: str, css: str = "chart cmp") -> tuple[str, str]:
+def _open(
+    width: float,
+    height: float,
+    aria: str,
+    css: str = "chart cmp",
+    *,
+    state: RenderState | None = None,
+) -> tuple[str, str]:
     """The ``<svg>`` start with its hatch pattern, and the pattern's id."""
-    hatch = f"hatch-{next(_ids)}"
+    hatch = (state if state is not None else RenderState()).identifier("hatch")
     return (
         f'<svg class="{css}" viewBox="0 0 {width:g} {height:g}" role="img" '
         f'aria-label="{escape(bounded(aria))}" preserveAspectRatio="xMinYMin meet">'
@@ -225,7 +240,9 @@ class WaterfallStep:
     kind: str = "change"
 
 
-def waterfall(steps: Sequence[WaterfallStep], aria: str) -> Markup:
+def waterfall(
+    steps: Sequence[WaterfallStep], aria: str, *, state: RenderState | None = None
+) -> Markup:
     """Baseline total, each member's change, candidate total: horizontal bars.
 
     Increases are solid, decreases hatched, and every bar is labelled with its
@@ -254,7 +271,7 @@ def waterfall(steps: Sequence[WaterfallStep], aria: str) -> Markup:
         return _UNPLOTTABLE
     left, area = 170.0, _PLOT_WIDTH - 170.0 - 70.0
     height = len(steps) * 24 + 26
-    svg, hatch = _open(_PLOT_WIDTH, height, aria)
+    svg, hatch = _open(_PLOT_WIDTH, height, aria, state=state)
     parts = [svg]
     parts.append(f'<line class="axis" x1="{left}" y1="0" x2="{left}" y2="{height - 16}"/>')
     parts.append(_text(left, height - 8, f"axis from {plain(low)}", "tick"))
@@ -291,6 +308,7 @@ def heat_map(
     *,
     percent: bool = True,
     labels: bool = True,
+    state: RenderState | None = None,
 ) -> Markup:
     """A ``rows x columns`` grid of changes in five diverging classes, with a legend.
 
@@ -305,7 +323,7 @@ def heat_map(
     rowh = 18.0 if labels else 12.0
     width = left + cell * len(columns)
     height = top + rowh * len(rows) + 14 + _LEGEND_HEIGHT
-    svg, hatch = _open(width, height, aria)
+    svg, hatch = _open(width, height, aria, state=state)
     parts = [svg]
     step = max(1, math.ceil(len(columns) / max(1, (width - left) // 60)))
     shown = [bounded(column) for column in columns]
@@ -345,6 +363,8 @@ def series_lines(
     baseline: Sequence[float | None],
     candidate: Sequence[float | None],
     aria: str,
+    *,
+    state: RenderState | None = None,
 ) -> Markup:
     """Baseline (solid, circles) and candidate (dashed, squares) per bucket."""
     values = [v for v in (*baseline, *candidate) if v is not None and math.isfinite(v)]
@@ -356,7 +376,7 @@ def series_lines(
     left, top, plot_h = 60.0, 24.0, 150.0
     area = _PLOT_WIDTH - left - 10
     height = top + plot_h + 36
-    svg, _ = _open(_PLOT_WIDTH, height, aria)
+    svg, _ = _open(_PLOT_WIDTH, height, aria, state=state)
     parts = [svg]
 
     def x_of(i: int) -> float:
@@ -383,9 +403,7 @@ def series_lines(
         (candidate, "line-cand", "rect"),
     ):
         points = [
-            (x_of(i), y_of(v))
-            for i, v in enumerate(series)
-            if v is not None and math.isfinite(v)
+            (x_of(i), y_of(v)) for i, v in enumerate(series) if v is not None and math.isfinite(v)
         ]
         if not points:
             continue
@@ -393,9 +411,7 @@ def series_lines(
         parts.append(f'<path class="{css}" d="{path}"/>')
         name = "baseline" if css == "line-base" else "candidate"
         if len(points) <= 120:
-            present = [
-                (i, v) for i, v in enumerate(series) if v is not None and math.isfinite(v)
-            ]
+            present = [(i, v) for i, v in enumerate(series) if v is not None and math.isfinite(v)]
             for (x, y), (i, v) in zip(points, present, strict=True):
                 title = f"{labels[i]} · {name}: {plain(v)}"
                 shape = (
@@ -417,7 +433,12 @@ def series_lines(
 
 
 def paired_bars(
-    labels: Sequence[str], baseline: Sequence[float], candidate: Sequence[float], aria: str
+    labels: Sequence[str],
+    baseline: Sequence[float],
+    candidate: Sequence[float],
+    aria: str,
+    *,
+    state: RenderState | None = None,
 ) -> Markup:
     """Each side's share per bin or category: baseline solid, candidate hatched."""
     if not labels:
@@ -427,7 +448,7 @@ def paired_bars(
     group = (_PLOT_WIDTH - left - 10) / len(labels)
     bar = max(min(group / 2 - 1, 22.0), 1.0)
     height = top + plot_h + 40
-    svg, hatch = _open(_PLOT_WIDTH, height, aria)
+    svg, hatch = _open(_PLOT_WIDTH, height, aria, state=state)
     parts = [svg]
     parts.append(f'<line class="axis" x1="{left}" y1="{top + plot_h}" x2="{_PLOT_WIDTH - 10}" '
                  f'y2="{top + plot_h}"/>')  # fmt: skip
@@ -460,7 +481,13 @@ def paired_bars(
     return Markup("".join(parts))
 
 
-def deltas(labels: Sequence[str], values: Sequence[float], aria: str) -> Markup:
+def deltas(
+    labels: Sequence[str],
+    values: Sequence[float],
+    aria: str,
+    *,
+    state: RenderState | None = None,
+) -> Markup:
     """Signed changes as bars around zero (quantile deltas), each labelled."""
     if not labels:
         return _EMPTY
@@ -468,7 +495,7 @@ def deltas(labels: Sequence[str], values: Sequence[float], aria: str) -> Markup:
     left, area = 90.0, _PLOT_WIDTH - 90.0 - 80.0
     middle = left + area / 2
     height = len(labels) * 22 + 10
-    svg, hatch = _open(_PLOT_WIDTH, height, aria)
+    svg, hatch = _open(_PLOT_WIDTH, height, aria, state=state)
     parts = [svg, f'<line class="axis" x1="{middle}" y1="0" x2="{middle}" y2="{height}"/>']
     for i, (label, value) in enumerate(zip(map(bounded, labels), values, strict=True)):
         top = i * 22 + 5
@@ -500,6 +527,7 @@ def choropleth(
     *,
     percent: bool = True,
     labels: bool = True,
+    state: RenderState | None = None,
 ) -> Markup:
     """Zones filled by their change in five diverging classes; decreases hatched.
 
@@ -512,7 +540,9 @@ def choropleth(
     scale = max(finite, default=0.0)
     width, height = size
     zoom = max(width / _PLOT_WIDTH, 1.0)
-    svg, hatch = _open(width, height + (_LEGEND_HEIGHT + 16) * zoom, aria, "chart cmp map")
+    svg, hatch = _open(
+        width, height + (_LEGEND_HEIGHT + 16) * zoom, aria, "chart cmp map", state=state
+    )
     parts = [svg]
     for zone, path in paths.items():
         value = values.get(zone)

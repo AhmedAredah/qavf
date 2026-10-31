@@ -51,8 +51,12 @@ def test_typed_quota_projection_evaluates_once_and_releases_admission():
             raise AssertionError("typed reader expected")
 
         def scan_polars(self):
-            return pl.DataFrame({"x": range(100)}).lazy().map_batches(
-                lambda frame: (calls.append(frame.height), frame)[1], schema={"x": pl.Int64}
+            return (
+                pl.DataFrame({"x": range(100)})
+                .lazy()
+                .map_batches(
+                    lambda frame: (calls.append(frame.height), frame)[1], schema={"x": pl.Int64}
+                )
             )
 
     source = Typed(SourceParams(type=Typed.kind, row_budget=1000), SourceEnvironment())
@@ -186,7 +190,8 @@ def test_observation_and_frame_cache_share_one_retention_envelope():
     batches_available = hasattr(pl.LazyFrame, "collect_batches")
     with DataContext(
         frames={"d": pl.DataFrame({"x": range(500)}).lazy()},
-        cache_max_bytes=8000, spill_max_bytes=100_000,
+        cache_max_bytes=8000,
+        spill_max_bytes=100_000,
     ) as ctx:
         with ctx.observe("d") as observed:
             ctx._frames["another"] = pl.DataFrame({"x": range(600)})
@@ -241,7 +246,8 @@ def test_incremental_observation_spills_without_replaying_source():
 def test_no_memory_or_disk_capacity_fails_without_leaking_partial_observation():
     with DataContext(
         frames={"d": pl.DataFrame({"x": range(1000)}).lazy()},
-        cache_max_bytes=0, spill_max_bytes=100,
+        cache_max_bytes=0,
+        spill_max_bytes=100,
     ) as ctx:
         with pytest.raises(ResourceLimitError), ctx.observe("d"):
             pytest.fail("over-capacity observation was accepted")
@@ -256,10 +262,12 @@ def test_small_memory_target_reduces_rule_concurrency_before_native_oom():
         category = "custom"
 
         def evaluate(self, ctx):
-            assert ctx.sql(
-                "SELECT i % 10000 AS k, count(*) AS n "
-                "FROM range(100000) AS t(i) GROUP BY k"
-            ).height == 10000
+            assert (
+                ctx.sql(
+                    "SELECT i % 10000 AS k, count(*) AS n FROM range(100000) AS t(i) GROUP BY k"
+                ).height
+                == 10000
+            )
             return Finding.ok("assessed")
 
     registry = RuleRegistry()

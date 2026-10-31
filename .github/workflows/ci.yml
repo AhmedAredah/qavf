@@ -1,79 +1,48 @@
 name: CI
-
-"on":
+on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+    paths-ignore: ['docs/**', '*.md']
   pull_request:
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+    paths-ignore: ['docs/**', '*.md']
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
-
 env:
-  UV_VERSION: "0.13.5"
-  POLARS_MAX_THREADS: "2"
-  OPENBLAS_NUM_THREADS: "1"
-  OMP_NUM_THREADS: "1"
-
-defaults:
-  run:
-    shell: bash
-
-# Routine checks only. The full source/wheel matrix, dependency floors and live
-# services run in verify.yml on release tags.
+  POLARS_MAX_THREADS: '2'
+  OPENBLAS_NUM_THREADS: '1'
+  OMP_NUM_THREADS: '1'
 jobs:
-  test:
-    name: Lint, types and tests (Linux)
+  quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          version: ${{ env.UV_VERSION }}
-          python-version: "3.12"
-          enable-cache: true
-      - run: uv sync --locked --all-extras --group dev
-      # Spatial tests need DuckDB's spatial extension; install it (and the others) once.
-      - run: uv run --no-sync python scripts/verify_release.py extensions
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-extras
       - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
       - run: uv run --no-sync mypy qavf scripts
+      - run: uv run --no-sync python -m mypy --warn-unused-ignores tests/typing/inputs.py
       - run: uv run --no-sync python scripts/generate_docs.py --check
-      - run: uv run --no-sync python -m pytest -q -p no:cacheprovider -m "not integration"
-
-  platforms:
-    name: Platform-specific tests (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+  source:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          version: ${{ env.UV_VERSION }}
-          python-version: "3.12"
-          enable-cache: true
-      - run: uv sync --locked --all-extras --group dev
-      # Code paths that differ by operating system: isolation, locking, numerics,
-      # file identity, portability and benchmark measurement.
-      - run: >-
-          uv run --no-sync python -m pytest -q -p no:cacheprovider
-          tests/test_isolated_supervisor.py tests/test_execution_isolation.py
-          tests/test_execution_policy.py tests/test_isolation_transport.py
-          tests/test_regression_exactness.py tests/test_statistical_rules.py
-          tests/test_scan_identity.py tests/test_loading_native_binding.py
-          tests/test_performance_metrics.py tests/test_performance_runner.py
-          tests/test_performance_process_tree.py tests/test_platform_portability.py
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --all-extras
+      - run: uv run --no-sync python scripts/verify_release.py extensions
+      - run: uv run --no-sync python -m pytest -m "not integration"

@@ -10,6 +10,12 @@ import polars as pl
 from qavf.sources.base import SourceError
 
 
+def _optional_types(module: str, *names: str) -> tuple[type, ...]:
+    """Do not mistake publication in sys.modules for completed initialization."""
+    loaded = sys.modules.get(module)
+    return tuple(kind for name in names if isinstance(kind := getattr(loaded, name, None), type))
+
+
 def _adapter_kind(frame: object) -> str | None:
     """One non-consuming admission decision shared by detection and conversion."""
     if isinstance(frame, pl.DataFrame):
@@ -18,14 +24,14 @@ def _adapter_kind(frame: object) -> str | None:
         return "lazy"
     if callable(getattr(frame, "read_next_batch", None)):
         return None
-    pandas = sys.modules.get("pandas")
-    if pandas is not None and isinstance(frame, pandas.DataFrame):
+    if isinstance(frame, _optional_types("pandas", "DataFrame")):
         return "pandas"
-    arrow = sys.modules.get("pyarrow")
     if callable(getattr(frame, "__arrow_c_stream__", None)) or (
-        arrow is not None and isinstance(frame, arrow.Table | arrow.RecordBatch)
+        isinstance(frame, _optional_types("pyarrow", "Table", "RecordBatch"))
     ):
         return "arrow"
+    if callable(getattr(frame, "__dataframe__", None)):
+        return "interchange"
     return None
 
 
@@ -45,12 +51,23 @@ def known_rows(frame: object) -> int | None:
     consumed to count it.
     """
     kind = _adapter_kind(frame)
+    if kind == "polars":
+        return int(frame.height)  # type: ignore[attr-defined]
     if kind == "pandas":
         return len(frame.index)  # type: ignore[attr-defined]
-    arrow = sys.modules.get("pyarrow")
-    if kind == "arrow" and arrow is not None and isinstance(frame, arrow.Table | arrow.RecordBatch):
-        return int(frame.num_rows)
+    if kind == "arrow" and isinstance(frame, _optional_types("pyarrow", "Table", "RecordBatch")):
+        return int(frame.num_rows)  # type: ignore[attr-defined]
     return None
+
+
+def admitted_frame(frame: object, row_budget: int | None, label: str) -> pl.DataFrame:
+    """Reject cheap known row overflow before an interchange conversion copies data."""
+    from qavf.sources.native import check_budget
+
+    rows = known_rows(frame)
+    if row_budget is not None and rows is not None and rows > row_budget:
+        raise SourceError(f"{label} has more than {row_budget:,} rows (row_budget)")
+    return check_budget(as_polars(frame), row_budget, label)
 
 
 def as_polars(frame: Any) -> pl.DataFrame:
@@ -66,6 +83,13 @@ def as_polars(frame: Any) -> pl.DataFrame:
         return frame.collect()
     if kind == "pandas":
         return pl.from_pandas(frame, rechunk=False)
+    if kind == "interchange":
+        from pyarrow.interchange import from_dataframe
+
+        result = pl.from_arrow(from_dataframe(frame), rechunk=False)
+        if isinstance(result, pl.DataFrame):
+            return result
+        raise SourceError("dataframe interchange did not produce a table")
     if kind == "arrow":
         # Explicit across supported Polars versions: preserve chunk ownership,
         # avoiding an otherwise unnecessary whole-table contiguous copy.

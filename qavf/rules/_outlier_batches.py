@@ -174,11 +174,13 @@ def scan_target(
             "CREATE TABLE values_by_group(identity BLOB,value REAL,frequency INTEGER NOT NULL,"
             "PRIMARY KEY(identity,value)) WITHOUT ROWID"
         )
-        store.execute("CREATE INDEX values_order ON values_by_group(value)")
-        store.execute(
-            "CREATE TABLE deviations(value REAL PRIMARY KEY,frequency INTEGER NOT NULL) "
-            "WITHOUT ROWID"
-        )
+        if target.transform == "log":
+            store.execute("CREATE INDEX values_order ON values_by_group(value)")
+        if method == OutlierMethod.MODIFIED_ZSCORE:
+            store.execute(
+                "CREATE TABLE deviations(value REAL PRIMARY KEY,frequency INTEGER NOT NULL) "
+                "WITHOUT ROWID"
+            )
         store.execute(
             "CREATE TABLE models(identity BLOB PRIMARY KEY,model TEXT NOT NULL) WITHOUT ROWID"
         )

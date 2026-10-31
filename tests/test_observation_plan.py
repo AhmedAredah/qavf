@@ -89,8 +89,9 @@ def test_failure_cache_drops_tracebacks_and_allows_unrelated_input(tmp_path, mon
         monkeypatch.setattr(ctx, "observe", observe)
         with ctx.observation_plan([{"bad": ["x"]}, {"good": ["x"]}, {"bad": ["x"]}]) as plan:
             for index in (0, 2):
-                with plan.contract(index) as observed, pytest.raises(
-                    RuntimeError, match="failed input"
+                with (
+                    plan.contract(index) as observed,
+                    pytest.raises(RuntimeError, match="failed input"),
                 ):
                     observed["bad"]
                 gc.collect()
@@ -124,9 +125,7 @@ def test_plan_cleanup_propagates_base_exception_and_invalidates_open_views(tmp_p
     class Stop(BaseException):
         pass
 
-    with DataContext(
-        frames={"a": pl.DataFrame({"x": [1]}).lazy()}, temp_directory=tmp_path
-    ) as ctx:
+    with DataContext(frames={"a": pl.DataFrame({"x": [1]}).lazy()}, temp_directory=tmp_path) as ctx:
         with (
             pytest.raises(Stop),
             ctx.observation_plan([{"a": ["x"]}, {"a": ["x"]}]) as plan,

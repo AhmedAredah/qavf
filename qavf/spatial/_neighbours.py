@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +46,8 @@ class _Admission:
         self.work += count
 
     def edges(self, count: int) -> None:
+        if count > np.iinfo(np.int64).max:
+            raise ValueError("neighbour edge count exceeds supported array indexing")
         if count > self.max_edges:
             raise ValueError(
                 f"neighbour graph requires {count:,} edges, above max_edges={self.max_edges:,}"
@@ -118,7 +120,13 @@ def nearest_graph(
     geographic: bool,
     max_edges: int,
     max_work: int,
+    check_cancelled: Callable[[], None] | None = None,
 ) -> CompactAdjacency:
+    if check_cancelled is not None:
+        check_cancelled()
+    if isinstance(n, bool) or not isinstance(n, int | np.integer) or n < 0:
+        raise ValueError("the location count must be a nonnegative integer")
+    n = int(n)
     if isinstance(k, bool) or not isinstance(k, int | np.integer) or not 1 <= k < n:
         raise ValueError(f"k must lie in 1..{n - 1} for {n} locations, got {k}")
     k = int(k)
@@ -128,30 +136,42 @@ def nearest_graph(
     xs, ys = _coordinates(x, y, n, geographic)
     points, _ = _points(xs, ys, geographic)
     tree = _tree(points)
-    rows: list[np.ndarray] = []
+    offsets = np.arange(n + 1, dtype=np.int64) * k
+    indices = np.empty(n * k, dtype=np.int32 if n < 2**31 else np.int64)
     if tree is None:
         admission.add_work(n * n)
         for block in _blocks(n):
+            if check_cancelled is not None:
+                check_cancelled()
             values = distance(
                 xs[block, None], ys[block, None], xs[None, :], ys[None, :], geographic=geographic
             )
             for offset, i in enumerate(range(block.start, block.stop)):
                 candidates = np.concatenate((np.arange(i), np.arange(i + 1, n)))
-                rows.append(_nearest_row(candidates, values[offset, candidates], k))
-        return CompactAdjacency.from_rows(rows)
+                indices[i * k : (i + 1) * k] = _nearest_row(
+                    candidates, values[offset, candidates], k
+                )
+        return CompactAdjacency._from_owned(offsets, indices)
     # The result allocation is bounded by the already-admitted n*k edge count.
-    limits, _ = tree.query(points, k=k + 1, eps=0, workers=1)
-    for i in range(n):
-        radius = _radius(float(limits[i, -1]))
-        count = int(tree.query_ball_point(points[i], radius, return_length=True))
-        admission.add_work(count)
-        candidates = np.asarray(tree.query_ball_point(points[i], radius), dtype=np.int64)
-        candidates = candidates[candidates != i]
-        values = distance(xs[i], ys[i], xs[candidates], ys[candidates], geographic=geographic)
-        if len(candidates) < k or not np.isfinite(values).all():
-            raise ValueError("coordinates cannot be represented safely for neighbour distances")
-        rows.append(_nearest_row(candidates, values, k))
-    return CompactAdjacency.from_rows(rows)
+    batch_rows = max(1, _BLOCK_PAIRS // (k + 1))
+    for start in range(0, n, batch_rows):
+        if check_cancelled is not None:
+            check_cancelled()
+        stop = min(start + batch_rows, n)
+        limits, _ = tree.query(points[start:stop], k=k + 1, eps=0, workers=1)
+        for local, i in enumerate(range(start, stop)):
+            if check_cancelled is not None:
+                check_cancelled()
+            radius = _radius(float(limits[local, -1]))
+            count = int(tree.query_ball_point(points[i], radius, return_length=True))
+            admission.add_work(count)
+            candidates = np.asarray(tree.query_ball_point(points[i], radius), dtype=np.int64)
+            candidates = candidates[candidates != i]
+            values = distance(xs[i], ys[i], xs[candidates], ys[candidates], geographic=geographic)
+            if len(candidates) < k or not np.isfinite(values).all():
+                raise ValueError("coordinates cannot be represented safely for neighbour distances")
+            indices[i * k : (i + 1) * k] = _nearest_row(candidates, values, k)
+    return CompactAdjacency._from_owned(offsets, indices)
 
 
 def band_graph(

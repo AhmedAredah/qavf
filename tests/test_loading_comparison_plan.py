@@ -163,9 +163,7 @@ def test_missing_keys_are_rejected_from_each_complete_schema(side):
 )
 def test_incompatible_original_key_kinds_are_rejected_for_every_policy(policy, left, right):
     with pytest.raises(KeyTypeError, match="inventory: key 'key' has incompatible types"):
-        comparison_plan(
-            {"key": left}, {"key": right}, "key", schema=policy, name="inventory"
-        )
+        comparison_plan({"key": left}, {"key": right}, "key", schema=policy, name="inventory")
 
 
 @pytest.mark.parametrize("left,right", [(pl.Int64, pl.UInt64), (pl.Int64, pl.Float64)])

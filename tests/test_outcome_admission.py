@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import threading
 import time
+from contextlib import ExitStack
 from types import SimpleNamespace
 
 import polars as pl
@@ -98,8 +99,10 @@ def test_timeout_report_does_not_wait_for_reduction_callback_or_release_its_inpu
 
     environment()
     _rule_info(SlowReduction())
-    with DataContext(frames={"d": pl.DataFrame({"x": range(1000)})},
-                     cache_max_bytes=cache_bytes) as ctx:
+    with DataContext(
+        frames={"d": pl.DataFrame({"x": range(1000)})}, cache_max_bytes=cache_bytes
+    ) as ctx:
+
         def run():
             try:
                 reports.append(execute.run(ctx))
@@ -143,7 +146,8 @@ class Eager(DataSource):
         return pl.DataFrame({"x": range(1000)})
 
 
-def test_timeout_report_uses_pending_snapshots_during_blocked_cache_admission(monkeypatch):
+@pytest.mark.parametrize("hold_metadata_locks", [False, True])
+def test_timeout_report_snapshots_during_blocked_cache_admission(monkeypatch, hold_metadata_locks):
     from qavf.engine import resources
     from qavf.engine.runner import _rule_info, environment
 
@@ -152,9 +156,15 @@ def test_timeout_report_uses_pending_snapshots_during_blocked_cache_admission(mo
     reports, errors = [], []
 
     def blocked_compaction(value):
-        entered.set()
-        assert release.wait(30)
-        return original(value)
+        with ExitStack() as held:
+            if hold_metadata_locks:
+                # Exercise the fallback when another operation really owns the
+                # metadata locks. Ordinary staged compaction leaves them free.
+                held.enter_context(ctx._lock)
+                held.enter_context(ctx._frames.lock)
+            entered.set()
+            assert release.wait(30)
+            return original(value)
 
     class Loads(ProbeRule):
         def evaluate(self, ctx):
@@ -185,8 +195,10 @@ def test_timeout_report_uses_pending_snapshots_during_blocked_cache_admission(mo
             assert errors == []
             assert reports[0].results[0].status is Status.ERROR
             usage = reports[0].metadata.resource_usage
-            assert usage["resource_usage_pending"] is True
-            assert usage["metadata_snapshot_pending"] is True
+            assert usage["resource_usage_pending"] is hold_metadata_locks
+            assert usage["metadata_snapshot_pending"] is hold_metadata_locks
+            assert usage["active_workers_at_report"] == 1
+            assert usage["retained_total_bytes"] == usage["owned_spill_bytes"] == 0
         finally:
             release.set()
             thread.join(2)
@@ -194,6 +206,8 @@ def test_timeout_report_uses_pending_snapshots_during_blocked_cache_admission(mo
             while ctx._active and time.monotonic() < deadline:
                 time.sleep(0.001)
         assert not thread.is_alive() and not ctx._active
+        assert "d" not in ctx._frames
+        assert ctx._resources.retained_budget.used == ctx._resources.spill_budget.used == 0
 
 
 @pytest.mark.parametrize("cache_bytes", [0, 20_000])
@@ -219,6 +233,7 @@ def test_ad_hoc_eager_observation_uses_shared_admission(cache_bytes):
             return Eager(SourceParams(type=Eager.kind), env)
 
     with DataContext(source_registry=Registry(), cache_max_bytes=cache_bytes) as ctx:
+
         def consume(view):
             with view.observe() as observed:
                 usage = ctx.resource_usage()
@@ -258,8 +273,9 @@ def test_borrowed_contract_view_retains_charge_after_last_contract(cache_bytes):
 
 @pytest.mark.parametrize("cache_bytes", [0, 20_000])
 def test_invalid_stored_observation_projection_does_not_leak_its_lease(cache_bytes):
-    with DataContext(frames={"d": pl.DataFrame({"x": range(1000)})},
-                     cache_max_bytes=cache_bytes) as ctx:
+    with DataContext(
+        frames={"d": pl.DataFrame({"x": range(1000)})}, cache_max_bytes=cache_bytes
+    ) as ctx:
         with pytest.raises(ValueError, match="at least one"), ctx.observe("d", []):
             pytest.fail("invalid empty projection accepted")
         ctx.release(["d"])

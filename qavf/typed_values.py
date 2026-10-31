@@ -7,6 +7,7 @@ its target is flagged by an accompanying expression for the caller to refuse.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from decimal import Decimal
 from typing import cast
@@ -91,6 +92,26 @@ def encode_temporal(frame: pl.DataFrame, columns: Sequence[str] | None = None) -
     )
 
 
+def precise_frame(frame: pl.DataFrame, columns: Sequence[str] | None = None) -> pl.DataFrame:
+    """Protect sub-microsecond identities while preserving ordinary Python dates.
+
+    Python's temporal scalars cannot carry nanoseconds. Encode those logical
+    types consistently, including zero ticks, so labels remain identical across
+    subsets and batches. Other ordinary temporal values keep their public types.
+    """
+    selected = [
+        name
+        for name, dtype in frame.schema.items()
+        if (columns is None or name in columns)
+        and (
+            (isinstance(dtype, pl.Datetime | pl.Duration) and dtype.time_unit == "ns")
+            or dtype == pl.Time
+            or (isinstance(dtype, pl.List | pl.Array | pl.Struct) and has_temporal(dtype))
+        )
+    ]
+    return encode_temporal(frame, selected) if selected else frame
+
+
 def logical_type(name: str, scale: int | None = None) -> pl.DataType:
     """The Polars storage of a logical ``dtype`` name; decimals need an explicit scale."""
     if name == "decimal":
@@ -144,9 +165,11 @@ def checked_cast(
                 parsed = (
                     pl.when(offset)
                     .then(parsed.dt.convert_time_zone(target.time_zone))
-                    .otherwise(parsed.dt.replace_time_zone(
-                        target.time_zone, ambiguous="null", non_existent="null"
-                    ))
+                    .otherwise(
+                        parsed.dt.replace_time_zone(
+                            target.time_zone, ambiguous="null", non_existent="null"
+                        )
+                    )
                 )
         lost = expr.is_not_null() & parsed.is_null()
         if isinstance(target, pl.Datetime):
@@ -241,7 +264,19 @@ def exact_scale(expr: pl.Expr, dtype: pl.DataType, factor: int | float | Decimal
     if not exact.is_finite() or not exact:
         raise ValueError("a scale factor must be a finite nonzero number")
     if dtype.is_float():
-        return expr * float(exact)
+        multiplier = float(exact)
+        if not math.isfinite(multiplier) or not multiplier:
+            raise ValueError("a floating scale factor must be finite and nonzero in Float64")
+
+        def scale_float(values: pl.Series) -> pl.Series:
+            values = values.cast(pl.Float64)
+            product = values * multiplier
+            lost = values.is_finite() & (~product.is_finite() | ((values != 0) & (product == 0)))
+            if lost.any():
+                raise ValueError("scaling would overflow or underflow finite Float64 values")
+            return product
+
+        return expr.map_batches(scale_float, return_dtype=pl.Float64, is_elementwise=True)
     if not (dtype.is_integer() or dtype.is_decimal()):
         raise ValueError(f"only numeric columns can be scaled, not {dtype}")
     coefficient, factor_scale = _decimal_parts(exact)

@@ -28,7 +28,7 @@ uv run --no-sync python scripts/benchmark_performance.py --output benchmark-resu
 | `capacity` (explicit opt-in) | 5,000,000 | 3 | 1 | Larger inputs on a suitably provisioned host |
 
 ```bash
-# Standard matrix: 24 variants, 96 fresh workers for one source tree.
+# Standard matrix: 32 variants, 128 fresh workers for one source tree.
 uv run --no-sync python scripts/benchmark_performance.py --profile standard --output benchmark-results/standard.json
 
 # Scaling selected workloads; row scales must be distinct and at least 100.
@@ -59,10 +59,14 @@ incompatible overrides fail explicitly. Capacity may use substantial RAM and dis
 especially eager inputs and regression. The host limits are recorded, not enforced
 as automatic admission controls. `--timeout` bounds each fixture/worker job, not
 the whole suite; on POSIX a timed-out worker's owned process group is terminated.
+On Windows a stdlib bootstrap joins a parent-owned Job Object before any workload
+imports or descendant launches; timeout, cancellation and completion terminate
+the job and reap descendants. A host unable to establish ownership fails closed.
+`--memory-bytes` must be positive; cache and spill capacities may be zero.
 
 ## Workloads and independent truth
 
-The default matrix contains **24 variants** with in-process QAVF execution:
+The default matrix contains **32 variants** with in-process QAVF execution:
 
 | Case | Coverage | Adapters |
 | --- | --- | --- |
@@ -75,6 +79,14 @@ The default matrix contains **24 variants** with in-process QAVF execution:
 | `streaming_regression` | Distinct scalar Parquet files, added/removed/changed keys and values; requires `native_stream` public comparison | Public `compare_outputs`, in-process or isolated |
 | `grouped_statistics` | High-cardinality grouped binary-half sums, independently known changed groups, exact rational evidence | Public `validate`, native Parquet, in-process or isolated |
 | `scalar_statistics` | Two-point population with independently known z-score outliers | Public `validate`, native Parquet, in-process or isolated |
+| `dataset_records` | Exact keyed counts for three changed scalar fields | Public `compare_datasets`, native Parquet |
+| `temporal_buckets` | Exact 60-minute bins and independently counted changed sums | Public temporal comparison, native Parquet |
+| `spatial_locations` | Changed coordinates follow exact 3-4-5 moves | Public locations comparison, native Parquet |
+| `dirty_csv` | A structurally invalid record at each index divisible by 101 | Public CSV ingestion/diagnostics |
+| `report_rendering` | Repeated immutable result occurrences, count and navigation integrity | Streaming HTML and canonical JSON writes |
+| `many_small_files` | At least 64 Parquet partitions, exact row coverage and invalid-row count | Public file glob validation |
+| `huge_cells` | A changed string up to 8 MiB, unchanged control row, bounded evidence | Public records comparison |
+| `resampling_inference` | 99 paired bootstrap replicates of a two-point population; independent parity-count quantiles | Public `paired_bootstrap` |
 
 `--execution-modes in_process isolated` adds the isolated versions of the three
 new cases; older cases support only in-process execution. The default omits these
@@ -180,3 +192,21 @@ and [DuckDB correctness-checked benchmarks][benchmarks].
 [duckdb]: https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads
 [pyperf]: https://pyperf.readthedocs.io/en/latest/run_benchmark.html
 [benchmarks]: https://duckdb.org/docs/current/dev/benchmark
+
+The report workload creates one result occurrence per 100 fixture rows (at least
+one). Its operation phase includes both report files; its separate generic
+report phase writes only benchmark outcome metadata. Verification parses the
+produced JSON and streams HTML navigation, outside the timed operation. These
+new cases add coverage, not proof of universal optimality: polygon topology, alternative inference methods and every source/adapter combination still require dedicated
+measurements for the user's workload. Baseline/candidate provenance, identical
+fixtures, independent oracles and inconclusive noisy comparisons remain required.
+
+The stress fixture uses `max(64, --partitions)` small files, limited by row count,
+and a cell size of `min(rows * 32, 8 MiB)` (at least 1 KiB). The bootstrap oracle
+independently draws PCG64 integer indices and derives each sample mean from parity
+counts, then calculates percentiles by linear interpolation. Array preparation
+belongs to setup; only the public bootstrap is timed as the operation. Resource
+options apply to file/comparison APIs; they do not add OS limits to the standalone
+inference API. The report benchmark explicitly raises its HTML output ceiling to
+8 KiB per result occurrence when that exceeds the usual 16 MiB default, and records
+that setting in workload metadata.

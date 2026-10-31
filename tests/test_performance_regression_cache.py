@@ -177,7 +177,7 @@ def test_cache_spill_is_physical_reused_promoted_and_cleaned(tmp_path):
     assert verified["spill_read_bytes"] == 3 * verified["spill_write_bytes"]
     assert verified["spill_write_bytes"] > 257 * 32
     assert verified["temporary_files_after_close"] == 0
-    assert result["summaries"]["hit_a"] == {
+    assert result["summaries"]["hit_spilled"] == {
         "rows": 257,
         "id_min": 0,
         "id_max": 256,
@@ -192,8 +192,8 @@ def test_cache_spill_is_physical_reused_promoted_and_cleaned(tmp_path):
     with pytest.raises(AssertionError, match="did not create"):
         workload.verify(wrong)
     wrong = copy.deepcopy(result)
-    wrong["snapshots"]["hit_a"]["usage"]["frame_spill_read_count"] += 1
-    with pytest.raises(AssertionError, match="counters at hit_a"):
+    wrong["snapshots"]["hit_spilled"]["usage"]["frame_spill_read_count"] += 1
+    with pytest.raises(AssertionError, match="counters at hit_spilled"):
         workload.verify(wrong)
 
 
@@ -224,8 +224,8 @@ def test_cache_oracle_detects_corruption_that_preserves_column_checksums(tmp_pat
     frame.write_parquet(path)
     workload = cache.build_workload(fixture, tmp_path / "run", WorkloadOptions(backend="context"))
     result = workload.run()
-    assert result["summaries"]["hit_a"]["load_sum"] == 100487
-    assert result["summaries"]["hit_a"]["all_values_exact"] is False
+    assert result["summaries"]["load_a"]["load_sum"] == 100487
+    assert result["summaries"]["load_a"]["all_values_exact"] is False
     with pytest.raises(AssertionError, match="exact dataset values"):
         workload.verify(result)
 

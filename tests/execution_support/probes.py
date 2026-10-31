@@ -48,7 +48,10 @@ class ExecutionProbe(Rule[ProbeParams]):
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             kernel32.VirtualAlloc.restype = ctypes.c_void_p
             kernel32.VirtualAlloc.argtypes = [
-                ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_uint32
+                ctypes.c_void_p,
+                ctypes.c_size_t,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
             ]
             mem_commit_reserve, page_readwrite = 0x3000, 0x04
             if not kernel32.VirtualAlloc(None, 8 << 30, mem_commit_reserve, page_readwrite):

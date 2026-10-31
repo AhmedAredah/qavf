@@ -27,6 +27,7 @@ Writing a measure::
 from __future__ import annotations
 
 from abc import abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import ClassVar
@@ -44,6 +45,7 @@ from qavf.rules._grouped import (
     grouped_aggregate,
     grouped_mean,
     grouped_quantile,
+    grouped_quantiles,
     grouped_reduce,
     keyed_values,
 )
@@ -372,3 +374,91 @@ class Share(Measure):
 def measure_alias(index: int, taken: list[str]) -> str:
     """A value column name that cannot shadow a group column."""
     return fresh_internal(f"measure_{index}", taken)
+
+
+def shared_measure_results(
+    requests: list[tuple[Measure, MeasureInput]],
+) -> Iterator[pl.DataFrame]:
+    """Fuse built-in compatible exact work within one immutable relation scope.
+
+    No persistent cache or source identity guess is involved. Plugin measures
+    retain their own executor, including subclasses overriding a built-in.
+    """
+    grouped: dict[tuple[str, str], list[tuple[Measure, MeasureInput]]] = {}
+    independent: list[tuple[Measure, MeasureInput]] = []
+    for measure, data in requests:
+        if type(measure) in (Sum, Mean):
+            grouped.setdefault(("sum_mean", str(data.column)), []).append((measure, data))
+        elif type(measure) in (Median, Quantile):
+            grouped.setdefault(("quantile", str(data.column)), []).append((measure, data))
+        else:
+            independent.append((measure, data))
+    for (kind, _), members in grouped.items():
+        first = members[0][1]
+        if len(members) == 1:
+            yield members[0][0].compute(first)
+            continue
+        assert first.column is not None
+        if kind == "quantile":
+            probabilities: dict[str, float] = {}
+            for measure, data in members:
+                probability = 0.5 if type(measure) is Median else measure.probability()
+                assert probability is not None
+                probabilities[data.alias] = probability
+            yield grouped_quantiles(
+                first.relation,
+                first.keys,
+                first.column,
+                probabilities,
+            )
+            continue
+        relation = first.relation
+        taken = [*relation.schema, *(data.alias for _, data in members)]
+        rows = fresh_internal("measure_rows", taken)
+        missing = fresh_internal("measure_missing", [*taken, rows])
+        total = fresh_internal("measure_sum", [*taken, rows, missing])
+        if relation.schema[first.column].is_float():
+            assert relation.observation is not None and relation.lazy is not None
+            values = exact_grouped(
+                relation.ctx,
+                relation.observation,
+                relation.lazy,
+                first.keys,
+                first.column,
+                total,
+                "sum",
+                rational=True,
+                presence_alias=rows,
+                missing_alias=missing,
+            )
+        else:
+            reduced = grouped_aggregate(
+                relation,
+                first.keys,
+                first.column,
+                total,
+                "sum",
+                presence_alias=rows,
+                missing_alias=missing,
+            )
+            assert reduced is not None
+            values = reduced
+        columns = []
+        for measure, data in members:
+            if type(measure) is Sum:
+                columns.append(values[total].alias(data.alias))
+            else:
+                means = [
+                    None
+                    if amount is None or count == absent
+                    else str(Fraction(amount) / (count - absent))
+                    for amount, count, absent in values.select(total, rows, missing).iter_rows()
+                ]
+                columns.append(pl.Series(data.alias, means, dtype=pl.String))
+        yield (
+            values.select(list(first.keys)).with_columns(columns)
+            if first.keys
+            else pl.DataFrame(columns)
+        )
+    for measure, data in independent:
+        yield measure.compute(data).select([*data.keys, data.alias])

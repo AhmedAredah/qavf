@@ -295,7 +295,10 @@ def iter_json_string(value: str) -> Iterator[bytes]:
 
 
 def iter_audit_json(
-    value: Any, *, sort_keys: bool = False, max_bytes: int | None = None,
+    value: Any,
+    *,
+    sort_keys: bool = False,
+    max_bytes: int | None = None,
     normalize_float_zero: bool = False,
 ) -> Iterator[bytes]:
     """Stream canonical tagged values without constructing a second evidence graph.

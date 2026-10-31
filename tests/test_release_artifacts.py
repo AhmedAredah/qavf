@@ -26,6 +26,7 @@ def release_tree(tmp_path: Path, monkeypatch):
         "pyproject.toml": b"[project]\nname = 'test'\n",
         "uv.lock": b"version = 1\n",
         "README.md": b"Example\n",
+        "README_UPGRADE.md": b"Upgrade steps\n",
         "CHANGELOG.md": b"Changes\n",
         "LICENSE": b"MIT\n",
     }
@@ -57,10 +58,16 @@ def test_archives_with_exact_release_inputs_pass(release_tree):
     verify_dist.main()
 
 
-@pytest.mark.parametrize("changed", [
-    "qavf/__init__.py", "tests/test_contract.py", "uv.lock",
-    ".github/workflows/verify.yml", "scripts/verify_release.py",
-])
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "qavf/__init__.py",
+        "tests/test_contract.py",
+        "uv.lock",
+        ".github/workflows/verify.yml",
+        "scripts/verify_release.py",
+    ],
+)
 def test_stale_sdist_inputs_block_release(release_tree, changed):
     root, files = release_tree
     write_archives(root, files, changed)
@@ -77,10 +84,15 @@ def test_stale_wheel_code_blocks_release(release_tree):
         verify_dist.main()
 
 
-@pytest.mark.parametrize("extra", [
-    "tests/stale_test.py", "scripts/stale_helper.py", ".github/workflows/stale.yml",
-    "qavf/stale.py",
-])
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "tests/stale_test.py",
+        "scripts/stale_helper.py",
+        ".github/workflows/stale.yml",
+        "qavf/stale.py",
+    ],
+)
 def test_extra_sdist_release_input_blocks_release(release_tree, extra):
     root, files = release_tree
     write_archives(root, files | {extra: b"stale input\n"})

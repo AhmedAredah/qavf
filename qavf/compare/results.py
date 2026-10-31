@@ -58,6 +58,9 @@ class LevelResult(SnapshotModel):
     checks: list[CheckResult] = Field(default_factory=list)
     significance: Significance | None = None
 
+    details_truncated: bool = False
+    """Optional typed details were omitted by a configured resource budget."""
+
     detail_fields: ClassVar[tuple[str, ...]] = ()
     """Per-member detail (series, zones, chart values) a byte budget may leave out."""
 
@@ -911,7 +914,7 @@ def _without_tests(level: LevelResult) -> LevelResult:
             )
         return value
 
-    return lean(level)  # type: ignore[no-any-return]
+    return lean(level)
 
 
 def _without_evidence(level: LevelResult) -> LevelResult:

@@ -200,8 +200,7 @@ def test_grouped_reduce_collects_one_row_per_group(tmp_path):
 
 def test_bounded_evidence_byte_limit_keeps_complete_counts_and_order():
     records = [{"i": i, "text": "x" * 40} for i in range(10)]
-    size = evidence_json_size(records[0])
-    evidence = BoundedEvidence(limit=100, byte_limit=3 * size)
+    evidence = BoundedEvidence(limit=100, byte_limit=evidence_json_size(records[:3]))
     evidence.extend(records)
     assert evidence.count == 10
     assert [record["i"] for record in evidence.records] == [0, 1, 2]

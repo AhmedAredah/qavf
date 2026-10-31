@@ -28,7 +28,6 @@ from ._conformance import DatasetView, SourceChecks, column_conformance
 from ._datasets import (
     CATEGORY,
     DatasetSelection,
-    _row_count,
     _schemas,
     _SelectsDatasets,
 )
@@ -138,8 +137,11 @@ class SchemaConformanceRule(_SelectsDatasets):
         failing: set[str] = {dataset for finding in blocked for dataset in finding.datasets}
         for dataset, schema in schemas.items():
             try:
-                actual_schema = ctx.schema(dataset)
-                row_count = _row_count(ctx, dataset)
+                with DatasetView.open(ctx, dataset, schema) as view:
+                    found = self._dataset(view)
+                failures.extend(found)
+                if found:
+                    failing.add(dataset)
             except Exception as exc:
                 failures.append(
                     Finding.unassessed(
@@ -148,69 +150,7 @@ class SchemaConformanceRule(_SelectsDatasets):
                         datasets=(dataset,),
                     )
                 )
-                continue
-            view = DatasetView(ctx, dataset, schema, actual_schema, row_count)
-            problems: list[dict[str, Any]] = []
-            for column, spec in schema.columns.items():
-                if column not in actual_schema:
-                    if spec.required:
-                        problem = {"column": column, "problem": "missing required column"}
-                        hint = absent_column_hint(column, actual_schema)
-                        if hint:
-                            problem["hint"] = hint.removeprefix("; ")
-                        problems.append(problem)
-                    continue
-                actual = actual_schema[column]
-                conformance = column_conformance(view, column)
-                if conformance is not None:
-                    finding = conformance.finding()
-                    if finding is not None:
-                        failures.append(finding)
-                        failing.add(dataset)
-                    continue
-                if spec.dtype is None or _matches(actual, spec.dtype):
-                    continue
-                problems.append(
-                    {"column": column, "problem": f"expected {spec.dtype}, found {actual}"}
-                )
-            source = ctx.source(dataset)
-            if source is not None:
-                rename = ctx.specs[dataset].rename if dataset in ctx.specs else {}
-                checks = SourceChecks(view, source, rename)
-                found = checks.findings()
-                failures.extend(found)
-                if found:
-                    failing.add(dataset)
-                problems.extend(checks.problems())
-            if schema.strict:
-                for column in actual_schema:
-                    if column not in schema.columns:
-                        problems.append({"column": column, "problem": "undeclared column"})
-            if row_count < schema.min_rows:
-                problems.append(
-                    {
-                        "column": None,
-                        "problem": f"{row_count} rows, expected at least {schema.min_rows}",
-                    }
-                )
-            if schema.max_rows is not None and row_count > schema.max_rows:
-                problems.append(
-                    {
-                        "column": None,
-                        "problem": f"{row_count} rows, expected at most {schema.max_rows}",
-                    }
-                )
-            if problems:
                 failing.add(dataset)
-                failures.append(
-                    Finding.fail(
-                        f"{plural(len(problems), 'schema violation')} in {dataset}.",
-                        check=dataset,
-                        affected=problems,
-                        unit="problems",
-                        datasets=(dataset,),
-                    )
-                )
         failing.update(finding.check for finding in failures if finding.check)
         passed = [dataset for dataset in schemas if dataset not in failing]
         return outcome(
@@ -220,3 +160,64 @@ class SchemaConformanceRule(_SelectsDatasets):
             "No available dataset has a schema configured.",
         )
 
+    def _dataset(self, view: DatasetView) -> list[Finding]:
+        """Assess independent contracts against the same scoped population."""
+        ctx, dataset, schema = view.ctx, view.name, view.schema
+        actual_schema, row_count = view.actual, view.rows
+        failures: list[Finding] = []
+        problems: list[dict[str, Any]] = []
+        for column, spec in schema.columns.items():
+            if column not in actual_schema:
+                if spec.required:
+                    problem = {"column": column, "problem": "missing required column"}
+                    hint = absent_column_hint(column, actual_schema)
+                    if hint:
+                        problem["hint"] = hint.removeprefix("; ")
+                    problems.append(problem)
+                continue
+            actual = actual_schema[column]
+            conformance = column_conformance(view, column)
+            if conformance is not None:
+                finding = conformance.finding()
+                if finding is not None:
+                    failures.append(finding)
+                continue
+            if spec.dtype is None or _matches(actual, spec.dtype):
+                continue
+            problems.append({"column": column, "problem": f"expected {spec.dtype}, found {actual}"})
+        source = ctx.source(dataset)
+        if source is not None:
+            rename = ctx.specs[dataset].rename if dataset in ctx.specs else {}
+            checks = SourceChecks(view, source, rename)
+            found = checks.findings()
+            failures.extend(found)
+            problems.extend(checks.problems())
+        if schema.strict:
+            for column in actual_schema:
+                if column not in schema.columns:
+                    problems.append({"column": column, "problem": "undeclared column"})
+        if row_count < schema.min_rows:
+            problems.append(
+                {
+                    "column": None,
+                    "problem": f"{row_count} rows, expected at least {schema.min_rows}",
+                }
+            )
+        if schema.max_rows is not None and row_count > schema.max_rows:
+            problems.append(
+                {
+                    "column": None,
+                    "problem": f"{row_count} rows, expected at most {schema.max_rows}",
+                }
+            )
+        if problems:
+            failures.append(
+                Finding.fail(
+                    f"{plural(len(problems), 'schema violation')} in {dataset}.",
+                    check=dataset,
+                    affected=problems,
+                    unit="problems",
+                    datasets=(dataset,),
+                )
+            )
+        return failures

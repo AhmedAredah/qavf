@@ -40,11 +40,17 @@ def test_extended_float_scalar_is_checked_in_its_original_precision(container):
             detect_outliers(values, method="iqr")
 
 
-@pytest.mark.parametrize("values", [
-    np.array([2**64 - 1], dtype=np.uint64),
-    np.array([2**63 - 1], dtype=np.int64),
-    [10**400], [Decimal("0.1")], ["1", 2], [1 + 0j, 2],
-])
+@pytest.mark.parametrize(
+    "values",
+    [
+        np.array([2**64 - 1], dtype=np.uint64),
+        np.array([2**63 - 1], dtype=np.int64),
+        [10**400],
+        [Decimal("0.1")],
+        ["1", 2],
+        [1 + 0j, 2],
+    ],
+)
 def test_unsupported_or_lossy_observations_fail_explicitly(values):
     with pytest.raises(ValueError):
         float_observations(values)
@@ -86,10 +92,13 @@ def test_equal_ties_are_safe_and_nonselected_conflicts_do_not_block_selection():
 
 @pytest.mark.parametrize("how", ["first", "last"])
 def test_missing_ordering_components_and_values_are_not_selected(how):
-    frame = pl.DataFrame({
-        "order": [None, float("nan"), 1.0, 1.0, 1.0],
-        "tie": [1, 1, None, 1, 2], "value": [100, 200, 300, None, 5],
-    })
+    frame = pl.DataFrame(
+        {
+            "order": [None, float("nan"), 1.0, 1.0, 1.0],
+            "tie": [1, 1, None, 1, 2],
+            "value": [100, 200, 300, None, 5],
+        }
+    )
     assert aggregate(frame, [], "value", how=how, order_by=("order", "tie")).item() == 5
 
 
@@ -108,8 +117,17 @@ def test_temporal_verdict_cannot_depend_on_conflicting_tied_row_order():
     for values in ([100, 0, 50], [0, 100, 50]):
         frame = pl.DataFrame({"year": [1, 1, 2], "order": [0, 0, 1], "value": values})
         with DataContext(frames={"data": frame}) as context:
-            findings = CumulativeRule({"series": [{
-                "dataset": "data", "value": "value", "aggregate": "first", "order_by": "order",
-            }]}).evaluate(context)
+            findings = CumulativeRule(
+                {
+                    "series": [
+                        {
+                            "dataset": "data",
+                            "value": "value",
+                            "aggregate": "first",
+                            "order_by": "order",
+                        }
+                    ]
+                }
+            ).evaluate(context)
         assert findings and all(not finding.assessed for finding in findings)
         assert any("conflicting values tied" in finding.message for finding in findings)

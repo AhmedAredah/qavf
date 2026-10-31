@@ -166,6 +166,7 @@ def test_layer_outline_reader_supports_the_actual_duckdb_relation_api(monkeypatc
         outlines, "fetch", lambda *_: pl.DataFrame({"x0": [0], "x1": [1], "y0": [0], "y1": [1]})
     )
     with duckdb.connect(config={"threads": 2}) as con:
+
         class SpatialSQL:
             def sql(self, query, *, params):
                 assert "ST_AsGeoJSON" in query and "ORDER BY zone_order" in query

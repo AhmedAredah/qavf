@@ -55,9 +55,7 @@ def test_row_count_is_complete_without_wide_reload(storage, tmp_path, monkeypatc
 
 @pytest.mark.parametrize("storage", ["eager", "lazy", "spill"])
 def test_key_counts_keep_duplicate_and_null_keys(storage, tmp_path, monkeypatch):
-    frame = pl.DataFrame(
-        {"key": ["a", None, "b", "a", None] * 100, "payload": ["x" * 4096] * 500}
-    )
+    frame = pl.DataFrame({"key": ["a", None, "b", "a", None] * 100, "payload": ["x" * 4096] * 500})
     with reduced_context(frame, storage, tmp_path, monkeypatch, maximum=3) as ctx:
         result = key_frequencies(ctx, "d", ["key"], "rows")
         assert result.to_dicts() == [
@@ -96,17 +94,13 @@ def test_coverage_reduces_duplicate_entities_before_collection(storage, tmp_path
         ).evaluate(ctx)
         assert result.assessed and not result.passed
         assert result.affected_count == 1 and result.total_records == 2
-        assert result.affected == [
-            {"dataset": "d", "year": 2026, "missing_entities": ["b"]}
-        ]
+        assert result.affected == [{"dataset": "d", "year": 2026, "missing_entities": ["b"]}]
 
 
 @pytest.mark.parametrize("storage", ["eager", "lazy", "spill"])
 def test_freshness_scalar_ignores_declared_marker(storage, tmp_path, monkeypatch):
     measured, marker = datetime(2026, 1, 1), datetime(2099, 1, 1)
-    frame = pl.DataFrame(
-        {"at": [measured, marker, None] * 100, "payload": ["x" * 4096] * 300}
-    )
+    frame = pl.DataFrame({"at": [measured, marker, None] * 100, "payload": ["x" * 4096] * 300})
     with reduced_context(
         frame, storage, tmp_path, monkeypatch, columns={"at": {"missing_values": [marker]}}
     ) as ctx:

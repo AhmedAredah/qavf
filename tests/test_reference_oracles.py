@@ -83,8 +83,10 @@ def test_moran_rejects_fractional_neighbor_identity_and_unsafe_local_range():
     with pytest.raises(ValueError, match="indices must lie"):
         morans_statistic([1.0, 2.0, 4.0], {0: {2**100: 1.0}})
     result = local_morans_i(
-        [0.0, 1.0, 3.0, 4.0], {0: {1: 1e308, 2: 1e308}},
-        row_standardize=False, permutations=29,
+        [0.0, 1.0, 3.0, 4.0],
+        {0: {1: 1e308, 2: 1e308}},
+        row_standardize=False,
+        permutations=29,
     )
     assert all(not test.assessed for test in result.results)
     assert all("finite float range" in test.reason for test in result.results)
@@ -129,11 +131,14 @@ def test_cramers_v_preserves_representable_effect_with_subnormal_squared_effect(
     assert expected > 0
 
 
-@pytest.mark.parametrize("table", [
-    [[1.0, 1e-300], [1e-300, 0.0]],
-    [[1e-100, 0.0], [1.0, math.ulp(0.0)]],
-    [[1e-100, 1e-200], [1e100, 1.0]],
-])
+@pytest.mark.parametrize(
+    "table",
+    [
+        [[1.0, 1e-300], [1e-300, 0.0]],
+        [[1e-100, 0.0], [1.0, math.ulp(0.0)]],
+        [[1e-100, 1e-200], [1e100, 1.0]],
+    ],
+)
 def test_cramers_v_tiny_association_matches_exact_decimal_oracle(table):
     (a, b), (c, d) = [[Fraction(value) for value in row] for row in table]
     square = (a * d - b * c) ** 2 / ((a + b) * (c + d) * (a + c) * (b + d))
@@ -161,18 +166,22 @@ def test_zero_slope_does_not_multiply_by_an_overflowing_unit_ratio():
     result = slope_difference(
         [1e-308, 2e-308, 3e-308, 4e-308],
         [1e308, 1.1e308, 1.2e308, 1.3e308],
-        [1e308, 1.1e308, 1.2e308, 1.3e308], dependence="none",
+        [1e308, 1.1e308, 1.2e308, 1.3e308],
+        dependence="none",
     )
     assert result.assessed
     assert result.effect == result.ci_low == result.ci_high == 0.0
 
 
-@pytest.mark.parametrize("x, y", [
-    ([[0, 1], [2, 3]], [[0, 1], [2, 3]]),
-    ([0, 1], [0, 1, 2]),
-    ([0, 1, 2], [0, 1, math.inf]),
-    (np.array(["2020-01-01", "NaT"], dtype="datetime64[ns]"), [0, 1]),
-])
+@pytest.mark.parametrize(
+    "x, y",
+    [
+        ([[0, 1], [2, 3]], [[0, 1], [2, 3]]),
+        ([0, 1], [0, 1, 2]),
+        ([0, 1, 2], [0, 1, math.inf]),
+        (np.array(["2020-01-01", "NaT"], dtype="datetime64[ns]"), [0, 1]),
+    ],
+)
 def test_kendall_admits_only_paired_finite_one_dimensional_ranks(x, y):
     assert not kendall_tau(x, y).assessed
 

@@ -335,9 +335,13 @@ def _subday_start(local: pl.Expr, dtype: pl.DataType, bucket: Bucket) -> pl.Expr
     assert isinstance(dtype, pl.Datetime)
     unit = dtype.time_unit
     width = {"ms": bucket.width_us // 1000, "us": bucket.width_us, "ns": bucket.width_us * 1000}
-    ticks = local.dt.epoch(unit)
+    # The floor can lie below the smallest source tick even when the requested
+    # microsecond label is representable. Construct that label only after wide
+    # arithmetic and a checked conversion to its output unit.
+    ticks = local.dt.epoch(unit).cast(pl.Int128)
     start = (ticks // width[unit]) * width[unit]
-    return pl.from_epoch(start, time_unit=unit).dt.cast_time_unit("us")
+    micros = start // 1000 if unit == "ns" else start * 1000 if unit == "ms" else start
+    return pl.from_epoch(micros.cast(pl.Int64, strict=True), time_unit="us")
 
 
 def _occurrences(start: pl.Expr, zone: str) -> tuple[pl.Expr, pl.Expr, pl.Expr]:
@@ -607,9 +611,7 @@ def sequence_positions(
         delta = ticks - pl.lit(low, dtype=pl.Int128)
         step = pl.lit(width, dtype=pl.Int128)
         valid = (ticks >= low) & (ticks <= high) & (delta % step == 0)
-        computed = frame.select(
-            (delta // step).cast(pl.Int64).alias("label"), valid.alias("valid")
-        )
+        computed = frame.select((delta // step).cast(pl.Int64).alias("label"), valid.alias("valid"))
         if low > high or not computed["valid"].drop_nulls().all():
             raise ValueError("a label lies outside the bucket grid of the series")
         return computed["label"]

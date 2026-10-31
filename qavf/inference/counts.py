@@ -103,8 +103,8 @@ def two_proportion(
             notes=["every trial has the same outcome"], **common,
         )  # fmt: skip
     # Preserve the rare outcome even when its complementary share rounds to 1.
-    se = math.sqrt(pooled) * math.sqrt(complement) * math.hypot(
-        1 / math.sqrt(nb), 1 / math.sqrt(nc)
+    se = (
+        math.sqrt(pooled) * math.sqrt(complement) * math.hypot(1 / math.sqrt(nb), 1 / math.sqrt(nc))
     )
     if se == 0:
         raise Unassessable("the proportion standard error is below the supported float range", n=n)
@@ -154,9 +154,7 @@ def poisson_rate(
     if not total:
         return TestResult(statistic=0.0, p_value=1.0, notes=["no events"], **common)
     if total > MAX_EXACT_COUNT:
-        raise Unassessable(
-            f"{total} events exceed the exact test's supported total of 2**53", n=n
-        )
+        raise Unassessable(f"{total} events exceed the exact test's supported total of 2**53", n=n)
     stats = require_scipy()
     share = ec / (eb + ec)
     result = stats.binomtest(kc, total, share, alternative=alternative)

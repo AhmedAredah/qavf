@@ -1,0 +1,38 @@
+name: Current dependency probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  POLARS_MAX_THREADS: '2'
+  OPENBLAS_NUM_THREADS: '1'
+  OMP_NUM_THREADS: '1'
+jobs:
+  current-dependencies:
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.12', '3.13', '3.14']
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Resolve a controlled current stable dependency candidate
+        run: uv lock --upgrade --prerelease disallow
+      - run: uv sync --locked --all-extras
+      - name: Verify source and installed wheel for this newly resolved lock
+        run: uv run --no-sync python scripts/verify_platform.py --output-dir "${{ runner.temp }}/qavf-upgrade-evidence/linux-${{ matrix.python }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-probe-${{ matrix.python }}
+          path: |
+            ${{ runner.temp }}/qavf-upgrade-evidence
+            uv.lock
+          if-no-files-found: error
+# The newly resolved lock/evidence is advisory and cannot satisfy verify.yml's
+# unchanged committed-lock aggregate. This workflow never commits or publishes.

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import glob
 import gzip
 import logging
 import os
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from io import IOBase
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, cast
@@ -19,6 +19,7 @@ from qavf.output_format import table_output
 from qavf.redaction import redact_text
 from qavf.sources.base import SourceEnvironment
 from qavf.sources.file import FileSource
+from qavf.sources.local_files import discover_local_files
 from qavf.sources.parameters import FileParams
 
 if TYPE_CHECKING:
@@ -44,6 +45,7 @@ def atomic_stream(path: str | Path) -> Iterator[BinaryIO]:
             yield stream
             stream.flush()
             os.fsync(stream.fileno())
+        _check_publication(target)
         os.replace(temporary, target)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
@@ -124,7 +126,22 @@ class ProtectedInputs:
     """
 
     def __init__(self, paths: Iterable[str | Path | None]) -> None:
-        self.paths = [path for given in paths if given is not None for path in _local(given)]
+        self.locations = tuple(given for given in paths if given is not None)
+        self.paths = [path for given in self.locations for path in _local(given)]
+
+    @contextmanager
+    def publication(self) -> Iterator[None]:
+        """Check the frozen inputs and current aliases at atomic publication.
+
+        The initial manifest remains protected even if a pattern later changes.
+        Fresh matches are added before publication so newly selected inputs are
+        protected too. Nested publication scopes preserve their outer guards.
+        """
+        token = _PUBLICATION_CHECKS.set((*_PUBLICATION_CHECKS.get(), self.check))
+        try:
+            yield
+        finally:
+            _PUBLICATION_CHECKS.reset(token)
 
     @classmethod
     def of_settings(cls, settings: QAVFSettings, config: Path | None) -> ProtectedInputs:
@@ -141,10 +158,12 @@ class ProtectedInputs:
 
     def check(self, *destinations: Path | None) -> None:
         """Refuse a destination that is one of the inputs."""
+        current = [path for given in self.locations for path in _local(given)]
+        sources = dict.fromkeys((*self.paths, *current))
         for destination in destinations:
             if destination is None:
                 continue
-            for source in self.paths:
+            for source in sources:
                 if _same_file(destination, source):
                     raise ValueError(
                         f"report path {destination} would replace the input {source}; "
@@ -158,19 +177,25 @@ def _resolved(settings: QAVFSettings, path: str) -> str:
 
 def _local(path: str | Path) -> list[Path]:
     """The local files ``path`` names: none for a URL, every match for a glob."""
-    text = str(path)
-    if "://" in text:
+    files = discover_local_files(path)
+    if files is None:
         return []
-    if any(mark in text for mark in "*?["):
-        return [Path(match) for match in glob.glob(text, recursive=True)]
-    return [Path(text)]
+    return list(files) or ([Path(path)] if not any(c in str(path) for c in "*?[") else [])
+
+
+_PUBLICATION_CHECKS: ContextVar[tuple[Callable[..., None], ...]] = ContextVar(
+    "qavf_publication_checks", default=()
+)
+
+
+def _check_publication(target: Path) -> None:
+    for check in _PUBLICATION_CHECKS.get():
+        check(target)
 
 
 def _same_file(destination: Path, source: Path) -> bool:
     try:
-        if os.path.normcase(str(destination.resolve())) == os.path.normcase(
-            str(source.resolve())
-        ):
+        if os.path.normcase(str(destination.resolve())) == os.path.normcase(str(source.resolve())):
             return True
         return destination.exists() and source.exists() and os.path.samefile(destination, source)
     except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python 3.12

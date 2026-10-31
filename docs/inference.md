@@ -23,8 +23,8 @@ from qavf.inference import correct, decide, welch_t
 rng = np.random.default_rng(1)
 north = rng.normal(10, 1, 40)
 groups = {
-    "north": (north, north + rng.normal(0.8, 0.2, 40)),   # a real shift
-    "south": (north, rng.normal(10, 1, 40)),              # new draws, same population
+    "north": (north, north + rng.normal(0.8, 0.2, 40)),  # a real shift
+    "south": (north, rng.normal(10, 1, 40)),  # new draws, same population
 }
 result = welch_t(*groups["north"])
 print(result.p_value, result.effect, (result.ci_low, result.ci_high))
@@ -104,6 +104,14 @@ reported in data units.
 Components (the second column) are the tests a comparison measure can select with
 `test:`; the [component reference](comparison_reference.md#statistical-tests) lists
 their parameters.
+
+`seasonal_kendall(..., max_slope_bytes=256 * 1024 * 1024)` separately admits the
+exact pairwise slope array and its per-season numeric workspace. This limit is
+independent of `max_work`; exceeding either returns an unassessed result. The
+implementation allocates one slope array and performs median selection in that
+private storage. It never substitutes sampled slopes or an approximate median.
+The byte setting is a numeric-workspace limit, not a cap on caller inputs or total
+process memory.
 
 ## Multiple testing
 
@@ -352,9 +360,12 @@ class TrimmedMean(InferenceTest):
         from scipy.stats import trim_mean
 
         return bootstrap_difference(
-            data.baseline, data.candidate,
-            statistic=lambda a: trim_mean(a, 0.1, axis=-1), name="trimmed_mean",
-            seed=data.seed, max_work=data.max_work,
+            data.baseline,
+            data.candidate,
+            statistic=lambda a: trim_mean(a, 0.1, axis=-1),
+            name="trimmed_mean",
+            seed=data.seed,
+            max_work=data.max_work,
         )
 ```
 

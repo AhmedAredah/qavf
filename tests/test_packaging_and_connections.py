@@ -253,9 +253,7 @@ def test_primary_key_named_occurrences(registry) -> None:
     )
     result = report.get("INP-004")
     assert result.status is Status.FAIL and result.affected_rows == 2
-    assert result.affected_records == [
-        {"occurrences": 1, "qavf_occurrences": 2, "rows": [0, 1]}
-    ]
+    assert result.affected_records == [{"occurrences": 1, "qavf_occurrences": 2, "rows": [0, 1]}]
 
 
 @pytest.mark.parametrize("column", ["rows", "_position"])

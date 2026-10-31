@@ -41,7 +41,9 @@ def request_bytes(
         if not isinstance(value, Query):
             raise ValueError("isolated runner inputs must be transportable Query descriptors")
         queries[name] = {
-            "sql": value.sql, "connection": value.connection, "parameters": dict(value.parameters)
+            "sql": value.sql,
+            "connection": value.connection,
+            "parameters": dict(value.parameters),
         }
     payload = {
         "version": 1,

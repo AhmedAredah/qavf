@@ -159,7 +159,7 @@ def test_lisa_labels_follow_original_indices(monkeypatch):
     )
     monkeypatch.setattr("qavf.compare.levels.spatial.local_morans_i", lambda *a, **kw: known)
     result = SpatialLevel._lisa(
-        SimpleNamespace(ctx=SimpleNamespace(evidence_limit=10)),
+        SimpleNamespace(ctx=SimpleNamespace(evidence_limit=10, evidence_bytes=1_048_576)),
         SpatialParams(),
         zones,
         kept,

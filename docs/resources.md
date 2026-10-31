@@ -19,8 +19,12 @@ report = validate(
     "readings.parquet",
     config="qavf.yaml",
     resources=ResourceLimits(
-        target_memory="2GiB", cache_memory="256MiB", max_spill="4GiB",
-        max_workers=4, evidence_rows=20, evidence_bytes="64KiB",
+        target_memory="2GiB",
+        cache_memory="256MiB",
+        max_spill="4GiB",
+        max_workers=4,
+        evidence_rows=20,
+        evidence_bytes="64KiB",
         report_bytes="16MiB",
     ),
 )
@@ -218,3 +222,30 @@ their exact projected paths. STA outlier evidence contains raw checked values, g
 keys, diagnostics and a position from the same projected observation; unrelated
 columns are omitted. See [full-data loading](full_data_loading.md) for the capability
 map, remaining materialization, and current measurements.
+
+## Bounded observation spooling (0.7.2)
+
+Small producer batches are detached and coalesced into independent IPC files.
+A merge tree preserves order and avoids repeatedly copying a growing prefix.
+Chunks flush at 65,536 rows or when the shared working allowance cannot admit the
+next fragment. A large incoming batch is written synchronously without a second
+retention copy. The working allowance is at most 16 MiB and, when a memory target
+is supplied, at most one eighth of that target. It is separate from the retained
+cache allowance; disabling caching does not disable bounded working buffers.
+Transient native concatenation/serialization allocations are not a hard RSS cap.
+
+`ResourceLimits(max_spill_files=4096)` (or `engine.max_spill_files`) caps live
+owned IPC files, including files retained by leases or awaiting failed cleanup.
+Exhaustion produces an explicit resource error, never a partial accepted dataset.
+Increase it deliberately for workloads whose byte allowance admits more chunks.
+SQLite work stores and DuckDB temporary files have their own lifecycle and byte
+policies; the IPC file-count setting does not claim to count those files.
+
+Resource diagnostics include `owned_spill_files`, `peak_owned_spill_files`,
+`owned_spill_file_limit`, `spool_working_bytes`, `peak_spool_working_bytes`, and
+`spool_working_budget_bytes`. Owned spill byte counters track logical bytes and
+outstanding SQLite growth reservations. They exclude filesystem block rounding,
+inode/directory overhead, and native temporary allocations. A pending SQLite
+writer can temporarily reserve all remaining owned growth credit. Independent
+reads proceed; concurrent writes may wait for credit. This conservative policy
+avoids replaying partially executed SQL or allowing stores to overspend a quota.

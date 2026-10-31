@@ -406,10 +406,26 @@ def test_runner_owns_unique_temporary_base(tmp_path, monkeypatch, child_result):
     monkeypatch.setattr(runner, "repository_identity", lambda root: copy.deepcopy(IDENTITY))
     for attempt in range(2):
         result = run_tests(
-            root=ROOT, workdir=ROOT, python=Path(sys.executable),
-            output=tmp_path / f"record-{attempt}.json", check_id="probe",
+            root=ROOT,
+            workdir=ROOT,
+            python=Path(sys.executable),
+            output=tmp_path / f"record-{attempt}.json",
+            check_id="probe",
         )
         assert result == (0 if child_result == 0 else 1)
         assert not bases[-1].parent.exists()
     assert bases[0] != bases[1]
     assert sentinel.read_text() == "preserve"
+
+
+def test_windows_benchmark_skip_requires_real_nonwindows_host():
+    node = (
+        "tests/test_performance_runner.py::"
+        "test_real_windows_timeout_reaps_grandchild_and_releases_files"
+    )
+    reason = "real Windows Job Object contract"
+    for system in ("Linux", "Darwin"):
+        assert accepted_skip(node, reason, {"system": system})
+    assert not accepted_skip(node, reason, {"system": "Windows"})
+    assert not accepted_skip(node, "job creation unavailable", {"system": "Linux"})
+    assert not accepted_skip(node + "_other", reason, {"system": "Linux"})

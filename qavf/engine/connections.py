@@ -17,6 +17,7 @@ import duckdb
 import polars as pl
 import pyarrow as pa
 
+from qavf.engine.cleanup import attempt_cleanup, raise_cleanup_errors
 from qavf.engine.resources import retained_size
 from qavf.engine.session import RunSession
 from qavf.settings import ConnectionSpec, SecretSpec
@@ -200,25 +201,43 @@ class SqlConnections:
         """Close connections only after their worker has stopped executing."""
         owner = threading.get_ident() if owner is None else owner
         with self._lock:
-            connections = self._owners.pop(owner, [])
-            self._open = [con for con in self._open if con not in connections]
+            connections = list(self._owners.get(owner, []))
         if owner == threading.get_ident():
             self._local.connections = {}
             self._local.registered = set()
-        for connection in connections:
-            with contextlib.suppress(Exception):
-                connection.close()
-        self.session.close_worker_connections(owner)
+        failures = self._close_selected(connections)
+        failures.extend(attempt_cleanup([lambda: self.session.close_worker_connections(owner)]))
         with self._lock:
-            self._registration_bytes.pop(owner, None)
+            if not self._owners.get(owner):
+                self._registration_bytes.pop(owner, None)
+        raise_cleanup_errors("worker connections could not be fully released", failures)
+
+    def _close_selected(self, connections: Iterable[Connection]) -> list[Exception]:
+        failures = []
+        for con in connections:
+            try:
+                con.close()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                with self._lock:
+                    self._open = [other for other in self._open if other is not con]
+                    for owner, owned in tuple(self._owners.items()):
+                        pending = [other for other in owned if other is not con]
+                        if pending:
+                            self._owners[owner] = pending
+                        else:
+                            self._owners.pop(owner)
+                            self._registration_bytes.pop(owner, None)
+        return failures
 
     def close(self) -> None:
         """Close reusable connections after active invocations have completed."""
         with self._lock:
-            connections, self._open = self._open, []
-        for con in connections:
-            with contextlib.suppress(duckdb.Error):
-                con.close()
+            connections = tuple(self._open)
+        raise_cleanup_errors(
+            "SQL connections could not be fully released", self._close_selected(connections)
+        )
 
     @property
     def open_count(self) -> int:

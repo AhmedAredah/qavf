@@ -47,6 +47,13 @@ class FileParams(SourceParams):
     max_rejected_rows: int = Field(default=0, ge=0)
     """With ``store_rejects`` or ``ignore_errors``: more lines left out than this fails
     INP-002, which lists the first of them by file and line."""
+    rejects_budget: int = Field(default=1000, ge=1, strict=True)
+    """Maximum native CSV error entries across a resolved read manifest.
+
+    Saturated capture supplies a lower bound, never an exact rejected-line count.
+    This bounds diagnostic entries, not line width or process memory. Even a
+    reader ``rejects_limit: 0`` remains bounded by this policy.
+    """
     acknowledge_lossy: bool = False
     """Allow reader options that can leave rows out (``ignore_errors``, ``skip``,
     ``store_rejects``, Excel ``range``/``stop_at_empty``). Rejected CSV rows are then

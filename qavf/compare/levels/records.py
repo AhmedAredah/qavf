@@ -27,6 +27,7 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from qavf._float_accumulator import ExactFloatAccumulator
+from qavf.compare._native import compare_observations
 from qavf.compare.comparators import Materiality
 from qavf.compare.levels import ComparisonLevel, LevelInputs, graded, not_assessed, register_level
 from qavf.compare.levels.groups import group_partitions, precise_frame
@@ -43,6 +44,7 @@ from qavf.compare.significance import (
 )
 from qavf.compare.spec import InferenceParams, TestConfig
 from qavf.engine.registry import RuleParams
+from qavf.engine.sql_read import NativeReadUnavailable
 from qavf.inference.registry import TestInput
 from qavf.inference.results import Significance
 from qavf.keys import key_casts
@@ -122,6 +124,11 @@ def _finite(b: pl.Expr, c: pl.Expr, db: pl.DataType, dc: pl.DataType) -> pl.Expr
 
 def _keyed(inputs: LevelInputs, plan: ComparisonPlan) -> ComparisonResult:
     baseline, candidate = inputs.observations["baseline"], inputs.observations["candidate"]
+    try:
+        return compare_observations(inputs, plan)
+    except NativeReadUnavailable:
+        # Unsupported types are refused before binding, not after lossy work.
+        pass
     if supported(plan):
         with inputs.ctx.work_store("comparison record alignment") as store:
             return compare_indexed(
@@ -421,7 +428,9 @@ def _shift_matched(
                  "baseline_mean": None if means[0] is None else float(means[0]),
                  "candidate_mean": None if means[1] is None else float(means[1])}
             )  # fmt: skip
-    judgement = judge(tested, inference, members, inputs.ctx.evidence_limit)
+    judgement = judge(
+        tested, inference, members, inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes
+    )
     return _shift_check(inputs, numeric, tested, inference, judgement, described)
 
 
@@ -497,7 +506,7 @@ def _shift_check(
     described: list[dict[str, Any]],
 ) -> _Shift:
     failed, unassessed = judgement.failed, judgement.unassessed
-    leaders = LargestEvidence(inputs.ctx.evidence_limit)
+    leaders = LargestEvidence(inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes)
     for position in failed or unassessed:
         record = dict(described[position])
         b, c = record["baseline_mean"], record["candidate_mean"]

@@ -96,8 +96,8 @@
   {% endif %}
 
   <h2>Failures ({{ failures | length }})</h2>
-  {% for result in failures %}
-  <article class="card finding" id="{{ result | anchor }}">
+  {% for view in failures %}{% set result = view.result %}
+  <article class="card finding" id="{{ view.anchor }}">
     <header>
       {{ status_chip(result.status) }} {{ severity_chip(result.severity) }}
       <h3><span class="mono">{{ result.rule_id }}</span> · {{ result.name }}{% if result.check %} — <span class="mono">{{ result.check }}</span>{% endif %}</h3>
@@ -111,10 +111,10 @@
       <span>Time: {{ result.execution_time_s | duration }}</span>
     </div>
     {% if result.recommendation %}<div class="advice"><strong>Recommendation.</strong> {{ result.recommendation }}</div>{% endif %}
-    {% if result.metrics %}<p><a href="#metrics-{{ result | anchor }}">Structured metrics and comparison identity</a></p>{% endif %}
+    {% if result.metrics %}<p><a href="#metrics-{{ view.anchor }}">Structured metrics and comparison identity</a></p>{% endif %}
     {% if result.affected_records %}
     <details {{ "open" if loop.index <= 3 else "" }}>
-      <summary>Affected records{% if result.affected_count > result.affected_records | length %} (showing {{ result.affected_records | length }} of {{ "{:,}".format(result.affected_count) }}{% if result.unit %} {{ result.unit }}{% endif %}){% endif %}</summary>
+      <summary>Affected records{% if result.affected_count > result.affected_records | length %} (showing {{ result.affected_records | length }} of {% if not result.affected_count_exact %}at least {% endif %}{{ "{:,}".format(result.affected_count) }}{% if result.unit %} {{ result.unit }}{% endif %}){% endif %}</summary>
       {% with records = result.affected_records %}{% include "records.html.j2" %}{% endwith %}
     </details>
     {% endif %}
@@ -142,15 +142,15 @@
         <tr><th>Rule</th><th>Name</th><th>Category</th><th>Status</th><th>Severity</th><th>Message</th><th class="num">Affected</th><th class="num">Time</th></tr>
       </thead>
       <tbody>
-      {% for result in report.results %}
+      {% for view in result_views %}{% set result = view.result %}
         <tr data-status="{{ result.status.value }}">
-          <td class="mono">{% if result.failed %}<a href="#{{ result | anchor }}">{{ result.rule_id }}</a>{% else %}{{ result.rule_id }}{% endif %}</td>
+          <td class="mono">{% if result.failed %}<a href="#{{ view.anchor }}">{{ result.rule_id }}</a>{% else %}{{ result.rule_id }}{% endif %}</td>
           <td>{{ result.name }}{% if result.check %}<br><span class="mono muted">{{ result.check }}</span>{% endif %}</td>
           <td>{{ result.category }}</td>
           <td>{{ status_chip(result.status) }}</td>
           <td>{{ severity_chip(result.severity) }}</td>
           <td>{{ result.message }}</td>
-          <td class="num">{% if result.affected_count %}{{ "{:,}".format(result.affected_count) }}{% if result.unit %} <span class="muted">{{ result.unit }}</span>{% endif %}{% else %}—{% endif %}</td>
+          <td class="num">{% if result.affected_count %}{% if not result.affected_count_exact %}at least {% endif %}{{ "{:,}".format(result.affected_count) }}{% if result.unit %} <span class="muted">{{ result.unit }}</span>{% endif %}{% else %}—{% endif %}</td>
           <td class="num">{{ result.execution_time_s | duration }}</td>
         </tr>
       {% endfor %}
@@ -192,8 +192,8 @@
     <pre>{% for chunk in audit_chunks(metadata) %}{{ chunk }}{% endfor %}</pre>
   </details>
   <details class="card"><summary>Metrics for all assessed checks</summary>
-    {% for result in report.results %}{% if result.metrics %}
-      <h3 id="metrics-{{ result | anchor }}">{{ result.label }}</h3><pre>{% for chunk in audit_chunks(shown_metrics(result)) %}{{ chunk }}{% endfor %}</pre>
+    {% for view in result_views %}{% set result = view.result %}{% if result.metrics %}
+      <h3 id="metrics-{{ view.anchor }}">{{ result.label }}</h3><pre>{% for chunk in audit_chunks(shown_metrics(result)) %}{{ chunk }}{% endfor %}</pre>
     {% endif %}{% endfor %}
   </details>
   <footer>

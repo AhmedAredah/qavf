@@ -36,17 +36,17 @@ runtime dependency to the QAVF wheel. The production API remains unchanged.
 | macOS / Python 3.12 | Source and installed wheel, normal and optimized Python |
 | Linux / Python 3.12 / direct dependency floors | Installed wheel, normal and optimized Python |
 | Linux / Python 3.12 / core dependencies only | Installed wheel capability checks, normal and optimized Python |
-| Linux / Python 3.12 / live integration dependencies | Required HTTP, PostgreSQL and S3-compatible service tests |
+| Linux / Python 3.12 / live integration dependencies | Required HTTP, PostgreSQL, S3-compatible and Azure Blob service tests |
 
 The routine [CI workflow](../.github/workflows/ci.yml) runs on pushes to `main`,
 pull requests and manual dispatch, skipping documentation-only changes. It checks
-lint, types and generated docs and runs the source suite on Linux 3.12, plus the
-platform-specific tests on Windows and macOS. It has read-only repository
+lint, types and generated docs and runs the source suite on Linux 3.12, and the same source suite on Windows and macOS. It has read-only repository
 permissions and does not publish packages.
 
 The [release workflow](../.github/workflows/verify.yml) runs the complete matrix
-above on each `v*` tag, including dependency floors, the core-only wheel and live
-integrations, and publishes only when the aggregate gate passes. A green routine
+above on each `v*` tag or manual dispatch, including dependency floors, the
+core-only wheel and live integrations. It retains host evidence and an aggregate
+decision; it has read-only permissions and does not publish packages or releases. A green routine
 CI run does not replace the complete aggregate gate. Each host can also run its
 full share locally with `scripts/verify_platform.py` (see below).
 
@@ -149,7 +149,7 @@ against a malicious actor who can modify the workflow and records together.
 
 ## Accepted inapplicable branches
 
-No arbitrary allow-skip flag is provided. Four existing test families have narrow
+No arbitrary allow-skip flag is provided. Platform and optional-capability test families have narrow
 exceptions, checked against the recorded runtime capabilities and exact reason:
 
 1. The deliberate missing-SciPy branch when SciPy is installed. The core-only gate
@@ -199,3 +199,15 @@ run only one verification process per checkout because it rebuilds `dist`.
 A host pass does not qualify the complete release: dependency floors and live
 integrations remain separate gates. Native Windows/macOS results must come
 from actual runs on those operating systems.
+
+The benchmark Windows process-tree test is skipped only on Linux/macOS, with an
+exact node ID and reason in the policy. Windows must execute it; a Job Object
+failure on Windows is a failing test. Workflows and skip-policy unit tests are
+not Windows execution evidence.
+
+The manual [current dependency probe](../.github/workflows/dependency-probe.yml)
+resolves a fresh stable dependency lock and runs ordinary/optimized source and
+installed-wheel checks on Linux Python 3.12–3.14. It retains that candidate lock
+and actual-version evidence without committing it. These advisory records have
+a different lock identity and cannot satisfy the committed-lock release gate;
+a successful probe does not silently change supported dependency floors.

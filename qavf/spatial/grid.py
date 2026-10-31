@@ -186,7 +186,6 @@ def assign_cells(
     if grid.crs is None or same_crs(crs, grid.crs):
         labelled = plan.with_columns(cell_labels(kx, ky, grid).alias(column))
     else:
-        assert connection is not None
         taken = [*schema, column]
         names = [fresh_internal(f"cell_{role}", taken) for role in ("x", "y")]
         distinct = collect(
@@ -196,10 +195,15 @@ def assign_cells(
         )
         if distinct.height > limits.max_points:
             raise ValueError(f"grid assignment exceeds max_points ({limits.max_points:,})")
+        if not distinct.height:
+            labelled = plan.with_columns(pl.lit(None, dtype=pl.String).alias(column))
+            return Assigned(labelled, 0, 0, 0, 0)
+        if connection is None:
+            from qavf.spatial.extension import SpatialUnavailable
+
+            raise SpatialUnavailable("grid coordinate transformation needs a spatial connection")
         distinct = distinct.with_columns(pl.int_range(0, pl.len(), dtype=pl.Int64).alias("pid"))
-        points = distinct.select(
-            "pid", pl.col(names[0]).alias("px"), pl.col(names[1]).alias("py")
-        )
+        points = distinct.select("pid", pl.col(names[0]).alias("px"), pl.col(names[1]).alias("py"))
         with connection() as con:
             moved = pl.concat(
                 [

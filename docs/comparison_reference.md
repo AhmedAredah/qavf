@@ -617,6 +617,10 @@ Zone ``from`` -> zone ``to`` (with a split ``weight``), from a dataset, file or 
 | `dataset` | `str \| None` | `None` | A configured dataset holding the pairs. |
 | `path` | `str \| None` | `None` | A local CSV or Parquet file holding the pairs. |
 | `pairs` | `tuple[tuple[Any, Any] \| tuple[Any, Any, float], ...] \| None` | `None` | Inline ``[from, to]`` or ``[from, to, weight]`` pairs. |
+| `data` | `Any \| None` | `None` | A File, Dataset, Query, Loader, DataSource or supported frame input (Python API). |
+| `options` | `dict[str, Any]` | `{}` | Reader options for ``path``, including explicit CSV ``types`` for zone ids. |
+| `text_columns` | `tuple[str, ...]` | `[]` | Path CSV columns that must be read as text, preserving leading zeros. |
+| `row_budget` | `int \| None` | `None` | Maximum rows for a path input; configured datasets retain their own policies. |
 | `from_column` | `str` | `from` | Column of the child (or old) zone ids. |
 | `to_column` | `str` | `to` | Column of the parent (or new) zone ids. |
 | `weight_column` | `str \| None` | `None` | Split shares of each ``from`` zone; weight 1 for every pair when omitted. |
@@ -930,6 +934,10 @@ Zone ``from`` -> zone ``to`` (with a split ``weight``), from a dataset, file or 
 | `dataset` | `str \| None` | `None` | A configured dataset holding the pairs. |
 | `path` | `str \| None` | `None` | A local CSV or Parquet file holding the pairs. |
 | `pairs` | `tuple[tuple[Any, Any] \| tuple[Any, Any, float], ...] \| None` | `None` | Inline ``[from, to]`` or ``[from, to, weight]`` pairs. |
+| `data` | `Any \| None` | `None` | A File, Dataset, Query, Loader, DataSource or supported frame input (Python API). |
+| `options` | `dict[str, Any]` | `{}` | Reader options for ``path``, including explicit CSV ``types`` for zone ids. |
+| `text_columns` | `tuple[str, ...]` | `[]` | Path CSV columns that must be read as text, preserving leading zeros. |
+| `row_budget` | `int \| None` | `None` | Maximum rows for a path input; configured datasets retain their own policies. |
 | `from_column` | `str` | `from` | Column of the child (or old) zone ids. |
 | `to_column` | `str` | `to` | Column of the parent (or new) zone ids. |
 | `weight_column` | `str \| None` | `None` | Split shares of each ``from`` zone; weight 1 for every pair when omitted. |

@@ -322,13 +322,16 @@ class ConvertedColumns:
             plan = ConvertedPlan.resolved(conversions, observed.reduce)
             with observed.derived(plan) as converted:
                 return self.rule._planned_dataset(
-                    self.ctx, self.dataset, self._contract(converted.schema()),
-                    converted.schema(), converted,
+                    self.ctx,
+                    self.dataset,
+                    self._contract(converted.schema()),
+                    converted.schema(),
+                    converted,
                 )
 
     def _needed(self) -> list[str]:
         actual = self.ctx.schema(self.dataset)
-        needed: list[str] = [*(self.schema.primary_key or [])]
+        needed: list[str] = []
         for column in self.columns:
             spec = self.schema.columns[column]
             needed.append(column)
@@ -337,6 +340,8 @@ class ConvertedColumns:
             for check in spec.all_checks():
                 if check.where:
                     needed.extend(pl.sql_expr(check.where).meta.root_names())
+        if self.ctx.evidence_limit and self.ctx.evidence_bytes:
+            needed.extend(EvidenceColumns(self.schema, tuple(actual)).of(needed))
         wanted = set(needed)
         return [name for name in actual if name in wanted]
 

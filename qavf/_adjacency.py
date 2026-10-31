@@ -41,6 +41,18 @@ class CompactAdjacency(Mapping[int, Mapping[int, float]]):
     def __init__(
         self, offsets: np.ndarray, indices: np.ndarray, values: np.ndarray | None = None
     ) -> None:
+        offsets, indices, values = self._checked(offsets, indices, values)
+        n = len(offsets) - 1
+        self._adopt(
+            offsets.copy(),
+            indices.astype(np.int32 if n < 2**31 else np.int64, copy=True),
+            None if values is None else values.copy(),
+        )
+
+    @staticmethod
+    def _checked(
+        offsets: np.ndarray, indices: np.ndarray, values: np.ndarray | None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
         offsets = np.asarray(offsets)
         if not np.issubdtype(offsets.dtype, np.integer):
             raise ValueError("sparse adjacency offsets must be integers")
@@ -70,12 +82,30 @@ class CompactAdjacency(Mapping[int, Mapping[int, float]]):
             unordered[boundaries - 1] = False
             if unordered.any():
                 raise ValueError("sparse adjacency rows must contain sorted unique neighbours")
-        self._offsets = offsets.copy()
-        self._indices = indices.astype(np.int32 if n < 2**31 else np.int64, copy=True)
-        self._values = None if values is None else values.copy()
+        return offsets, indices, values
+
+    def _adopt(self, offsets: np.ndarray, indices: np.ndarray, values: np.ndarray | None) -> None:
+        self._offsets, self._indices, self._values = offsets, indices, values
         for array in (self._offsets, self._indices, self._values):
             if array is not None:
                 array.flags.writeable = False
+
+    @classmethod
+    def _from_owned(cls, offsets: np.ndarray, indices: np.ndarray) -> CompactAdjacency:
+        """Transfer a private builder's exclusive buffers, retaining normal validation.
+
+        Only package builders may use this path; public construction always
+        detaches caller storage. The builder must discard all mutable aliases.
+        """
+        offsets, indices, _ = cls._checked(offsets, indices, None)
+        wanted = np.dtype(np.int32 if len(offsets) - 1 < 2**31 else np.int64)
+        if any(not a.flags.owndata or not a.flags.c_contiguous for a in (offsets, indices)):
+            raise ValueError("owned adjacency requires exclusive contiguous arrays")
+        if indices.dtype != wanted:
+            raise ValueError("owned adjacency indices must have their final compact dtype")
+        graph = cls.__new__(cls)
+        graph._adopt(offsets, indices, None)
+        return graph
 
     @classmethod
     def from_rows(cls, rows: Sequence[np.ndarray]) -> CompactAdjacency:

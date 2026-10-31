@@ -31,7 +31,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -93,11 +93,15 @@ class TypeViolations:
     """Values of one column that are not of its declared type.
 
     ``sample`` holds the first few as ``_row`` (0-based position), ``value`` (the
-    text as read) and any requested context columns.
+    text as read) and any requested context columns. Built-in readers nest
+    context under ``context_field`` so a user column cannot overwrite metadata;
+    plugins omitting that field retain the legacy flat sample contract.
     """
 
     count: int
     sample: tuple[dict[str, Any], ...] = ()
+    context_field: str | None = None
+    """Nested user-context field; ``None`` retains legacy flat plugin samples."""
 
 
 class SourceParams(BaseModel):
@@ -294,6 +298,19 @@ class DataSource[P: SourceParams](ABC):
         returning a plan does not assess or materialize its records.
         """
         return None
+
+    def batch_schema(self) -> dict[str, pl.DataType] | None:
+        """Declared schema for an owned incremental source, without opening it."""
+        return None
+
+    def open_batches(self) -> AbstractContextManager[Iterator[pl.DataFrame]]:
+        """Open one owned batch stream; its context closes on every exit path.
+
+        The engine checks cancellation, complete-source row policy and each
+        batch's schema before publishing one coherent admitted observation.
+        Sources implementing this hook also declare :meth:`batch_schema`.
+        """
+        raise NotImplementedError
 
     def snapshot_connection(self) -> str | None:
         """The configured connection this source reads through, when it can take part in

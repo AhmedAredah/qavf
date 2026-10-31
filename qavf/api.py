@@ -8,6 +8,7 @@ from typing import Any
 from qavf.engine.runner import QARunner
 from qavf.inputs.normalize import Configuration, prepare
 from qavf.inputs.resources import ResourceLimits
+from qavf.profiles import ProfileName, apply_profile
 from qavf.reports.models import QAReport
 from qavf.settings import SchemaSpec
 
@@ -18,6 +19,7 @@ def validate(
     schema: SchemaSpec | Mapping[str, Any] | None = None,
     config: Configuration = None,
     resources: ResourceLimits | None = None,
+    profile: ProfileName | None = None,
 ) -> QAReport:
     """Validate explicit contracts and return a report without writing files.
 
@@ -26,8 +28,19 @@ def validate(
     loading safeguards. Plain mappings always name datasets, never columns.
     All input names and contracts are checked before adapting or executing data.
     Lazy frames, deferred loaders and caller-owned handles keep their ownership.
+    ``profile`` explicitly combines declared validity checks with configured
+    regression or change analysis; it never infers acceptance limits.
     """
-    settings, frames = prepare(data, schema=schema, config=config, resources=resources)
+    if profile is None:
+        settings, frames = prepare(data, schema=schema, config=config, resources=resources)
+    else:
+        from qavf.inputs.normalize import _adapt, prepare_configuration
+
+        settings, inputs = prepare_configuration(
+            data, schema=schema, config=config, resources=resources
+        )
+        settings = apply_profile(settings, profile)
+        frames = _adapt(inputs, settings)
     return QARunner(settings).run(frames=frames)
 
 

@@ -21,6 +21,10 @@ the unreleased package does not retain aliases for former private locations.
 
 | Area | Modules | Responsibility |
 | --- | --- | --- |
+| Neutral parameters and scalars | `parameters.py`, `scalars.py` | Strict plugin parameter contract and lossless supported scientific-scalar normalization; the old engine import remains an alias. |
+| Public planning | `planning.py`, `profiles.py` | Data-free plan descriptions and explicit check expansion; neither owns input execution. |
+| Auxiliary input adaptation | `inputs/auxiliary.py` | Apply source admission and parent-owned lifetimes to crosswalk dependencies without creating a separate execution engine. |
+| Comparison evidence | `compare/evidence.py` | Canonical byte admission at construction boundaries, with typed publication guards and complete outcome counts. |
 | Public input preparation | `api.py`, `inputs/` | A thin `validate` facade; separate descriptors, resource policy, source adapters, and normalization into one validated run request. |
 | Source definitions | `sources/parameters.py`, `formats.py`, `frames.py` | Parameter validation, format inference and dataframe conversion. |
 | Source execution | `sources/file.py`, `query.py`, `python.py`, `native.py` | File policy, shared SQL source lifecycle, Python loaders and native connection/budget primitives. |

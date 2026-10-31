@@ -10,7 +10,7 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
 from qavf.redaction import exception_details, redact_text
-from qavf.rules._column_plan import ColumnPlan
+from qavf.rules._column_contract import ColumnOutcome, ColumnPlan
 from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._predicates import (
     compatibility_error,
@@ -206,11 +206,11 @@ def evaluate_eager(
                 except Exception as exc:
                     unusable.append(f"where condition failed: {type(exc).__name__}: {exc}")
                 else:
-                    if scope_rows < check.min_applicable_rows:
-                        unusable.append(
-                            f"only {scope_rows} row(s) match 'where: {check.where}', "
-                            f"fewer than min_applicable_rows {check.min_applicable_rows}"
-                        )
+                    problem = ColumnOutcome(dataset, column, label, check).applicability_problem(
+                        scope_rows
+                    )
+                    if problem:
+                        unusable.append(problem)
             # Column-level limits are evaluated directly, on exact native values.
             # Missing rows are evidence when values must be present or are too often absent.
             missing_rows = check.not_null
@@ -308,31 +308,11 @@ def evaluate_eager(
                     f"{type(exc).__name__}: {exc}.",
                 )
                 continue
-            if count:
-                also = f" Column-level: {'; '.join(problems)}." if problems else ""
-                fail(
-                    column,
-                    label,
-                    check,
-                    f"{plural(count, 'value')} of {scope_rows:,} in {dataset}.{column} "
-                    f"{'violates' if count == 1 else 'violate'} '{label}'.{also}",
-                    affected=affected,
-                    affected_count=count,
-                    total_records=scope_rows,
-                    unit="rows",
-                    metrics={"column_problems": problems} if problems else {},
-                )
-            elif problems:
-                fail(
-                    column,
-                    label,
-                    check,
-                    f"{dataset}.{column} fails '{label}': {'; '.join(problems)}.",
-                    affected=[
-                        {"dataset": dataset, "column": column, "problem": p} for p in problems
-                    ],
-                    unit="problems",
-                )
+            finding = ColumnOutcome(dataset, column, label, check).finding(
+                count, scope_rows, problems, affected
+            )
+            if finding is not None:
+                failures.append(finding)
             else:
                 passed.append(f"{dataset}.{column}: {label}")
     return failures, passed

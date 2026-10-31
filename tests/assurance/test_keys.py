@@ -43,9 +43,7 @@ def test_composite_key_counts_match_python_counter(backend, rows, primary):
     counts, null_rows, _ = key_counts(rows, POLICIES)
     duplicated = {key: count for key, count in counts.items() if count > 1}
     schema = {
-        "columns": {
-            name: {**spec, "nullable": not primary} for name, spec in COLUMNS.items()
-        },
+        "columns": {name: {**spec, "nullable": not primary} for name, spec in COLUMNS.items()},
         **({"primary_key": ["id", "kind"]} if primary else {"unique_keys": [["id", "kind"]]}),
     }
     with adapted_frames({"data": frame_for(rows)}, backend) as inputs:

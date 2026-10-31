@@ -41,6 +41,7 @@ def summarize_rows(
     sample_order: str | None = None,
     build: Callable[[pl.LazyFrame], pl.LazyFrame] | None = None,
     sql: str | None = None,
+    reduce: Callable[[Callable[[pl.LazyFrame], pl.LazyFrame]], pl.DataFrame] | None = None,
 ) -> RowSummary:
     """Reduce a labelled plan; every nonnull problem belongs to exactly one label."""
     reserved = {name.casefold() for name in (*sample_columns, dataset, problem)}
@@ -87,7 +88,12 @@ def summarize_rows(
                 .implode()
                 .alias(sample)
             )
-        reduced = ctx.reduce(dataset, lambda source: build(source).select(reducers_lazy))
+
+        def plan(source: pl.LazyFrame) -> pl.LazyFrame:
+            assert build is not None
+            return build(source).select(reducers_lazy)
+
+        reduced = reduce(plan) if reduce is not None else ctx.reduce(dataset, plan)
     values = reduced[sample][0] if limit else None
     evidence = values.struct.unnest() if values is not None else pl.DataFrame()
     return RowSummary(

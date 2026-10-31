@@ -33,7 +33,9 @@ def peak_rss_kib() -> int | None:
         psapi = ctypes.WinDLL("psapi")
         kernel32.GetCurrentProcess.restype = wintypes.HANDLE
         psapi.GetProcessMemoryInfo.argtypes = [
-            wintypes.HANDLE, ctypes.POINTER(_Counters), wintypes.DWORD
+            wintypes.HANDLE,
+            ctypes.POINTER(_Counters),
+            wintypes.DWORD,
         ]
         psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
         counters = _Counters()

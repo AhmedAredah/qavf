@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import math
+from array import array
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -50,6 +51,7 @@ from qavf.inference.trend import kendall_tau
 from qavf.numeric import exact_number, finite_float, numeric_close
 from qavf.redaction import exception_details
 from qavf.rules._contracts import isolate_contract, unassessed_contract
+from qavf.rules._deferred_evidence import DeferredEvidence
 from qavf.rules._exact_grouped import exact_grouped, supports_exact
 from qavf.rules._execution import projected_frame
 from qavf.rules._grouped import (
@@ -90,6 +92,7 @@ from qavf.temporal.buckets import (
     calendar_position,
     sequence_positions,
 )
+from qavf.typed_values import has_temporal, precise_frame
 
 logger = logging.getLogger(__name__)
 
@@ -424,8 +427,16 @@ def _groups(
     if not spec.group_by:
         yield {}, series
         return
+    temporal = any(has_temporal(series.schema[column]) for column in spec.group_by)
     for key, frame in series.group_by(list(spec.group_by), maintain_order=True):
-        yield dict(zip(spec.group_by, key, strict=True)), frame
+        # The iterator's Python key already truncates nanoseconds. Recover the
+        # typed identity from its native partition before converting evidence.
+        identity = (
+            precise_frame(frame.select(spec.group_by).head(1)).row(0, named=True)
+            if temporal
+            else dict(zip(spec.group_by, key, strict=True))
+        )
+        yield identity, frame
 
 
 def _count_sample(frame: pl.DataFrame, predicate: pl.Expr, limit: int) -> tuple[int, pl.DataFrame]:
@@ -719,19 +730,24 @@ class TrendDirectionRule(_TemporalRule):
     Params: ClassVar[type[RuleParams]] = TrendDirectionParams
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
+        with DeferredEvidence(ctx) as evidence:
+            return self._evaluate(ctx, evidence)
+
+    def _evaluate(self, ctx: DataContext, evidence: DeferredEvidence) -> list[Finding]:
         if not any(spec.expected_trend for spec in self.params.series):
             return [Finding.skip("No series declares an expected trend.")]
         if scipy_stats() is None:
             return [Finding.unassessed(_MISSING_STATS)]
-        records = BoundedEvidence(ctx.evidence_limit)
+        records = BoundedEvidence(ctx.evidence_limit, byte_limit=ctx.evidence_bytes)
         blocked: list[Finding] = []
         used: list[SeriesSpec] = []
         examined = 0
         too_short = 0
-        family: list[float] = []
+        family = array("d")
         """Kendall p-values of every examined series with a defined tau."""
-        against: list[tuple[int, float, dict[str, Any]]] = []
-        """Wrong-way series: their place in ``family``, tau and evidence."""
+        against = array("Q")
+        effects = array("d")
+        """Wrong-way family ordinals and effects; presentation payloads live in a store."""
         corrected = self.params.correction != "none"
         for spec in self.params.series:
             with isolate_contract(spec.label, (spec.dataset,), blocked):
@@ -777,21 +793,38 @@ class TrendDirectionRule(_TemporalRule):
                         if not corrected:
                             if self.params.alpha is not None and result.p_value > self.params.alpha:
                                 continue
-                            if len(records.records) >= records.limit:
+                            if len(records.records) >= records.limit or not ctx.evidence_bytes:
                                 records.count += 1
                                 continue
-                        record = annotate(
-                            key,
-                            series=spec.label,
-                            expected=spec.expected_trend,
-                            kendall_tau=round(tau, 4),
-                            periods=frame.height,
-                            first_value=frame[_name(spec, "value")][0],
-                            last_value=frame[_name(spec, "value")][-1],
-                        )
                         if corrected:
-                            against.append((len(family) - 1, tau, record))
+                            index = len(family) - 1
+                            against.append(index)
+                            effects.append(tau)
+                            # Without an alpha threshold every wrong-way group
+                            # will be retained in the count. Only the first K
+                            # can enter deterministic evidence after correction.
+                            if self.params.alpha is not None or len(against) <= records.limit:
+                                evidence.add(
+                                    index,
+                                    (
+                                        key,
+                                        spec.label,
+                                        spec.expected_trend,
+                                        frame.height,
+                                        frame[_name(spec, "value")][0],
+                                        frame[_name(spec, "value")][-1],
+                                    ),
+                                )
                         else:
+                            record = annotate(
+                                key,
+                                series=spec.label,
+                                expected=spec.expected_trend,
+                                kendall_tau=round(tau, 4),
+                                periods=frame.height,
+                                first_value=frame[_name(spec, "value")][0],
+                                last_value=frame[_name(spec, "value")][-1],
+                            )
                             records.append(
                                 {
                                     **record,
@@ -802,9 +835,26 @@ class TrendDirectionRule(_TemporalRule):
                                 }
                             )
         adjusted = adjust(family, self.params.correction) if against else np.empty(0)
-        for index, tau, record in against:
+        for index, tau in zip(against, effects, strict=True):
             if self.params.alpha is not None and adjusted[index] > self.params.alpha:
                 continue
+            if len(records.records) >= records.limit or not ctx.evidence_bytes:
+                records.count += 1
+                continue
+            payload = evidence.get(index)
+            if payload is None:
+                records.count += 1
+                continue
+            key, label, expected, periods, first, last = payload
+            record = annotate(
+                key,
+                series=label,
+                expected=expected,
+                kendall_tau=round(tau, 4),
+                periods=periods,
+                first_value=first,
+                last_value=last,
+            )
             records.append(
                 {
                     **record,

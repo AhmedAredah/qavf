@@ -19,7 +19,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from fractions import Fraction
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -48,6 +47,14 @@ class Crosswalk(RuleParams):
     """A local CSV or Parquet file holding the pairs."""
     pairs: tuple[tuple[Any, Any] | tuple[Any, Any, float], ...] | None = None
     """Inline ``[from, to]`` or ``[from, to, weight]`` pairs."""
+    data: Any | None = None
+    """A File, Dataset, Query, Loader, DataSource or supported frame input (Python API)."""
+    options: dict[str, Any] = Field(default_factory=dict)
+    """Reader options for ``path``, including explicit CSV ``types`` for zone ids."""
+    text_columns: tuple[str, ...] = ()
+    """Path CSV columns that must be read as text, preserving leading zeros."""
+    row_budget: int | None = Field(default=None, ge=1)
+    """Maximum rows for a path input; configured datasets retain their own policies."""
     from_column: str = "from"
     """Column of the child (or old) zone ids."""
     to_column: str = "to"
@@ -59,14 +66,27 @@ class Crosswalk(RuleParams):
 
     @model_validator(mode="after")
     def _one_source(self) -> Crosswalk:
-        if sum(value is not None for value in (self.dataset, self.path, self.pairs)) != 1:
-            raise ValueError("a crosswalk needs exactly one of 'dataset', 'path' or 'pairs'")
+        if (
+            sum(value is not None for value in (self.dataset, self.path, self.pairs, self.data))
+            != 1
+        ):
+            raise ValueError(
+                "a crosswalk needs exactly one of 'dataset', 'path', 'pairs' or 'data'"
+            )
         if self.pairs is not None and not self.pairs:
             raise ValueError("'pairs' must list at least one pair")
+        if self.path is None and (self.options or self.text_columns or self.row_budget is not None):
+            raise ValueError(
+                "crosswalk reader options require 'path'; use Dataset policy with 'data'"
+            )
         return self
 
     def label(self) -> str:
-        return self.dataset or self.path or "inline crosswalk"
+        return (
+            self.dataset
+            or self.path
+            or ("input crosswalk" if self.data is not None else "inline crosswalk")
+        )
 
     def datasets(self) -> frozenset[str]:
         return frozenset({self.dataset}) if self.dataset is not None else frozenset()
@@ -88,13 +108,26 @@ def pairs_frame(ctx: DataContext | None, crosswalk: Crosswalk) -> pl.DataFrame:
             raise ValueError(f"crosswalk dataset {crosswalk.dataset!r} needs a data context")
         frame = ctx.project(crosswalk.dataset, columns)
     else:
-        assert crosswalk.path is not None
-        path = ctx.resolve_path(crosswalk.path) if ctx is not None else Path(crosswalk.path)
-        parquet = path.suffix.lower() in (".parquet", ".pq")
-        frame = pl.read_parquet(path, columns=columns) if parquet else pl.read_csv(path)
-        if absent := [c for c in columns if c not in frame.columns]:
-            raise ValueError(f"crosswalk {path.name!r} lacks column(s) {', '.join(absent)}")
-        frame = frame.select(columns)
+        from qavf.inputs.auxiliary import project_input
+        from qavf.inputs.descriptors import Dataset, File
+
+        data = crosswalk.data
+        if crosswalk.path is not None:
+            data = File(
+                crosswalk.path,
+                columns=columns,
+                options=crosswalk.options,
+                text_columns=crosswalk.text_columns,
+            )
+            if crosswalk.row_budget is not None:
+                data = Dataset(data, load_policy={"row_budget": crosswalk.row_budget})
+        if ctx is None:
+            from qavf.engine.context import DataContext
+
+            with DataContext() as owner:
+                frame = project_input(owner, data, columns)
+        else:
+            frame = project_input(ctx, data, columns)
     weight = pl.col(crosswalk.weight_column) if crosswalk.weight_column else pl.lit(1.0)
     return frame.select(
         pl.col(crosswalk.from_column).alias(SOURCE),

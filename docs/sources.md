@@ -33,6 +33,7 @@ Tabular files with native SQL scans or lossless typed Polars plans.
 | `min_files` | `int \| None` | `None` | With a local glob: fewer matching files than this fails the load (a glob alone only proves that some files matched). |
 | `declared_columns` | `dict[str, TextType]` | `{}` | CSV columns read as text and converted to their declared type in the same scan, so the reader's sample never decides their type; a value that is not of the type is missing, and INP-002 lists it. Filled from the dataset's schema. |
 | `max_rejected_rows` | `int` | `0` | With ``store_rejects`` or ``ignore_errors``: more lines left out than this fails INP-002, which lists the first of them by file and line. |
+| `rejects_budget` | `int` | `1000` | Maximum native CSV error entries across a resolved read manifest. Saturated capture supplies a lower bound, never an exact rejected-line count. This bounds diagnostic entries, not line width or process memory. Even a reader ``rejects_limit: 0`` remains bounded by this policy. |
 | `acknowledge_lossy` | `bool` | `False` | Allow reader options that can leave rows out (``ignore_errors``, ``skip``, ``store_rejects``, Excel ``range``/``stop_at_empty``). Rejected CSV rows are then counted and reported. |
 
 ## `python`

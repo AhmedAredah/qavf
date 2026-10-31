@@ -128,6 +128,7 @@ class FreshnessRule(Rule):
                             datasets=(check.dataset,),
                         ).item()
                     else:
+
                         def select_latest(
                             frame: pl.LazyFrame, expr: pl.Expr = reduction
                         ) -> pl.LazyFrame:

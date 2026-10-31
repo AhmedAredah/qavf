@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from fractions import Fraction
+from functools import partial
 
 import polars as pl
 
@@ -386,59 +387,73 @@ def grouped_quantile(
     alias: str,
     probability: float | Decimal,
 ) -> pl.DataFrame:
-    """Exact NumPy-linear quantiles per group as canonical rational strings.
+    """One exact NumPy-linear quantile; see :func:`grouped_quantiles`."""
+    return grouped_quantiles(relation, keys, value, {alias: probability})
 
-    The backend selects the two bracketing order statistics in their stored
-    dtype; interpolation is then exact (:func:`~qavf.statistics.ordered.linear_quantile`),
-    so integers beyond 2**53 and decimals are never rounded. Null and NaN are
-    missing; a group without usable values has no quantile.
+
+def grouped_quantiles(
+    relation: ProjectedRelation,
+    keys: Sequence[str],
+    value: str,
+    probabilities: Mapping[str, float | Decimal],
+) -> pl.DataFrame:
+    """Share one native reduction across compatible exact quantile requests.
+
+    Bracketing values remain in their stored dtype. Only the G-row results
+    cross into Python for exact rational interpolation; no group value lists
+    are materialized there. The single-quantile API uses this same kernel.
     """
     dtype = relation.schema[value]
     if not dtype.is_numeric() and dtype != pl.Null:
         raise ValueError(f"quantiles require numeric values, found {dtype}")
-    exact = Fraction(str(probability))
-    if not 0 <= exact <= 1:
-        raise ValueError("quantile probabilities must lie in [0, 1]")
-    taken = [*relation.schema, alias]
-    count, low, high = (fresh_internal(name, taken) for name in ("q_count", "q_low", "q_high"))
+    if not probabilities:
+        raise ValueError("at least one quantile is required")
+    taken = [*relation.schema, *probabilities]
+    count = fresh_internal("q_count", taken)
+    taken.append(count)
     measured = numeric_expr(value, dtype)
     ordered = measured.drop_nulls().sort()
     size = measured.count()
-    # A count fits UInt64. With a numerator below 2**63, their product
-    # therefore fits signed Int128, regardless of the actual group size.
-    # Decimal probabilities can exceed that proven domain; only their scalar
-    # group counts cross the arbitrary-precision fallback, never member rows.
-    if exact.numerator < 2**63 and exact.denominator < 2**127:
-        rank = (size.cast(pl.Int128) - 1).clip(lower_bound=0) * pl.lit(
-            exact.numerator, dtype=pl.Int128
-        )
-        denominator = pl.lit(exact.denominator, dtype=pl.Int128)
-        quotient = rank // denominator
-        lower = quotient.cast(pl.Int64)
-        upper = (quotient + (rank % denominator != 0).cast(pl.Int128)).cast(pl.Int64)
-    else:
-        def rank_at(count: int, *, upper: bool = False) -> int:
-            quotient, remainder = divmod(max(count - 1, 0) * exact.numerator, exact.denominator)
-            return quotient + int(upper and remainder != 0)
+    reductions = {count: size.cast(pl.UInt64)}
+    names: dict[str, tuple[str, str]] = {}
+    for alias, probability in probabilities.items():
+        exact = Fraction(str(probability))
+        if not 0 <= exact <= 1:
+            raise ValueError("quantile probabilities must lie in [0, 1]")
+        low = fresh_internal("q_low", taken)
+        taken.append(low)
+        high = fresh_internal("q_high", taken)
+        taken.append(high)
+        names[alias] = low, high
+        if exact.numerator < 2**63 and exact.denominator < 2**127:
+            rank = (size.cast(pl.Int128) - 1).clip(lower_bound=0) * pl.lit(
+                exact.numerator, dtype=pl.Int128
+            )
+            denominator = pl.lit(exact.denominator, dtype=pl.Int128)
+            quotient = rank // denominator
+            lower = quotient.cast(pl.Int64)
+            upper = (quotient + (rank % denominator != 0).cast(pl.Int128)).cast(pl.Int64)
+        else:
 
-        lower = size.map_elements(rank_at, return_dtype=pl.Int64)
-        upper = size.map_elements(lambda count: rank_at(count, upper=True), return_dtype=pl.Int64)
-    reduced = grouped_reduce(
-        relation,
-        keys,
-        {
-            count: measured.count().cast(pl.UInt64),
-            low: ordered.slice(lower, 1).first(),
-            high: ordered.slice(upper, 1).first(),
-        },
-    )
-    results: list[str | None] = []
-    for size, a, b in reduced.select(count, low, high).iter_rows():
-        if not size:
-            results.append(None)
-            continue
-        results.append(str(linear_quantile(a, b, quantile_ranks(size, probability)[2])))
-    return keyed_values(reduced, keys, alias, results)
+            def rank_at(count: int, *, upper: bool = False, exact: Fraction = exact) -> int:
+                quotient, remainder = divmod(max(count - 1, 0) * exact.numerator, exact.denominator)
+                return quotient + int(upper and remainder != 0)
+
+            lower = size.map_elements(rank_at, return_dtype=pl.Int64)
+            upper = size.map_elements(partial(rank_at, upper=True), return_dtype=pl.Int64)
+        reductions[low] = ordered.slice(lower, 1).first()
+        reductions[high] = ordered.slice(upper, 1).first()
+    reduced = grouped_reduce(relation, keys, reductions)
+    result = reduced.select(list(keys)) if keys else pl.DataFrame()
+    columns = []
+    for alias, probability in probabilities.items():
+        low, high = names[alias]
+        values = [
+            None if not size else str(linear_quantile(a, b, quantile_ranks(size, probability)[2]))
+            for size, a, b in reduced.select(count, low, high).iter_rows()
+        ]
+        columns.append(pl.Series(alias, values, dtype=pl.String))
+    return result.with_columns(columns) if keys else pl.DataFrame(columns)
 
 
 def grouped_mean(

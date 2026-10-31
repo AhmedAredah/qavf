@@ -57,7 +57,10 @@ def test_invalid_time_count_is_complete_and_excludes_whole_null_equal_group(
         }
     )
     with source_context(
-        frame, backend, tmp_path, evidence=evidence,
+        frame,
+        backend,
+        tmp_path,
+        evidence=evidence,
         columns={"group": {"missing_values": ["MISSING"]}},
     ) as context:
         results = CumulativeRule(

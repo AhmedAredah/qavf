@@ -1,8 +1,9 @@
 # Distribution verification
 
 Releases are cut from `v*` tags. The release workflow (`.github/workflows/verify.yml`)
-verifies the source and the built distributions on every supported platform, then
-publishes those exact files.
+verifies the source and the built distributions on every supported platform and
+retains the complete release-assurance evidence. It can also be started manually.
+This workflow does not publish packages, create releases, or deploy containers.
 
 Before distributing an update:
 
@@ -38,24 +39,11 @@ requires the build/verification scripts in the sdist, and rejects bytecode cache
 `uv build --clear` removes stale artifacts before rebuilding. Never reuse an old
 wheel because its filename happens to match the source version.
 
-Push the tag (`git tag v0.4.0 && git push origin v0.4.0`). When every required job
-and the release-assurance aggregate pass, the workflow:
-
-- requires the tag to match the verified distribution version;
-- publishes to [PyPI](https://pypi.org/project/qavf/) through trusted publishing
-  (OpenID Connect, no stored token; the `pypi` environment accepts `v*` tags only);
-- creates the GitHub release with the distributions and their `SHA256SUMS`;
-- pushes the `linux/amd64` and `linux/arm64` image `ghcr.io/ahmedaredah/qavf`
-  (version, `major.minor` and `latest` tags), built from the verified wheel.
-
-Downstream channels follow each PyPI release without manual steps:
-
-- the Homebrew tap (`AhmedAredah/homebrew-tap`) checks PyPI every six hours and
-  commits the new sdist URL and SHA-256 itself (or run its *Update formula* workflow);
-- conda-forge's bot opens the feedstock update pull request, merged automatically
-  once its builds pass;
-- `AhmedAredah/qavf-action` installs the latest release unless a workflow pins
-  `version`.
+A `v*` tag starts verification. Inspect the retained `release-assurance` artifact
+and require `release_ready: true` before any separately authorized publication.
+The workflow does not push a tag, publish to PyPI, create a GitHub release, or
+update downstream distribution channels. Preserve the exact verified source
+revision, wheel/sdist hashes and complete evidence with any release.
 
 Performance measurements are separate from correctness gates. See
 [performance benchmarks](performance_benchmarks.md) for

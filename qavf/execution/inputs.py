@@ -9,9 +9,7 @@ from qavf.inputs.descriptors import File, Query
 from qavf.settings import QAVFSettings
 
 
-def isolated_inputs(
-    inputs: Mapping[str, object], settings: QAVFSettings
-) -> dict[str, object]:
+def isolated_inputs(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, object]:
     """Validate every input before any conversion, callback, or reader is invoked."""
     queries: dict[str, object] = {}
     for name, value in inputs.items():

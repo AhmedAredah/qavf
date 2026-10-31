@@ -14,8 +14,14 @@ result = compare_datasets(
     "v1/trips.parquet",
     "v2/trips.parquet",
     keys=["trip_id"],
-    steps=[{"step": "assign_zones", "x": "origin_lon", "y": "origin_lat",
-            "layer": {"path": "zones/taz.geojson", "id": "taz"}}],
+    steps=[
+        {
+            "step": "assign_zones",
+            "x": "origin_lon",
+            "y": "origin_lat",
+            "layer": {"path": "zones/taz.geojson", "id": "taz"},
+        }
+    ],
     levels=[
         {"level": "spatial", "measures": ["count", "sum(passengers)"]},
         {"level": "locations", "x": "origin_lon", "y": "origin_lat", "max_distance": 50},
@@ -163,6 +169,45 @@ crosswalk: {path: crosswalks/taz2010_2020.csv, from_column: old, to_column: new,
             weight_column: share}
 crosswalk: {pairs: [[A, A1, 0.6], [A, A2, 0.4], [B, B, 1.0]]}
 ```
+
+Path crosswalks use the same projected, budgeted reader as primary inputs. Set
+`text_columns: [old, new]` or CSV `options.types` when identifiers such as `001`
+must retain leading zeros. `options` and `row_budget` apply to the path form;
+configured datasets retain their own loading policy. Only the required ID and
+weight columns are projected.
+
+Standalone helpers and in-process `compare_datasets` also accept the primary
+input descriptors and supported frames through `Crosswalk(data=...)`. Wrap an
+input in `Dataset` for renames, declared types, or loading policy, without
+creating an independent resource budget:
+
+```python
+from qavf import Dataset, File
+from qavf.spatial import Crosswalk, crosswalk_frame
+
+mapping = Crosswalk(
+    data=Dataset(
+        File("zones.csv", text_columns=["old", "new"]),
+        load_policy={"row_budget": 100_000},
+    ),
+    from_column="old",
+    to_column="new",
+)
+pairs = crosswalk_frame(None, mapping)
+```
+
+Within a comparison run these reads use its existing context, source
+identity checks, and resource ownership. A standalone `crosswalk_frame(None, ...)`
+call creates and closes one default resource context. Pass an existing context to
+control its budgets. A named `dataset` crosswalk reuses that dataset instead of
+loading an independent copy. Exactly one of `dataset`, `path`, `pairs`, or `data`
+is required.
+
+Run settings and isolated execution require serializable crosswalks: use `path`
+with explicit reader options, or configure the auxiliary input as a named dataset
+and refer to it with `dataset`. Nested live `data` inputs are refused in these
+settings so that callbacks, frames and their identity cannot disappear from the
+configuration or provenance.
 
 Many-to-one is the common case (weight 1). A split zone's weights must sum to 1 within
 `tolerance` (1e-9), checked exactly; ids must be present, pairs unique and weights in

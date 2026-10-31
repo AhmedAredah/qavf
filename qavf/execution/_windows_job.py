@@ -55,8 +55,12 @@ class _IoCounters(ctypes.Structure):
     _fields_ = [
         (name, ctypes.c_uint64)
         for name in (
-            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
+            "ReadOperationCount",
+            "WriteOperationCount",
+            "OtherOperationCount",
+            "ReadTransferCount",
+            "WriteTransferCount",
+            "OtherTransferCount",
         )
     ]
 
@@ -93,10 +97,14 @@ def _kernel32() -> Any:
     signatures: dict[str, tuple[Any, list[Any]]] = {
         "CreateJobObjectW": (handle, [ctypes.c_void_p, wintypes.LPCWSTR]),
         "OpenJobObjectW": (handle, [wintypes.DWORD, boolean, wintypes.LPCWSTR]),
-        "SetInformationJobObject": (boolean, [handle, ctypes.c_int, ctypes.c_void_p,
-                                              wintypes.DWORD]),
-        "QueryInformationJobObject": (boolean, [handle, ctypes.c_int, ctypes.c_void_p,
-                                                wintypes.DWORD, ctypes.c_void_p]),
+        "SetInformationJobObject": (
+            boolean,
+            [handle, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD],
+        ),
+        "QueryInformationJobObject": (
+            boolean,
+            [handle, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p],
+        ),
         "AssignProcessToJobObject": (boolean, [handle, handle]),
         "IsProcessInJob": (boolean, [handle, handle, ctypes.POINTER(boolean)]),
         "TerminateJobObject": (boolean, [handle, wintypes.UINT]),
@@ -149,9 +157,7 @@ class Job:
                 info.ProcessMemoryLimit = memory_bytes
             if cpu_seconds is not None:
                 flags |= _LIMIT_PROCESS_TIME
-                info.BasicLimitInformation.PerProcessUserTimeLimit = (
-                    cpu_seconds * _TICKS_PER_SECOND
-                )
+                info.BasicLimitInformation.PerProcessUserTimeLimit = cpu_seconds * _TICKS_PER_SECOND
             info.BasicLimitInformation.LimitFlags = flags
             _check(
                 self._kernel32.SetInformationJobObject(
@@ -176,6 +182,7 @@ class Job:
     def _member_ids(self) -> list[int]:
         capacity = 64
         while True:
+
             class _IdList(ctypes.Structure):
                 _fields_ = [
                     ("NumberOfAssignedProcesses", wintypes.DWORD),
@@ -257,19 +264,19 @@ def join(name: str) -> dict[str, dict[str, int]]:
         # the worker until the deadline; descendants inherit this error mode.
         kernel32.SetErrorMode(
             kernel32.GetErrorMode()
-            | _SEM_FAILCRITICALERRORS | _SEM_NOGPFAULTERRORBOX | _SEM_NOOPENFILEERRORBOX
+            | _SEM_FAILCRITICALERRORS
+            | _SEM_NOGPFAULTERRORBOX
+            | _SEM_NOOPENFILEERRORBOX
         )
         info = _limits_of(kernel32, job)
     finally:
         kernel32.CloseHandle(job)
     basic = info.BasicLimitInformation
-    memory = (
-        int(info.ProcessMemoryLimit)
-        if basic.LimitFlags & _LIMIT_PROCESS_MEMORY else UNLIMITED
-    )
+    memory = int(info.ProcessMemoryLimit) if basic.LimitFlags & _LIMIT_PROCESS_MEMORY else UNLIMITED
     cpu = (
         int(basic.PerProcessUserTimeLimit) // _TICKS_PER_SECOND
-        if basic.LimitFlags & _LIMIT_PROCESS_TIME else UNLIMITED
+        if basic.LimitFlags & _LIMIT_PROCESS_TIME
+        else UNLIMITED
     )
     crash = 0 if basic.LimitFlags & _LIMIT_DIE_ON_UNHANDLED_EXCEPTION else UNLIMITED
     return {

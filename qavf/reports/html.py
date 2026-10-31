@@ -8,6 +8,7 @@ import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,10 +17,9 @@ from markupsafe import Markup
 
 from qavf.audit_codec import iter_audit_json
 from qavf.engine.severity import Severity, Status
-from qavf.reports.charts import BarRow, Segment, horizontal_bars, reset_ids
+from qavf.reports.charts import BarRow, Segment, horizontal_bars
 from qavf.reports.models import (
     QAReport,
-    Recommendation,
     ReportSummary,
     RuleResult,
     SnapshotModel,
@@ -62,26 +62,34 @@ def _slug(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()
 
 
-def _anchors(results: list[RuleResult]) -> dict[int, str]:
-    """A unique, stable HTML id per result (keyed by ``id(result)``).
+@dataclass(frozen=True, slots=True)
+class ResultView:
+    """One occurrence, independent of whether its immutable value is shared."""
+
+    result: RuleResult
+    ordinal: int
+    anchor: str
+
+
+def _result_views(results: list[RuleResult]) -> list[ResultView]:
+    """A unique, stable HTML id per result occurrence.
 
     The id is the rule id plus a readable slug of the check. Slugs drop
     punctuation and signs, so checks whose slugs coincide (``ge 0`` and
     ``ge -0``) get a short digest of the exact check text appended; results
     identical in rule and check are numbered in report order.
     """
-    base: dict[int, str] = {}
+    base: list[str] = []
     texts: defaultdict[str, set[str]] = defaultdict(set)
     for result in results:
         rule = re.sub(r"[^A-Za-z0-9_-]+", "-", result.rule_id).strip("-") or "rule"
         slug = _slug(result.check) if result.check else ""
-        base[id(result)] = f"{rule}-{slug}" if slug else rule
-        texts[base[id(result)]].add(result.check or "")
-    anchors: dict[int, str] = {}
+        base.append(f"{rule}-{slug}" if slug else rule)
+        texts[base[-1]].add(result.check or "")
+    views: list[ResultView] = []
     seen: Counter[str] = Counter()
     emitted: set[str] = set()
-    for result in results:
-        anchor = base[id(result)]
+    for ordinal, (result, anchor) in enumerate(zip(results, base, strict=True)):
         if len(texts[anchor]) > 1:
             digest = hashlib.sha256((result.check or "").encode("utf-8")).hexdigest()[:8]
             anchor = f"{anchor}-{digest}"
@@ -91,8 +99,8 @@ def _anchors(results: list[RuleResult]) -> dict[int, str]:
             seen[anchor] += 1
             candidate = f"{anchor}-{seen[anchor]}"
         emitted.add(candidate)
-        anchors[id(result)] = candidate
-    return anchors
+        views.append(ResultView(result, ordinal, candidate))
+    return views
 
 
 def _affected(result: RuleResult) -> str:
@@ -225,42 +233,20 @@ def _presentation(
     report: QAReport, title: str, fail_on: Severity | None, budget: ChartBudget
 ) -> dict[str, Any]:
     """Compute summary/order/acceptance once for both output APIs."""
-    effective = report.metadata.fail_on if fail_on is None else fail_on
-    summary = report.summary
-    verdict = (
-        "failed"
-        if report.should_fail(effective)
-        else "incomplete"
-        if summary.errored or not summary.assessed
-        else "passed"
-    )
-    failures = report.failures()
-    advice: dict[str, RuleResult] = {}
-    checks: dict[str, list[str]] = {}
-    for result in failures:
-        if result.recommendation:
-            advice.setdefault(result.rule_id, result)
-            if result.check:
-                checks.setdefault(result.rule_id, []).append(result.check)
-    recommendations = [
-        Recommendation(
-            rule_id=key,
-            name=result.name,
-            severity=result.severity,
-            text=result.recommendation,
-            checks=checks.get(key, []),
-        )
-        for key, result in advice.items()
-    ]
+    analysis = report.analyze(fail_on)
+    summary = analysis.summary
+    views = _result_views(report.results)
+    failures = [views[index] for index in analysis.failure_indices]
     return dict(
         title=title,
         report=report,
         summary=summary,
         metadata=report.metadata,
-        verdict=verdict,
-        fail_on=effective,
+        verdict=analysis.acceptance.verdict,
+        fail_on=analysis.acceptance.fail_on,
         failures=failures,
-        recommendations=recommendations,
+        result_views=views,
+        recommendations=analysis.recommendations,
         status_chart=budget.chart(
             "Results by category",
             sum(count > 0 for counts in summary.by_category.values() for count in counts.values()),
@@ -295,9 +281,6 @@ def iter_html(
 
     limits = limits or HtmlLimits()
     env = _environment(limits)
-    anchors = _anchors(report.results)
-    env.filters["anchor"] = lambda result: anchors[id(result)]
-    reset_ids()
     budget = ChartBudget(limits)
     context = _presentation(report, title, fail_on, budget)
     context["comparisons"] = report_views(report, limits, budget=budget)

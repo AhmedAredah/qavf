@@ -65,10 +65,12 @@ def test_paired_verdicts_survive_materialization_transition(
     if rule_id == "INP-005":
         datasets["child"]["foreign_keys"] = [{"columns": ["id"], "ref_dataset": "parent"}]
     else:
-        params["pairs"] = [{
-            "left": {"dataset": "child", "columns": ["id"]},
-            "right": {"dataset": "parent", "columns": ["id"]},
-        }]
+        params["pairs"] = [
+            {
+                "left": {"dataset": "child", "columns": ["id"]},
+                "right": {"dataset": "parent", "columns": ["id"]},
+            }
+        ]
     observed = _materialize_during_dispatch(monkeypatch, transition)
     results = run_checks(inputs, rule_id, datasets=datasets, params=params)
     assert len(observed) == 1, "the materialization interleaving must actually be exercised"

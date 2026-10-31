@@ -34,9 +34,12 @@ def _statuses(report, *rules: str) -> list[tuple[str, Status]]:
 def test_f01_a_decimal_beyond_its_scale_is_invalid_not_rounded() -> None:
     original = "0." + "0" * 37 + "11"  # 1.1e-38 needs 39 fractional digits
     report = validate(
-        {"d": Dataset(pl.DataFrame({"x": [original]}), schema={
-            "columns": {"x": {"dtype": "decimal", "le": Decimal("1e-38")}}
-        })}
+        {
+            "d": Dataset(
+                pl.DataFrame({"x": [original]}),
+                schema={"columns": {"x": {"dtype": "decimal", "le": Decimal("1e-38")}}},
+            )
+        }
     )
     [schema] = [r for r in report.results_for("INP-002") if r.status is Status.FAIL]
     assert schema.affected_records[0]["x"] == original
@@ -66,8 +69,11 @@ def test_f01_decimal_conversion_is_exact(texts, values, invalid) -> None:
 # =========================================================================
 @pytest.mark.parametrize(
     ("header", "columns"),
-    [("column0,column1", ["column0", "column1"]), ('"rate,count"', ["rate,count"]),
-     ('"rate;count"', ["rate;count"])],
+    [
+        ("column0,column1", ["column0", "column1"]),
+        ('"rate,count"', ["rate,count"]),
+        ('"rate;count"', ["rate;count"]),
+    ],
 )
 def test_f08_names_that_look_generated_are_accepted_when_written(tmp_path, header, columns):
     path = tmp_path / "t.csv"
@@ -87,12 +93,17 @@ def test_f18_text_conversion_needs_no_loaded_column() -> None:
     report = validate(
         {"d": Dataset(source, schema={"columns": {"v": {"dtype": "int", "ge": 0}}})},
         resources=ResourceLimits(
-            target_memory="1MiB", cache_memory=0, max_spill="32MiB", max_workers=1,
-            native_threads=1, evidence_rows=0,
+            target_memory="1MiB",
+            cache_memory=0,
+            max_spill="32MiB",
+            max_workers=1,
+            native_threads=1,
+            evidence_rows=0,
         ),
     )
     assert _statuses(report, "INP-002", "INP-003") == [
-        ("INP-002", Status.PASS), ("INP-003", Status.PASS)
+        ("INP-002", Status.PASS),
+        ("INP-003", Status.PASS),
     ]
 
 
@@ -103,12 +114,11 @@ def test_parquet_file_rows_come_from_footers(tmp_path, monkeypatch) -> None:
     for name, rows in (("a", 3), ("b", 2)):
         pl.DataFrame({"x": [-1.0] * rows}).write_parquet(tmp_path / f"{name}.parquet")
     monkeypatch.setattr(FileSource, "_count_file_rows", _never_scanned)
-    report = validate(
-        str(Path(tmp_path) / "*.parquet"), schema={"columns": {"x": {"ge": 0}}}
-    )
+    report = validate(str(Path(tmp_path) / "*.parquet"), schema={"columns": {"x": {"ge": 0}}})
     [bound] = [r for r in report.results_for("INP-003") if r.status is Status.FAIL]
     assert [(Path(r["_file"]).name, r["_file_row"]) for r in bound.affected_records][-1] == (
-        "b.parquet", 1
+        "b.parquet",
+        1,
     )
 
 
@@ -131,8 +141,11 @@ class _Changing:
 
     def plan(self) -> pl.LazyFrame:
         return self.first.lazy().map_batches(
-            self, schema=self.first.schema, projection_pushdown=False,
-            predicate_pushdown=False, slice_pushdown=False,
+            self,
+            schema=self.first.schema,
+            projection_pushdown=False,
+            predicate_pushdown=False,
+            slice_pushdown=False,
         )
 
 
@@ -143,9 +156,16 @@ def test_f02_numerator_and_denominator_describe_one_snapshot() -> None:
     a = pl.DataFrame({"entity": [1, 2, 3], "x": [1.0, 1.0, 10.0], "den": [1.0, 1.0, 1.0]})
     b = pl.DataFrame({"entity": [1, 2, 3], "x": [1.0, 1.0, 100.0], "den": [1.0, 1.0, 10.0]})
     params = {
-        "metrics": [{"dataset": "d", "value": "x", "entity_column": "entity",
-                     "normalize_by": {"dataset": "d", "value": "den", "on": ["entity"]}}],
-        "max_ratio": 2, "min_entities": 3,
+        "metrics": [
+            {
+                "dataset": "d",
+                "value": "x",
+                "entity_column": "entity",
+                "normalize_by": {"dataset": "d", "value": "den", "on": ["entity"]},
+            }
+        ],
+        "max_ratio": 2,
+        "min_entities": 3,
     }
     source = _Changing(a, b)
     with DataContext(frames={"d": source.plan()}) as ctx:
@@ -168,7 +188,10 @@ def test_f03_an_error_limit_is_a_hard_limit() -> None:
     right = left.with_columns(pl.Series("x", base + errors))
     agreement = {"columns": ["x"], "max_rmse": 1.0, "min_ccc": None, "max_slope_deviation": None}
     result = compare_datasets(
-        left, right, keys="id", entry_points=False,
+        left,
+        right,
+        keys="id",
+        entry_points=False,
         levels=[{"level": "relationships", "agreement": agreement}],
     )
     assert result.verdict == "failed"
@@ -203,10 +226,14 @@ def test_f05_a_report_path_naming_an_input_is_refused(tmp_path, target, capsys) 
     data = tmp_path / "data.csv"
     data.write_text("x\n1\n")
     config = tmp_path / "config.json"
-    config.write_text(json.dumps({
-        "datasets": {"data": {"path": "data.csv", "schema": {"columns": {"x": {"ge": 0}}}}},
-        "report": {"html": False, "json": False},
-    }))
+    config.write_text(
+        json.dumps(
+            {
+                "datasets": {"data": {"path": "data.csv", "schema": {"columns": {"x": {"ge": 0}}}}},
+                "report": {"html": False, "json": False},
+            }
+        )
+    )
     destination = {"data": data, "config": config, "link": tmp_path / "link.csv"}[target]
     if target == "link":
         try:
@@ -268,9 +295,14 @@ def test_f07_streamed_json_honours_plugin_fields_and_serializers() -> None:
     from qavf.compare.results import DatasetComparison
 
     comparison = DatasetComparison(
-        name="p", baseline="a", candidate="b",
-        levels=[_PluginResult(level="custom", name="p", day=date(2026, 10, 30),
-                              amount=Decimal("1.23"), code=12)],
+        name="p",
+        baseline="a",
+        candidate="b",
+        levels=[
+            _PluginResult(
+                level="custom", name="p", day=date(2026, 10, 30), amount=Decimal("1.23"), code=12
+            )
+        ],
     )
     streamed = json.loads(b"".join(comparison.iter_json_chunks()))
     assert streamed == json.loads(comparison.model_dump_json())
@@ -677,14 +709,16 @@ def test_f26_a_member_is_scaled_once_for_all_its_metrics(level, prepared, monkey
 # =========================================================================
 # F23: failing-row evidence shows the checked columns, not the whole row
 # =========================================================================
-_EVIDENCE_FRAME = pl.DataFrame({
-    "id": [1, 2, 3],
-    "x": [-1.0, 5.0, -3.0],
-    "y": ["a", "bb", "zz"],
-    "scope": [1, 1, 0],
-    "unit": ["m", "km", "m"],
-    "payload": ["p" * 4096] * 3,
-})
+_EVIDENCE_FRAME = pl.DataFrame(
+    {
+        "id": [1, 2, 3],
+        "x": [-1.0, 5.0, -3.0],
+        "y": ["a", "bb", "zz"],
+        "scope": [1, 1, 0],
+        "unit": ["m", "km", "m"],
+        "payload": ["p" * 4096] * 3,
+    }
+)
 _EVIDENCE_SCHEMA = {
     "primary_key": ["id"],
     "columns": {
@@ -763,9 +797,7 @@ def test_f20_unordered_samples_stream_and_count_exactly(monkeypatch) -> None:
     monkeypatch.setattr(context, "sample_statement", _no_staging)
     monkeypatch.setattr(BoundedSample, "read", counted)
     frame = pl.DataFrame({"x": [-1, 2, -3, 4], "payload": ["p"] * 4})
-    report = validate(
-        {"d": Dataset(frame, expressions=[{"name": "positive", "expr": "x > 0"}])}
-    )
+    report = validate({"d": Dataset(frame, expressions=[{"name": "positive", "expr": "x > 0"}])})
     [failed] = [r for r in report.results_for("INP-006") if r.status is Status.FAIL]
     assert failed.affected_count == 2 and counted.calls >= 1
 

@@ -67,8 +67,7 @@ class DuplicateRows(ABC):
             logger.warning(
                 "%s",
                 redact_text(
-                    f"Row positions of duplicated keys in {self.dataset}: "
-                    f"{exception_details(exc)}"
+                    f"Row positions of duplicated keys in {self.dataset}: {exception_details(exc)}"
                 ),
             )
             return sample

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
@@ -18,6 +18,9 @@ from qavf.sources.sql import quote_identifier, sql_literal
 
 from .accumulator import ProfileAccumulator, ProfileResult
 from .values import validate_margin
+
+if TYPE_CHECKING:
+    from qavf._input_types import ValidationInput
 
 
 def _options(
@@ -71,7 +74,7 @@ def profile_frame(
 
 
 def profile_input(
-    data: object,
+    data: ValidationInput,
     *,
     margin: float = 0.0,
     max_categories: int = 20,

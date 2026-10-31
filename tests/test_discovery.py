@@ -1,4 +1,5 @@
 """Public contracts across discovery, normalization and project generation."""
+
 from __future__ import annotations
 
 import importlib
@@ -89,12 +90,19 @@ def test_required_components_cannot_mask_each_other(required, rules, sources, al
 def test_required_plugin_uses_real_discovery_failures(monkeypatch):
     def fail():
         raise ImportError("unavailable rules")
-    monkeypatch.setattr("qavf.engine.registry.entry_points", lambda **kw: [
-        SimpleNamespace(name="pack", load=fail),
-    ])
-    monkeypatch.setattr("qavf.sources.base.entry_points", lambda **kw: [
-        SimpleNamespace(name="pack", load=lambda: ProbeSource),
-    ])
+
+    monkeypatch.setattr(
+        "qavf.engine.registry.entry_points",
+        lambda **kw: [
+            SimpleNamespace(name="pack", load=fail),
+        ],
+    )
+    monkeypatch.setattr(
+        "qavf.sources.base.entry_points",
+        lambda **kw: [
+            SimpleNamespace(name="pack", load=lambda: ProbeSource),
+        ],
+    )
     runner = QARunner(QAVFSettings.model_validate({"plugins": {"required": ["pack"]}}))
     assert runner.plugin_status()["sources:pack"] == "loaded"
     with pytest.raises(ConfigurationError, match="rules:pack"):
@@ -117,7 +125,7 @@ def test_duplicate_entrypoint_names_load_neither_candidate(monkeypatch, group):
 
 
 def _plugin_text(*, fail=True):
-    return '''from qavf import Finding, Rule, register
+    return """from qavf import Finding, Rule, register
 @register
 class Partial(Rule):
     rule_id = 'REV3-PARTIAL'
@@ -126,7 +134,7 @@ class Partial(Rule):
     category = 'custom'
     def evaluate(self, ctx):
         return Finding.ok('ok')
-''' + ("raise RuntimeError('initialization failed')\n" if fail else "")
+""" + ("raise RuntimeError('initialization failed')\n" if fail else "")
 
 
 @pytest.mark.parametrize("mechanism", ["rules", "sources", "module", "path"])
@@ -160,12 +168,15 @@ def test_failed_import_discards_public_decorators(tmp_path, monkeypatch, mechani
 
 def test_failed_module_registration_also_discards_decorators(tmp_path):
     plugin = tmp_path / "invalid_declaration.py"
-    plugin.write_text(_plugin_text(fail=False) + '''
+    plugin.write_text(
+        _plugin_text(fail=False)
+        + """
 class Invalid(Rule):
     rule_id = 'REV3-INVALID'
     def evaluate(self, ctx):
         return Finding.ok('ok')
-''')
+"""
+    )
     with pytest.raises(TypeError, match="metadata"):
         RuleRegistry().discover_path(plugin)
     assert "REV3-PARTIAL" not in default_registry
@@ -186,6 +197,7 @@ def test_transaction_preserves_unrelated_concurrent_registration(fail):
     staged = threading.Event()
     finish = threading.Event()
     errors = []
+
     def discover():
         try:
             with registration_transaction():
@@ -196,6 +208,7 @@ def test_transaction_preserves_unrelated_concurrent_registration(fail):
                     raise ValueError("failed discovery")
         except ValueError as exc:
             errors.append(str(exc))
+
     worker = threading.Thread(target=discover)
     worker.start()
     try:
@@ -219,8 +232,12 @@ def test_disabled_required_params_have_identical_facade_semantics(tmp_path, form
     rule = {"enabled": False}
     if explicit_params:
         rule["params"] = {}
-    raw = {"rules": {NeededRule.rule_id: rule}, "datasets": {"data": {"schema": {"min_rows": 1}}},
-           "plugins": {"entry_points": False}, "engine": {"parallel": False}}
+    raw = {
+        "rules": {NeededRule.rule_id: rule},
+        "datasets": {"data": {"schema": {"min_rows": 1}}},
+        "plugins": {"entry_points": False},
+        "engine": {"parallel": False},
+    }
     config = raw
     if form == "settings":
         config = QAVFSettings.model_validate(raw)
@@ -312,6 +329,7 @@ def test_invalid_init_output_plan_writes_nothing(tmp_path, name):
 def test_schema_generation_failure_does_not_publish_config(tmp_path, monkeypatch):
     def fail(*args):
         raise ValueError("schema unavailable")
+
     monkeypatch.setattr("qavf.cli.config_json_schema", fail)
     target = tmp_path / "qavf.yaml"
     assert main(["init", "-o", str(target)]) == EXIT_USAGE
@@ -392,9 +410,9 @@ def test_string_config_mapping_key_reaches_real_plugin(config_key_plugin):
 
 def test_config_key_error_does_not_echo_arbitrary_keys_or_values():
     with pytest.raises(ValidationError) as exc:
-        QAVFSettings.model_validate({
-            "extensions": {"secret-plugin-name": {"secret-nested-key": {7: "secret-value"}}}
-        })
+        QAVFSettings.model_validate(
+            {"extensions": {"secret-plugin-name": {"secret-nested-key": {7: "secret-value"}}}}
+        )
     message = str(exc.value)
     assert "configuration.extensions" in message
     assert "secret" not in message

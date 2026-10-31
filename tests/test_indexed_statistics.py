@@ -28,9 +28,15 @@ def _fit(values, method):
         return iter(_counts(abs(scaled(value, origin, unit) - centre) for value in values))
 
     return fit_outliers(
-        lambda: iter(counts), size=len(values), minimum=min(values), maximum=max(values),
-        method=method, threshold=None, min_group_size=3,
-        original_median=float(np.median(values)), deviations=deviations,
+        lambda: iter(counts),
+        size=len(values),
+        minimum=min(values),
+        maximum=max(values),
+        method=method,
+        threshold=None,
+        min_group_size=3,
+        original_median=float(np.median(values)),
+        deviations=deviations,
     )
 
 
@@ -60,14 +66,17 @@ def test_randomized_count_models_match_complete_array_verdicts(method):
 
 
 @pytest.mark.parametrize("method", list(OutlierMethod))
-@pytest.mark.parametrize("values", [
-    [1.0] * 15 + [100.0],
-    [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 40.0] * 2,
-    [float(2**53 + 2 * i) for i in range(15)] + [float(2**53 + 1000)],
-    [1e-300 * i for i in range(1, 16)] + [1e-298],
-    [1e300 * i for i in range(1, 16)] + [1e302],
-    [0.0] * 16,
-])
+@pytest.mark.parametrize(
+    "values",
+    [
+        [1.0] * 15 + [100.0],
+        [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 40.0] * 2,
+        [float(2**53 + 2 * i) for i in range(15)] + [float(2**53 + 1000)],
+        [1e-300 * i for i in range(1, 16)] + [1e-298],
+        [1e300 * i for i in range(1, 16)] + [1e302],
+        [0.0] * 16,
+    ],
+)
 def test_indexed_outlier_model_matches_array_detector(method, values):
     expected = detect_outliers(values, method=method)
     model = _fit(values, method)
@@ -97,12 +106,15 @@ def _small_batches(monkeypatch, size):
 def test_many_small_groups_keep_exact_counts_without_full_projection(monkeypatch, batch_rows):
     # Each group has eight observations, and groups straddle every batch size.
     groups = 129
-    frame = pl.DataFrame({
-        "g": [group for slot in range(8) for group in range(groups)],
-        "x": [100.0 if slot == 7 else 1.0 for slot in range(8) for _ in range(groups)],
-    })
+    frame = pl.DataFrame(
+        {
+            "g": [group for slot in range(8) for group in range(groups)],
+            "x": [100.0 if slot == 7 else 1.0 for slot in range(8) for _ in range(groups)],
+        }
+    )
     observed = _small_batches(monkeypatch, batch_rows)
     with DataContext(frames={"data": frame}, evidence_limit=3) as context:
+
         def forbidden(*args, **kwargs):
             pytest.fail("batch statistical execution requested a full projection")
 
@@ -117,8 +129,13 @@ def test_many_small_groups_keep_exact_counts_without_full_projection(monkeypatch
 
         monkeypatch.setattr(np, "empty", bounded_empty)
         scan = scan_target(
-            context, OutlierTarget(dataset="data", value="x", group_by=("g",)),
-            OutlierMethod.IQR, None, 8, 3, normalize_missing,
+            context,
+            OutlierTarget(dataset="data", value="x", group_by=("g",)),
+            OutlierMethod.IQR,
+            None,
+            8,
+            3,
+            normalize_missing,
         )
         assert scan.tested == groups * 8
         assert scan.outliers == groups
@@ -136,9 +153,19 @@ def test_log_direction_materiality_and_invalid_counts_survive_batch_boundaries(
     _small_batches(monkeypatch, batch_rows)
     with DataContext(frames={"data": pl.DataFrame({"x": values})}, evidence_limit=2) as context:
         scan = scan_target(
-            context, OutlierTarget(dataset="data", value="x", transform="log",
-                                  direction="high", min_relative_deviation=0.1),
-            OutlierMethod.MODIFIED_ZSCORE, None, 8, 2, normalize_missing,
+            context,
+            OutlierTarget(
+                dataset="data",
+                value="x",
+                transform="log",
+                direction="high",
+                min_relative_deviation=0.1,
+            ),
+            OutlierMethod.MODIFIED_ZSCORE,
+            None,
+            8,
+            2,
+            normalize_missing,
         )
     assert scan.tested == 16
     assert scan.nonpositive == 2
@@ -173,8 +200,9 @@ def test_ks_auto_threshold_matches_scipy_on_tied_samples(size, monkeypatch):
     expected = stats.ks_2samp(reference, current, method="auto")
     _small_batches(monkeypatch, 509)
     with (
-        DataContext(frames={"ref": pl.DataFrame({"x": reference}),
-                            "cur": pl.DataFrame({"x": current})}) as context,
+        DataContext(
+            frames={"ref": pl.DataFrame({"x": reference}), "cur": pl.DataFrame({"x": current})}
+        ) as context,
         observed_distribution(context, "ref", "cur", "x", normalize_missing) as distribution,
     ):
         statistic, probability, policy = distribution.ks(stats)
@@ -193,8 +221,9 @@ def test_categorical_psi_preserves_rare_and_new_support_across_batches(monkeypat
         expected += (q - p) * math.log(q / p)
     _small_batches(monkeypatch, 31)
     with (
-        DataContext(frames={"ref": pl.DataFrame({"x": reference}),
-                            "cur": pl.DataFrame({"x": current})}) as context,
+        DataContext(
+            frames={"ref": pl.DataFrame({"x": reference}), "cur": pl.DataFrame({"x": current})}
+        ) as context,
         observed_distribution(context, "ref", "cur", "x", normalize_missing) as distribution,
     ):
         psi, count, policy = distribution.psi(10)
@@ -203,13 +232,24 @@ def test_categorical_psi_preserves_rare_and_new_support_across_batches(monkeypat
 
 
 def test_dynamic_range_failure_is_unassessed_and_other_groups_still_run():
-    frame = pl.DataFrame({"g": ["wide"] * 8 + ["good"] * 8,
-                          "x": [1e-300, 2e-300] * 3 + [1e-300, 1e300]
-                          + [1.0] * 7 + [100.0]})
+    frame = pl.DataFrame(
+        {
+            "g": ["wide"] * 8 + ["good"] * 8,
+            "x": [1e-300, 2e-300] * 3 + [1e-300, 1e300] + [1.0] * 7 + [100.0],
+        }
+    )
     with DataContext(frames={"data": frame}) as context:
-        findings = ColumnOutlierRule({"targets": [{
-            "dataset": "data", "value": "x", "group_by": ["g"],
-        }]}).evaluate(context)
+        findings = ColumnOutlierRule(
+            {
+                "targets": [
+                    {
+                        "dataset": "data",
+                        "value": "x",
+                        "group_by": ["g"],
+                    }
+                ]
+            }
+        ).evaluate(context)
     assert any(not f.assessed and f.affected_count == 8 for f in findings)
     assert any(f.assessed and not f.passed and f.affected_count == 1 for f in findings)
 
@@ -219,8 +259,15 @@ def test_exhausted_index_storage_never_publishes_an_assessed_success():
         frames={"data": pl.DataFrame({"x": [1.0] * 15 + [100.0]})},
         spill_max_bytes=8192,
     ) as context:
-        findings = ColumnOutlierRule({"targets": [{
-            "dataset": "data", "value": "x",
-        }]}).evaluate(context)
+        findings = ColumnOutlierRule(
+            {
+                "targets": [
+                    {
+                        "dataset": "data",
+                        "value": "x",
+                    }
+                ]
+            }
+        ).evaluate(context)
     assert findings and all(not finding.assessed for finding in findings)
     assert any("spill budget" in finding.message for finding in findings)

@@ -10,6 +10,7 @@ from typing import Any
 
 import duckdb
 import polars as pl
+from pydantic import BaseModel
 
 from qavf.configuration import ConfigurationGraph
 from qavf.settings import (
@@ -25,17 +26,58 @@ from qavf.sources.base import DataSource, SourceEnvironment, SourceError
 from qavf.sources.frames import as_polars, known_rows, supports_frame
 from qavf.sources.parameters import FileParams
 
-from .adapters import _FrameInput, _LoaderInput, _QueryInput
-from .descriptors import Dataset, File, Loader, Query
+from .adapters import _BatchInput, _FrameInput, _LoaderInput, _QueryInput
+from .descriptors import BatchSource, Dataset, File, Loader, Query
 from .resources import ResourceLimits
 
 Configuration = QAVFSettings | Mapping[str, Any] | str | os.PathLike[str] | None
+
+
+def _check_configured_auxiliary_inputs(config: object) -> None:
+    """Keep live auxiliary objects outside serializable run configuration.
+
+    Configuration snapshots, digests and isolated workers require descriptions,
+    rather than arbitrary frame or callback state. Direct comparison APIs can
+    use Crosswalk.data; a run registers that input as a named dataset instead.
+    Walk model fields without model_dump/deepcopy or invoking any data protocol.
+    """
+    from qavf.spatial.hierarchy import Crosswalk
+
+    pending = [config]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        if id(value) in seen:
+            continue
+        seen.add(id(value))
+        embedded = isinstance(value, Crosswalk) and value.data is not None
+        if isinstance(value, Mapping):
+            crosswalk = value.get("crosswalk")
+            weights = value.get("weights")
+            table = weights.get("table") if isinstance(weights, Mapping) else None
+            embedded = (
+                embedded
+                or (isinstance(crosswalk, Mapping) and crosswalk.get("data") is not None)
+                or (isinstance(table, Mapping) and table.get("data") is not None)
+            )
+            pending.extend(value.values())
+        elif isinstance(value, BaseModel):
+            pending.extend(getattr(value, name) for name in type(value).model_fields)
+        elif isinstance(value, list | tuple):
+            pending.extend(value)
+        if embedded:
+            raise ValueError(
+                "Crosswalk.data is a direct comparison input, not serializable run "
+                "configuration; provide the auxiliary input under a named dataset "
+                "and set crosswalk.dataset to that name"
+            )
 
 
 def _configuration(config: Configuration) -> tuple[dict[str, Any], Path | None]:
     if config is None:
         return {}, None
     if isinstance(config, QAVFSettings):
+        _check_configured_auxiliary_inputs(config)
         copied = config.model_copy(deep=True)
         # Keep nested model field sets: omission remains meaningful for policies
         # and disabled plugin parameters, including mutated parameter mappings.
@@ -45,8 +87,11 @@ def _configuration(config: Configuration) -> tuple[dict[str, Any], Path | None]:
             if name != "source_path"
         }, copied.source_path
     if isinstance(config, str | os.PathLike):
-        return _read_config_mapping(Path(config))
+        raw, path = _read_config_mapping(Path(config))
+        _check_configured_auxiliary_inputs(raw)
+        return raw, path
     if isinstance(config, Mapping):
+        _check_configured_auxiliary_inputs(config)
         return dict(config), None
     raise TypeError("config must be settings, a configuration mapping, or a YAML/JSON path")
 
@@ -140,14 +185,21 @@ def _replace_input(spec: DatasetSpec, value: object) -> DatasetSpec:
     return DatasetSpec.model_validate(raw)
 
 
-def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, object]:
-    if settings.engine.execution_mode == "isolated":
-        from qavf.execution.inputs import isolated_inputs
-
-        return isolated_inputs(inputs, settings)
+def validate_inputs(inputs: Mapping[str, object], settings: QAVFSettings) -> None:
+    """Admit descriptions without consuming a frame protocol or opening a source."""
     # Validate every representation before the first conversion. An invalid
     # sibling must not consume an earlier caller-owned Arrow protocol object.
-    known = (File, str, os.PathLike, Query, Loader, DataSource, pl.DataFrame, pl.LazyFrame)
+    known = (
+        File,
+        str,
+        os.PathLike,
+        Query,
+        Loader,
+        BatchSource,
+        DataSource,
+        pl.DataFrame,
+        pl.LazyFrame,
+    )
     for name, value in inputs.items():
         if isinstance(value, known):
             if (
@@ -162,8 +214,16 @@ def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, ob
         if not supports_frame(value):
             raise TypeError(
                 f"unsupported input for {name!r}; provide a path, File, supported frame, "
-                "Query, Loader, or DataSource. A mapping denotes named datasets, not columns."
+                "Query, Loader, BatchSource, or DataSource. "
+                "A mapping denotes named datasets, not columns."
             )
+
+
+def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, object]:
+    if settings.engine.execution_mode == "isolated":
+        from qavf.execution.inputs import isolated_inputs
+
+        return isolated_inputs(inputs, settings)
     env = SourceEnvironment(
         base_dir=settings.base_dir,
         connections=settings.connections,
@@ -186,6 +246,8 @@ def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, ob
             frames[name] = _QueryInput(value, env, lock, policy)
         elif isinstance(value, Loader):
             frames[name] = _LoaderInput(value, env, policy)
+        elif isinstance(value, BatchSource):
+            frames[name] = _BatchInput(value, env, policy)
         elif isinstance(value, DataSource | pl.DataFrame | pl.LazyFrame):
             frames[name] = value
         else:
@@ -205,14 +267,19 @@ def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, ob
     return frames
 
 
-def prepare(
+def prepare_configuration(
     data: object,
     *,
     schema: SchemaSpec | Mapping[str, Any] | None,
     config: Configuration,
     resources: ResourceLimits | None,
 ) -> tuple[QAVFSettings, dict[str, object]]:
-    """Normalize once, retaining caller ownership and validating before adaptation."""
+    """Validate and merge contracts without consuming or adapting input data.
+
+    Planning and execution share this boundary. Returned values retain caller
+    ownership; loaders, frame interchange protocols and source readers are not
+    invoked here.
+    """
     raw, source_path = _configuration(config)
     validate_config_mapping_keys(raw)
     graph = ConfigurationGraph()
@@ -276,4 +343,19 @@ def prepare(
             # Built-in file settings are statically checkable. Validate every
             # selected reader before converting any caller-owned frame.
             FileParams.model_validate(source)
+    validate_inputs(inputs, settings)
+    return settings, inputs
+
+
+def prepare(
+    data: object,
+    *,
+    schema: SchemaSpec | Mapping[str, Any] | None,
+    config: Configuration,
+    resources: ResourceLimits | None,
+) -> tuple[QAVFSettings, dict[str, object]]:
+    """Normalize once, then adapt only after every contract has been validated."""
+    settings, inputs = prepare_configuration(
+        data, schema=schema, config=config, resources=resources
+    )
     return settings, _adapt(inputs, settings)

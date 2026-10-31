@@ -62,7 +62,7 @@ from qavf.keys import align_keys
 from qavf.numeric import exact_rational, report_number
 from qavf.rules._grouped import ProjectedRelation, grouped_reduce
 from qavf.rules.helpers import BoundedEvidence, LargestEvidence, fresh_internal, plural
-from qavf.typed_values import encode_temporal, has_temporal
+from qavf.typed_values import precise_frame as precise_frame
 
 
 class MeasureSpec(_Configured):
@@ -192,26 +192,6 @@ def materiality(spec: ComparisonSpec, level: _LevelTolerance, measure: MeasureSp
     )
 
 
-def precise_frame(frame: pl.DataFrame, columns: Sequence[str] | None = None) -> pl.DataFrame:
-    """Protect sub-microsecond identities while preserving ordinary Python dates.
-
-    Python's temporal scalars cannot carry nanoseconds. Encode those logical
-    types consistently, including zero ticks, so labels remain identical across
-    subsets and batches. Other ordinary temporal values keep their public types.
-    """
-    selected = [
-        name
-        for name, dtype in frame.schema.items()
-        if (columns is None or name in columns)
-        and (
-            (isinstance(dtype, pl.Datetime | pl.Duration) and dtype.time_unit == "ns")
-            or dtype == pl.Time
-            or (isinstance(dtype, pl.List | pl.Array | pl.Struct) and has_temporal(dtype))
-        )
-    ]
-    return encode_temporal(frame, selected) if selected else frame
-
-
 def _rows(frame: pl.DataFrame, columns: list[str]) -> Iterator[tuple[Any, ...]]:
     for batch in frame.select(columns).iter_slices(16_384):
         yield from precise_frame(batch).iter_rows()
@@ -309,8 +289,9 @@ def reduce_groups(
                 {named[role]: build(relation, bool(keys)) for role, build in extra.items()}
             )
         frame = grouped_reduce(relation, keys, reductions)
-        for measure, data in separate:
-            values = measure.compute(data).select([*keys, data.alias])
+        from qavf.compare.measures import shared_measure_results
+
+        for values in shared_measure_results(separate):
             frame = (
                 frame.join(values, on=keys, how="left", nulls_equal=True)
                 if keys
@@ -495,7 +476,7 @@ def compare_measure(
         for side in SIDES:
             column = roles["successes"]
             shares[side] = float(sum(v for v in aligned.frames[side][column].to_list() if v))
-    leaders = LargestEvidence(inputs.ctx.evidence_limit)
+    leaders = LargestEvidence(inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes)
     material = 0
     members: list[Member] = []
     changes: list[tuple[list[Any], Any, Any]] = []
@@ -586,7 +567,9 @@ def compare_measure(
         )
         return comparison, complete(check)
     assert plan is not None and inference is not None
-    judgement = judge(plan, inference, members, inputs.ctx.evidence_limit)
+    judgement = judge(
+        plan, inference, members, inputs.ctx.evidence_limit, byte_limit=inputs.ctx.evidence_bytes
+    )
     failed, unassessed = judgement.failed, judgement.unassessed
     shown = failed or unassessed
     for position in shown:

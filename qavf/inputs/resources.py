@@ -55,6 +55,7 @@ class ResourceLimits:
     target_memory: int | str | None = None
     cache_memory: int | str | None = None
     max_spill: int | str | None = None
+    max_spill_files: int | None = None
     temp_dir: str | Path | None = None
     max_workers: int | None = None
     native_threads: int | None = None
@@ -88,6 +89,7 @@ class ResourceLimits:
                 )
         for name, target in (
             ("max_workers", "max_workers"),
+            ("max_spill_files", "max_spill_files"),
             ("native_threads", "native_threads"),
             ("evidence_rows", "max_affected_records"),
             ("cpu_time", "process_cpu_time_s"),

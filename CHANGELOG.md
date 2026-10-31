@@ -6,6 +6,101 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-31
+
+### Fixed
+
+- Share literal-first, hidden-inclusive file discovery between readers and CLI
+  publication guards; recheck input collisions immediately before atomic replacement.
+- Enforce a single spill writer, owner/handle lifetime, latched write failures,
+  and exact accounting for partial writes.
+- Recognize optional frame classes safely during imports. Replace metadata-only
+  typing protocols with actual Arrow/dataframe interchange protocols; type the
+  planning and profiling input surfaces consistently.
+- Execute independent SQLite reads outside the shared spill-allocation lock;
+  reserve/reconcile write growth and reject deferred result-bearing writes.
+
+### Changed
+
+- Coalesce small source batches using a bounded merge tree and independent IPC
+  chunks. Add `ResourceLimits(max_spill_files=...)` / `engine.max_spill_files`
+  (default 4096), shared spool working-memory telemetry, and explicit byte scope.
+- Inject source/SQL read dependencies, isolate local manifest identity, and adapt
+  existing plugins to a narrow owned-batch protocol. Preserve public facades.
+- Share normalized column applicability and outcome construction across vectorized
+  eager, lazy and SQL implementations; retain exact fallbacks.
+- Add failure-boundary, protocol, independent-collaborator, backend-parity and
+  concurrency regressions, plus a reproducible batch-spool benchmark.
+- Record current artifact validation separately from historical results; external
+  platform/service gates must actually execute before deployment certification.
+
+## [0.7.1] - 2026-10-31
+
+### Fixed
+
+- A custom batch source could suppress a read, schema, admission, or interruption
+  exception in its context manager and cause a partial dataset to pass. Completion
+  enforcement now belongs to the shared batch engine and covers every source
+  adapter. Failed attempts retain their original error and unwind owned buffers.
+- Removed duplicate suppression handling from the public batch descriptor's
+  adapter; conversion and reader ownership remain that adapter's responsibility.
+- Added regression coverage for custom source suppression, complete successful
+  streams, row limits, schema drift, read interruption, and quota cleanup.
+
+Continuation verification covers installed-package use on Python 3.12, 3.13,
+and 3.14. Exact results and remaining platform/service prerequisites are recorded
+in `validation/continuation/README.md` in the source ZIP. No remote publishing
+or cross-platform release certification is implied.
+
+## [0.7.0] - 2026-10-31
+
+### Correctness and resource ownership
+
+- Keep conformance and missing-fraction decisions on coherent observations;
+  preserve whole-row evidence and nanosecond group identities.
+- Isolate CSV helper names from user columns and bound rejection diagnostics.
+  Saturated rejection counts are explicit lower bounds and cannot establish a
+  pass when the configured threshold has not been conclusively assessed.
+- Widen float scaling and temporal bucket arithmetic, validate scale factors,
+  normalize supported scientific scalars, and preserve typed empty grids.
+- Make composite resource cleanup retryable and retain ownership until handles,
+  files, and leases have actually been released. Stage spill publication before
+  short metadata updates and reuse already-owned IPC without a second copy.
+- Apply row and serialized-byte evidence admission before expensive location or
+  result construction; retain complete counts and statistical decision families.
+
+### Performance and design
+
+- Reuse native-safe keyed comparison over owned aligned observations, fuse
+  compatible grouped measures, and stream categorical groups under admission.
+- Preallocate kNN edge arrays and exact seasonal Sen slope storage. Add explicit
+  slope byte admission; exact pair work remains quadratic.
+- Build only required group-order/deviation structures, use direct registry
+  lookup, and avoid full distinct work for obviously high-cardinality profiles.
+- Give each report independent render state and occurrence-based navigation;
+  reuse derived report analysis within a presentation operation.
+- Move neutral rule parameters out of the engine while preserving the old
+  import alias; add static input facades without eager optional imports.
+
+### Public API and assurance
+
+- Require DuckDB 1.3.0 or newer after minimum-version verification exposed
+  timezone metadata loss in DuckDB 1.2 CSV inference. The existing timezone
+  regression passes on the corrected minimum; other dependency floors remain.
+- Add owned `BatchSource`, data-free `explain`, and explicit `validity`,
+  `regression`, and `change` profiles. Profiles require user-supplied acceptance
+  contracts and never infer acceptance limits from the input.
+- Extend auxiliary crosswalk input adapters; serialized run configuration uses
+  named datasets for live sources. See the upgrade guide for this boundary.
+- Add regression tests, independently checked benchmark workloads, CI and release
+  verification workflows, and a real Windows process-tree timeout contract.
+- Resolve formatter debt. Include a concern-by-concern implementation record
+  and local validation evidence. Remote platform gates require their actual runs.
+
+See [the upgrade guide](README_UPGRADE.md) and
+[implementation status](docs/remediation_status.md) for compatibility details,
+measured tradeoffs, and verification scope.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added

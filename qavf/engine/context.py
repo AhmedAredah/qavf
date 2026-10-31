@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import os
 import threading
@@ -18,6 +19,7 @@ import polars as pl
 
 from qavf.engine.capabilities import ReaderCapabilities
 from qavf.engine.catalog import DatasetCatalog
+from qavf.engine.cleanup import attempt_cleanup, raise_cleanup_errors
 from qavf.engine.connections import (
     SqlConnections,
     merge_connection_binding,
@@ -57,7 +59,7 @@ from qavf.sources.errors import redacted_error
 from qavf.sources.execution import SourceOperations
 from qavf.sources.frames import as_polars
 from qavf.sources.native import OwnedConnection
-from qavf.sources.sql import referenced_connections, resolve_sql_paths
+from qavf.sources.sql import quote_identifier, referenced_connections, resolve_sql_paths
 from qavf.sources.typed import needs_typed_sql_binding
 
 logger = logging.getLogger(__name__)
@@ -67,8 +69,9 @@ if TYPE_CHECKING:
 
     from qavf.engine.observation import Observation, Observations
     from qavf.engine.observation_plan import ObservationPlan
-    from qavf.engine.source_read import SourceReadView
-    from qavf.engine.sql_read import SqlReadSession
+    from qavf.engine.observation_store import ObservationStorage
+    from qavf.engine.source_read import SourceReadServices, SourceReadView
+    from qavf.engine.sql_read import NativeReadServices, SqlReadSession
     from qavf.engine.sqlite_store import Store
 
 
@@ -125,6 +128,7 @@ class DataContext:
         temp_directory: Path | None = None,
         reference_time: datetime | None = None,
         connection_slots: int = 2,
+        max_spill_files: int = 4096,
     ) -> None:
         specifications = dict(specs or {})
         provided_names = frozenset(frames or {})
@@ -140,7 +144,12 @@ class DataContext:
         }
         self.reference_time = reference_time or datetime.now(UTC)
         self._resources = RunResources(
-            cache_max_bytes, spill_max_bytes, memory_budget_bytes, temp_directory, connection_slots
+            cache_max_bytes,
+            spill_max_bytes,
+            memory_budget_bytes,
+            temp_directory,
+            connection_slots,
+            max_spill_files,
         )
         with contextlib.ExitStack() as setup:
             setup.callback(self._resources.close)
@@ -278,6 +287,7 @@ class DataContext:
             concurrent_loads=settings.engine.concurrent_loads,
             cache_max_bytes=settings.engine.cache_max_bytes,
             spill_max_bytes=settings.engine.spill_max_bytes,
+            max_spill_files=settings.engine.max_spill_files,
             memory_budget_bytes=settings.engine.memory_budget_bytes,
             temp_directory=(
                 settings.resolve(settings.engine.temp_directory)
@@ -300,6 +310,11 @@ class DataContext:
         except BaseException:
             context.close()
             raise
+
+    @property
+    def observation_storage(self) -> ObservationStorage:
+        """Narrow observation admission/writing capability owned by this run."""
+        return self._resources.observations
 
     @property
     def specs(self) -> dict[str, DatasetSpec]:
@@ -397,9 +412,13 @@ class DataContext:
                     frame = self._catalog.prepare(name, frame)
                 self._check_row_budget(name, frame)
                 self._check_cancelled()
-                with self._lock:
-                    self._frames[name] = frame
+
+                def publish_lazy_metadata() -> None:
+                    self._check_cancelled()
+                    self._require_available(name)
                     self._catalog.record_frame(name, frame)
+
+                self._frames.publish({name: frame}, publish_lazy_metadata, self._lock)
                 return frame.clone()
             source = self._catalog.sources.get(name)
             if source is None:
@@ -442,10 +461,14 @@ class DataContext:
             self._add_thread_load_time(time.perf_counter() - started)
             notes = dict(getattr(source, "load_notes", {}) or {})
             self._check_cancelled()
-            with self._lock:
-                self._frames[name] = frame
+
+            def publish_metadata() -> None:
+                self._check_cancelled()
+                self._require_available(name)
                 self._catalog.record_frame(name, frame)
                 self._catalog.record_load(name, notes, time.perf_counter() - started)
+
+            self._frames.publish({name: frame}, publish_metadata, self._lock)
             logger.info(
                 "Loaded dataset %r: %d rows from %s",
                 name,
@@ -583,6 +606,10 @@ class DataContext:
         known = self._catalog.schema(name)
         if known is not None:
             return known
+        source = self._catalog.sources.get(name)
+        if source is not None and (schema := source.batch_schema()) is not None:
+            # Declared batch metadata does not open a factory or consume data.
+            return dict(self._catalog.prepare(name, pl.DataFrame(schema=schema)).schema)
         if self._is_lazy(name):
             self._check_lazy_budget(name)
             schema = self._source_operation(
@@ -612,6 +639,9 @@ class DataContext:
     def _lazy_snapshot(self, name: str) -> pl.LazyFrame:
         # Older supported Polars versions reject concurrent borrows of one Python
         # LazyFrame wrapper. Each caller gets its own wrapper over the shared plan.
+        source = self._catalog.sources.get(name)
+        if source is not None and source.batch_schema() is not None:
+            self._batch_observation(name, source)
         with self._lock:
             if name in self._budget_observations:
                 return self._budget_observations[name].scan()
@@ -626,6 +656,8 @@ class DataContext:
         source = self._catalog.sources.get(name)
         if source is None or source.snapshot_connection() is not None:
             return False
+        if source.batch_schema() is not None:
+            return True
         with self._operations.guard(), self._key_lock(("typed_plan", name)):
             if name in self._typed_checked:
                 return name in self._typed_plans
@@ -637,6 +669,44 @@ class DataContext:
                 with self._lock:
                     self._typed_plans[name] = plan
         return True
+
+    def _batch_observation(self, name: str, source: DataSource) -> Observation:
+        """Publish one complete owned stream for every consumer in this run."""
+        from qavf.engine.batch_input import observe_batches
+
+        with self._operations.guard(), self._key_lock(("batch_snapshot", name)):
+            if name in self._budget_observations:
+                return self._budget_observations[name]
+            schema = source.batch_schema()
+            assert schema is not None
+            empty = pl.DataFrame(schema=schema)
+            prepared = self._catalog.prepare(name, empty)
+            rename = dict(zip(empty.columns, prepared.columns, strict=True))
+            attempts: list[Observation] = []
+
+            def admit() -> Observation:
+                for previous in attempts:
+                    previous.close()
+                attempts.clear()
+                current = observe_batches(self, source, rename)
+                attempts.append(current)
+                return current
+
+            try:
+                observed = self._source_operation([name], admit)
+            except BaseException:
+                for previous in attempts:
+                    previous.close()
+                raise
+            try:
+                self._check_cancelled()
+                with self._lock:
+                    self._budget_observations[name] = observed
+                    self._catalog.record_lazy(name, prepared.schema)
+                return observed
+            except BaseException:
+                observed.close()
+                raise
 
     def collect(self, name: str, plan: pl.LazyFrame) -> pl.DataFrame:
         """Collect a projected plan under the dataset's complete source policy.
@@ -842,19 +912,41 @@ class DataContext:
                     }
                     if not group <= self._release_requested:
                         eligible -= group
+            observations = {
+                name: self._budget_observations[name]
+                for name in eligible
+                if name in self._budget_observations
+            }
             for name in eligible:
-                if name in self._frames:
-                    del self._frames[name]
-                self._pandas.discard(name)
                 self._lazy.pop(name, None)
                 self._typed_plans.pop(name, None)
-                observed = self._budget_observations.pop(name, None)
-                if observed is not None:
-                    observed.close()
-            if eligible:
-                self._memo.clear()
+            # Stop admission under the catalog lock, then release ownership
+            # outside it. Cache writers commit under this same lock and must
+            # never be awaited while holding it.
             self._released.update(eligible)
             self._release_requested -= eligible
+        failures = []
+        for name in eligible:
+            failures.extend(
+                attempt_cleanup(
+                    [
+                        functools.partial(self._frames.discard, name),
+                        functools.partial(self._pandas.discard, name),
+                    ]
+                )
+            )
+        for name, observed in observations.items():
+            try:
+                observed.close()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                with self._lock:
+                    if self._budget_observations.get(name) is observed:
+                        self._budget_observations.pop(name)
+        if eligible:
+            failures.extend(attempt_cleanup([self._memo.clear]))
+        raise_cleanup_errors("released datasets could not be fully cleaned", failures)
 
     def _native_participants(self, query: str, datasets: Iterable[str] | None = None):
         names = list(datasets) if datasets is not None else self.referenced(query)
@@ -1019,13 +1111,21 @@ class DataContext:
     def _close_owned(self) -> None:
         with self._lock:
             self._usage_at_close = self._resources.usage()
-            for observed in self._budget_observations.values():
-                observed.close()
-            self._budget_observations.clear()
+            observations = tuple(self._budget_observations.items())
             self._lazy.clear()
             self._typed_plans.clear()
-        self._sql_connections.close()
-        self._resources.close()
+        failures = []
+        for name, observed in observations:
+            try:
+                observed.close()
+            except Exception as exc:
+                failures.append(exc)
+            else:
+                with self._lock:
+                    if self._budget_observations.get(name) is observed:
+                        self._budget_observations.pop(name)
+        failures.extend(attempt_cleanup([self._sql_connections.close, self._resources.close]))
+        raise_cleanup_errors("context could not be fully released", failures)
 
     def resource_usage(self) -> dict[str, Any]:
         snapshot = getattr(self, "_usage_at_close", None)
@@ -1060,16 +1160,28 @@ class DataContext:
                 }
                 self._reporting_snapshot = snapshot
             else:
-                snapshot = dict(getattr(self, "_reporting_snapshot", {
-                    "datasets": [], "unused_datasets": [],
-                    "unavailable_datasets": {}, "query_plans": [],
-                }))
+                snapshot = dict(
+                    getattr(
+                        self,
+                        "_reporting_snapshot",
+                        {
+                            "datasets": [],
+                            "unused_datasets": [],
+                            "unavailable_datasets": {},
+                            "query_plans": [],
+                        },
+                    )
+                )
                 snapshot["datasets"] = [
-                    info.model_copy(update={"notes": {
-                        **info.notes,
-                        "identity_verified": False,
-                        "identity_verification": "pending: timed-out work remains active",
-                    }})
+                    info.model_copy(
+                        update={
+                            "notes": {
+                                **info.notes,
+                                "identity_verified": False,
+                                "identity_verification": "pending: timed-out work remains active",
+                            }
+                        }
+                    )
                     for info in snapshot["datasets"]
                 ]
         finally:
@@ -1104,6 +1216,115 @@ class DataContext:
         lookup = {name.lower(): name for name in self.declared()}
         return sorted(
             {lookup[table.lower()] for table in sql_table_names(query) if table.lower() in lookup}
+        )
+
+    def build_source(self, config: Mapping[str, Any]) -> DataSource:
+        """Bind an ad-hoc description to this run's registry and environment."""
+        return (self._source_registry or SourceRegistry().discover()).build(config, self.env)
+
+    def run_source_operation[T](
+        self, sources: Iterable[DataSource], operation: Callable[[], T]
+    ) -> T:
+        return self._operations.run(sources, operation)
+
+    def native_read_services(self) -> NativeReadServices:
+        """Wire native reads without exposing context internals to session code."""
+        from qavf.engine.sql_read import NativeReadServices, NativeReadUnavailable, SqlReadPolicy
+
+        def sources(names, extra):
+            for name in names:
+                self._require_available(name)
+                if name in self._frames or name in self._lazy or name not in self._catalog.sources:
+                    raise NativeReadUnavailable(
+                        f"dataset {name!r} requires its typed/materialized reader"
+                    )
+            bound = {name: self._catalog.sources[name] for name in names}
+            declared = {name.lower() for name in self.declared()}
+            for name, config in extra.items():
+                if name.lower() in declared:
+                    raise ValueError(
+                        f"ad-hoc source alias {name!r} collides with a declared dataset"
+                    )
+                bound[name] = (
+                    (
+                        config
+                        if config.env.connection_budget is self._resources
+                        else config.bind(self.env)
+                    )
+                    if isinstance(config, DataSource)
+                    else self.build_source(config)
+                )
+            return bound
+
+        def fingerprint(name, source):
+            if not self._catalog.has_fingerprint(name):
+                return self._fingerprint(name, source)
+            return None
+
+        def publish(names, observations, fingerprints):
+            with self._lock:
+                self._catalog.mark_identity_used(names)
+                for name in names:
+                    self._capabilities.record_native(name)
+                    self._catalog.record_native(name, *observations[name])
+                    self._catalog.record_native_plan(name)
+                    if not self._catalog.has_fingerprint(name):
+                        self._catalog.record_fingerprint(name, fingerprints[name])
+
+        return NativeReadServices(
+            SqlReadPolicy(
+                self.env.base_dir, self.declared, self._check_cancelled, self.check_materialization
+            ),
+            sources,
+            self._sql_connections,
+            self._operations,
+            self._catalog.prepare,
+            fingerprint,
+            publish,
+            self._hash_inputs,
+        )
+
+    def source_read_services(self) -> SourceReadServices:
+        """Compose scoped-reader dependencies at the engine boundary."""
+        from qavf.engine.batch_input import observe_batches
+        from qavf.engine.observation import _lazy, observe_source
+        from qavf.engine.source_read import SourceReadServices
+        from qavf.engine.sql_read import consume_native
+
+        def eager(source):
+            self._resources.eager_fallbacks.add("<ad-hoc>")
+            return self._load_with_retries("<ad-hoc>", source)
+
+        def schema(source, alias):
+            return consume_native(
+                self,
+                lambda: lambda session: session.schema(f"SELECT * FROM {quote_identifier(alias)}"),
+                sources={alias: source},
+            )
+
+        def frame(source, alias, columns):
+            projection = ", ".join(quote_identifier(column) for column in columns)
+            return consume_native(
+                self,
+                lambda: (
+                    lambda session: session.frame(
+                        f"SELECT {projection} FROM {quote_identifier(alias)}"
+                    )
+                ),
+                sources={alias: source},
+            )
+
+        return SourceReadServices(
+            self._check_cancelled,
+            self.declared,
+            self.check_materialization,
+            lambda source: observe_batches(self, source),
+            lambda plan, budget: _lazy(self, plan, None, budget),
+            eager,
+            schema,
+            frame,
+            lambda source, columns: observe_source(self, source, columns),
+            self.work_store,
         )
 
     def read_source[T](
@@ -1234,6 +1455,9 @@ class DataContext:
             return
         spec = self.specs.get(name)
         source = self._catalog.sources.get(name)
+        if source is not None and source.batch_schema() is not None:
+            self._batch_observation(name, source)
+            return
         budget = (
             source.params.row_budget
             if source is not None
@@ -1317,20 +1541,17 @@ class DataContext:
                     lambda: self._snapshot_attempt(connection, members),
                 )
                 self._check_cancelled()
-                with self._lock:
-                    stored = []
-                    try:
-                        for name, frame in staged.items():
-                            self._frames[name] = frame
-                            stored.append(name)
-                    except Exception:
-                        for name in stored:
-                            del self._frames[name]
-                        raise
+
+                def publish_metadata() -> None:
+                    self._check_cancelled()
+                    for name in staged:
+                        self._require_available(name)
                     for name, failure in failures.items():
                         self._catalog.record_failure(name, failure)
                     for name, frame in staged.items():
                         self._catalog.record_snapshot(name, frame, connection, members, started_at)
+
+                self._frames.publish(staged, publish_metadata, self._lock)
             except Exception as exc:
                 self._check_cancelled()
                 failure = redacted_error(

@@ -121,16 +121,23 @@ def cramers_v(table: npt.ArrayLike) -> float | None:
                 row_totals[i] += exact
                 column_totals[j] += exact
         total = sum(row_totals, Fraction(0))
-        smaller = min(sum(value > 0 for value in row_totals),
-                      sum(value > 0 for value in column_totals)) - 1
+        smaller = (
+            min(sum(value > 0 for value in row_totals), sum(value > 0 for value in column_totals))
+            - 1
+        )
         if smaller < 1:
             return None
-        statistic = sum((
-            (Fraction(float(value)) * total - row_total * column_total) ** 2
-            / (row_total * column_total * total * total)
-            for row, row_total in zip(original, row_totals, strict=True) if row_total
-            for value, column_total in zip(row, column_totals, strict=True) if column_total
-        ), Fraction(0))
+        statistic = sum(
+            (
+                (Fraction(float(value)) * total - row_total * column_total) ** 2
+                / (row_total * column_total * total * total)
+                for row, row_total in zip(original, row_totals, strict=True)
+                if row_total
+                for value, column_total in zip(row, column_totals, strict=True)
+                if column_total
+            ),
+            Fraction(0),
+        )
         squared = statistic / smaller
         if not squared:
             return 0.0
@@ -208,16 +215,36 @@ class PairedValues:
     """One member's paired values, validated and center-scaled once for every metric.
 
     Agreement metrics share this preparation instead of each concatenating and
-    scaling the pair again; the module's functions build one per call.
+    scaling the pair again. Reusable instances own detached, read-only snapshots;
+    mutation of a caller's arrays cannot invalidate their cached metrics.
     """
 
     __slots__ = ("b", "c", "difference", "sb", "sc", "unit")
 
     def __init__(self, baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> None:
-        self.b, self.c = _paired(baseline, candidate)
+        baseline, candidate = _paired(baseline, candidate)
+        self.b, self.c = baseline.copy(), candidate.copy()
+        self.b.flags.writeable = self.c.flags.writeable = False
+        self._prepare()
+
+    @classmethod
+    def _borrowed(cls, baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> PairedValues:
+        """Prepare one synchronous module-level call without copying its inputs.
+
+        This instance must not escape that call. Reusable callers use the public
+        constructor, which snapshots storage before deriving any metric.
+        """
+        pair = cls.__new__(cls)
+        pair.b, pair.c = _paired(baseline, candidate)
+        pair._prepare()
+        return pair
+
+    def _prepare(self) -> None:
         self.sb, self.sc, self.unit = _scaled_pair(self.b, self.c)
         self.difference = self.sc - self.sb
         """``candidate - baseline`` in scaled units."""
+        for array in (self.sb, self.sc, self.difference):
+            array.flags.writeable = False
 
     def bland_altman(self, multiplier: float = 1.96) -> BlandAltman:
         """Bland-Altman bias and limits ``bias -/+ multiplier * sd`` of the differences."""
@@ -276,7 +303,7 @@ def bland_altman(
     baseline: npt.ArrayLike, candidate: npt.ArrayLike, multiplier: float = 1.96
 ) -> BlandAltman:
     """Bland-Altman bias and limits ``bias -/+ multiplier * sd`` of the differences."""
-    return PairedValues(baseline, candidate).bland_altman(multiplier)
+    return PairedValues._borrowed(baseline, candidate).bland_altman(multiplier)
 
 
 def concordance(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | None:
@@ -284,38 +311,38 @@ def concordance(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | No
 
     Moments use ``1/n`` (Lin 1989); ``None`` when both sides are one constant.
     """
-    return PairedValues(baseline, candidate).concordance()
+    return PairedValues._borrowed(baseline, candidate).concordance()
 
 
 def bias(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Mean of ``candidate - baseline``."""
-    return PairedValues(baseline, candidate).bias()
+    return PairedValues._borrowed(baseline, candidate).bias()
 
 
 def mae(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Mean absolute difference."""
-    return PairedValues(baseline, candidate).mae()
+    return PairedValues._borrowed(baseline, candidate).mae()
 
 
 def rmse(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Root mean squared difference."""
-    return PairedValues(baseline, candidate).rmse()
+    return PairedValues._borrowed(baseline, candidate).rmse()
 
 
 def mape(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | None:
     """Mean absolute percentage difference relative to the baseline (``None`` for a zero)."""
-    return PairedValues(baseline, candidate).mape()
+    return PairedValues._borrowed(baseline, candidate).mape()
 
 
 def smape(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float:
     """Symmetric MAPE ``mean(2 |c - b| / (|b| + |c|)) * 100``; a pair of zeros counts 0."""
-    return PairedValues(baseline, candidate).smape()
+    return PairedValues._borrowed(baseline, candidate).smape()
 
 
 def r_squared(baseline: npt.ArrayLike, candidate: npt.ArrayLike) -> float | None:
     """``1 - sum((c - b)^2) / sum((b - mean b)^2)``: the candidate as a prediction of
     the baseline; ``None`` for a constant baseline."""
-    return PairedValues(baseline, candidate).r_squared()
+    return PairedValues._borrowed(baseline, candidate).r_squared()
 
 
 # ------------------------------------------------------------ distributions
@@ -348,8 +375,12 @@ def jensen_shannon(baseline_counts: npt.ArrayLike, candidate_counts: npt.ArrayLi
     """
     b, c = (np.asarray(counts, dtype=float) for counts in (baseline_counts, candidate_counts))
     if (
-        b.shape != c.shape or b.ndim != 1 or (b < 0).any() or (c < 0).any()
-        or not np.isfinite(b).all() or not np.isfinite(c).all()
+        b.shape != c.shape
+        or b.ndim != 1
+        or (b < 0).any()
+        or (c < 0).any()
+        or not np.isfinite(b).all()
+        or not np.isfinite(c).all()
     ):
         raise ValueError("Jensen-Shannon needs two count vectors of the same length")
     if not len(b) or not b.max() > 0 or not c.max() > 0:

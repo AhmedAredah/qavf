@@ -353,9 +353,7 @@ def test_projected_numeric_schema_retains_native_reader(tmp_path):
 def test_projection_preserves_case_sensitive_physical_column_identity(tmp_path):
     path = tmp_path / "data.parquet"
     pl.DataFrame({"x": [1], "X": [2], "other": [3]}).write_parquet(path)
-    settings, frames = prepare(
-        File(path, columns=["X"]), schema=None, config={}, resources=None
-    )
+    settings, frames = prepare(File(path, columns=["X"]), schema=None, config={}, resources=None)
     with DataContext.from_settings(settings, frames) as context:
         assert context.get("data").to_dicts() == [{"X": 2}]
     settings, frames = prepare(

@@ -59,20 +59,28 @@ def test_parallel_completion_releases_each_dataset_once():
 
 
 def test_builtin_nested_dataset_references_are_kept():
-    settings = QAVFSettings.model_validate({
-        "datasets": {"counts": {}, "sites": {}, "baseline": {}, "unrelated": {}},
-        "engine": {"run_unconfigured_rules": False},
-        "plugins": {"entry_points": False},
-        "rules": {
-            "TMP-004": {"params": {
-                "series": [{"dataset": "counts", "value": "x", "group_by": ["id"]}],
-                "groups_from": "sites",
-            }},
-            "STA-002": {"params": {
-                "comparisons": [{"dataset": "counts", "reference": "baseline", "column": "x"}]
-            }},
-        },
-    })
+    settings = QAVFSettings.model_validate(
+        {
+            "datasets": {"counts": {}, "sites": {}, "baseline": {}, "unrelated": {}},
+            "engine": {"run_unconfigured_rules": False},
+            "plugins": {"entry_points": False},
+            "rules": {
+                "TMP-004": {
+                    "params": {
+                        "series": [{"dataset": "counts", "value": "x", "group_by": ["id"]}],
+                        "groups_from": "sites",
+                    }
+                },
+                "STA-002": {
+                    "params": {
+                        "comparisons": [
+                            {"dataset": "counts", "reference": "baseline", "column": "x"}
+                        ]
+                    }
+                },
+            },
+        }
+    )
     rules = QARunner(settings).plan()
     plan = build_plan(rules, settings, settings.datasets)
     descriptions = {entry["rule_id"]: entry for entry in plan.describe()}
@@ -83,11 +91,13 @@ def test_builtin_nested_dataset_references_are_kept():
 
 
 def test_arbitrary_input_sql_retains_all_datasets_conservatively():
-    settings = QAVFSettings.model_validate({
-        "datasets": {"a": {}, "b": {}},
-        "engine": {"run_unconfigured_rules": False},
-        "rules": {"INP-007": {}},
-    })
+    settings = QAVFSettings.model_validate(
+        {
+            "datasets": {"a": {}, "b": {}},
+            "engine": {"run_unconfigured_rules": False},
+            "rules": {"INP-007": {}},
+        }
+    )
     plan = build_plan(QARunner(settings).plan(), settings, settings.datasets)
     assert plan.describe()[0]["datasets"] == ["a", "b"]
     assert plan.describe()[0]["dependency_mode"] == "opaque"
@@ -118,9 +128,7 @@ def test_plugin_failure_logs_are_redacted(monkeypatch, caplog):
 
 def test_configured_plugin_import_failure_has_no_raw_exception_traceback(tmp_path):
     plugin = tmp_path / "leaky.py"
-    plugin.write_text(
-        'raise RuntimeError("https://user:secret@example.org/x?token=hidden")\n'
-    )
+    plugin.write_text('raise RuntimeError("https://user:secret@example.org/x?token=hidden")\n')
     with pytest.raises(ImportError) as caught:
         RuleRegistry().discover_path(plugin)
     rendered = "".join(traceback.format_exception(caught.value))

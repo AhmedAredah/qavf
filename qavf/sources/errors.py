@@ -64,5 +64,3 @@ def verify_postcondition(verify: Callable[[], None], previous: BaseException | N
         ):
             raise previous from None
         raise
-
-

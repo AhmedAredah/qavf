@@ -29,6 +29,7 @@ from pydantic import (
     ValidatorFunctionWrapHandler,
     WrapValidator,
     field_serializer,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -37,6 +38,7 @@ from qavf.configuration import ConfigurationGraph
 from qavf.configuration import expand_env as expand_env
 from qavf.configuration import read_config_mapping as _read_config_mapping
 from qavf.engine.severity import Severity
+from qavf.scalars import normalize_scalar, normalize_scalar_sequence
 from qavf.text_types import TEXT_DTYPES, TextType, Word
 from qavf.value_policy import TextNormalization
 
@@ -55,6 +57,7 @@ def _preserve_numeric_type(value: Any, handler: ValidatorFunctionWrapHandler) ->
     binary float through its decimal display. That changes an inclusive boundary.
     String bounds still follow normal parsing, including exact quoted Decimals.
     """
+    value = normalize_scalar(value)
     if isinstance(value, bool):
         raise ValueError("numeric bounds must not be boolean")
     parsed = handler(value)
@@ -62,21 +65,26 @@ def _preserve_numeric_type(value: Any, handler: ValidatorFunctionWrapHandler) ->
 
 
 NumericBound = Annotated[int | Decimal | float, WrapValidator(_preserve_numeric_type)]
-Bound = Annotated[
-    int | Decimal | float | datetime | date, WrapValidator(_preserve_numeric_type)
-]
+Bound = Annotated[int | Decimal | float | datetime | date, WrapValidator(_preserve_numeric_type)]
 """A numeric or temporal bound. Integers stay integers (exact beyond 2**53); YAML
 dates (``2020-01-01``) parse as dates."""
-
 
 
 class _Strict(BaseModel):
     """Base model that rejects unknown keys so typos in configuration fail loudly."""
 
     model_config = ConfigDict(
-        extra="forbid", populate_by_name=True, use_attribute_docstrings=True,
+        extra="forbid",
+        populate_by_name=True,
+        use_attribute_docstrings=True,
         hide_input_in_errors=True,
     )
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _scientific_scalar(cls, value: Any) -> Any:
+        """Resolve foreign scalar identity before Pydantic coerces a field."""
+        return normalize_scalar(value)
 
 
 # ------------------------------------------------------------------ QA limits
@@ -204,6 +212,11 @@ class ColumnConstraints(_Strict):
     std: Bounds | None = None
     sum: Bounds | None = None
     distinct_count: Bounds | None = None
+
+    @field_validator("isin", "notin", "missing_values", mode="before", check_fields=False)
+    @classmethod
+    def _scientific_literals(cls, value: Any) -> Any:
+        return normalize_scalar_sequence(value)
 
     def constraints(self) -> dict[str, Any]:
         """The limits that are set, by field name."""
@@ -803,7 +816,9 @@ class SecretSpec(_Strict):
             raise ValueError("an azure secret with provider 'config' needs connection_string")
         for prefix in self.scope:
             if "://" not in prefix:
-                raise ValueError(f"secret scope {prefix!r} must be a URL prefix such as s3://bucket")
+                raise ValueError(
+                    f"secret scope {prefix!r} must be a URL prefix such as s3://bucket"
+                )
         return self
 
 
@@ -869,6 +884,8 @@ class EngineSettings(_Strict):
     process RSS cap. Caller-owned inputs and opaque plugin allocations may exceed it."""
     cache_max_bytes: int = Field(default=268_435_456, ge=0, strict=True)
     """Maximum tracked retained cache bytes; zero disables optional caching."""
+    max_spill_files: int = Field(default=4096, ge=1, strict=True)
+    """Maximum live owned IPC files, including leases and failed cleanup."""
     spill_max_bytes: int = Field(default=1_073_741_824, ge=0, strict=True)
     """Run temporary-storage budget. Zero disables spilling; insufficient storage
     makes affected checks unassessed rather than reducing validation coverage."""
@@ -903,8 +920,10 @@ class EngineSettings(_Strict):
         if any(
             value is not None
             for value in (
-                self.run_timeout_s, self.process_address_space_bytes,
-                self.process_cpu_time_s, self.process_file_bytes,
+                self.run_timeout_s,
+                self.process_address_space_bytes,
+                self.process_cpu_time_s,
+                self.process_file_bytes,
             )
         ):
             if "execution_mode" in self.model_fields_set and self.execution_mode != "isolated":
@@ -1068,8 +1087,7 @@ def validate_config_mapping_keys(value: Any) -> None:
             for index, (key, child) in enumerate(item.items()):
                 if not isinstance(key, str):
                     raise ValueError(
-                        "configuration mapping keys must be strings "
-                        f"at {path} (key entry {index})"
+                        f"configuration mapping keys must be strings at {path} (key entry {index})"
                     )
                 child_path = (
                     f"{path}.{key}"
@@ -1116,7 +1134,6 @@ def check_sql_names(names: Iterable[str], kind: str) -> None:
                 f"{kind} names {other!r} and {name!r} differ only in case; SQL treats them as "
                 f"the same table, so one would silently replace the other. Rename one."
             )
-
 
 
 def load_settings(path: str | Path) -> QAVFSettings:

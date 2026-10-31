@@ -122,9 +122,7 @@ def _stop(process: subprocess.Popen[bytes], job: Job | None = None) -> None:
             # macOS refuses group signals while the group holds a zombie, for
             # example an exited, unreaped leader; members are killed below.
             if sys.platform != "darwin":
-                raise ExecutionLimitError(
-                    "could not terminate the isolated process group"
-                ) from exc
+                raise ExecutionLimitError("could not terminate the isolated process group") from exc
         except OSError as exc:
             raise ExecutionLimitError("could not terminate the isolated process group") from exc
     try:
@@ -167,11 +165,18 @@ def _libproc() -> Any:
     library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
     library.proc_listpids.restype = ctypes.c_int
     library.proc_listpids.argtypes = [
-        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.c_int,
     ]
     library.proc_pidinfo.restype = ctypes.c_int
     library.proc_pidinfo.argtypes = [
-        ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_int,
     ]
     return library
 

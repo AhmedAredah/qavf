@@ -107,7 +107,13 @@ class DatasetCatalog:
             source = self.sources.get(name)
             entry.notes = {
                 **freeze_evidence(source.load_notes if source is not None else {}),
-                "execution": "typed_lazy_scan" if source is not None else "supplied_lazy_scan",
+                "execution": (
+                    "owned_batch_snapshot"
+                    if source is not None and source.batch_schema() is not None
+                    else "typed_lazy_scan"
+                    if source is not None
+                    else "supplied_lazy_scan"
+                ),
             }
 
     def record_native(self, name: str, schema: Mapping[str, pl.DataType], seconds: float) -> None:

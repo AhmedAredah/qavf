@@ -16,6 +16,7 @@ from typing import Any
 import polars as pl
 
 from qavf.compare.align import AlignmentContext, AlignmentError, align, build_pipeline
+from qavf.compare.evidence import bound_level
 from qavf.compare.levels import LEVELS, SIDES, ComparisonLevel, LevelInputs, not_assessed
 from qavf.compare.results import DatasetComparison, LevelResult
 from qavf.compare.spec import ComparisonSpec, Side
@@ -207,7 +208,14 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
                             "checks": [not_assessed("assessment", "the level returned no checks")]
                         }
                     )
-                results.append(result)
+                results.append(
+                    bound_level(
+                        result,
+                        ctx.evidence_limit,
+                        ctx.evidence_bytes,
+                        detail_rows=max(ctx.evidence_limit, spec.chart_points),
+                    )
+                )
             except Exception as exc:
                 results.append(
                     level.Result(

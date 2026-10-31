@@ -101,9 +101,7 @@ def evaluate_simple(
             "CASE WHEN (" + predicate + ") THEN '" + name.replace("'", "''") + "' END"
             for name, predicate in conditions
         )
-        shown = ", ".join(
-            quote_identifier(name) for name in (row_name, *evidence.of([column]))
-        )
+        shown = ", ".join(quote_identifier(name) for name in (row_name, *evidence.of([column])))
         sql = (
             f"SELECT {shown}, concat_ws('; ', {labels}) AS {quote_identifier(reason_name)} "
             f"FROM {base} WHERE {bad}"

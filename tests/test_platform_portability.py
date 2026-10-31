@@ -40,8 +40,7 @@ def test_spill_cleanup_preserves_caller_directory(tmp_path):
     source = tmp_path / "input.csv"
     pl.DataFrame({"x": range(1000)}).write_csv(source)
     reader = FileSource(FileParams(path=str(source)), SourceEnvironment())
-    with DataContext(sources={"data": reader}, temp_directory=directory,
-                     cache_max_bytes=0) as ctx:
+    with DataContext(sources={"data": reader}, temp_directory=directory, cache_max_bytes=0) as ctx:
         assert ctx.get("data").shape == (1000, 1)
         assert ctx.resource_usage()["owned_spill_bytes"] > 0
         assert list(directory.rglob("*.arrow")), "fixture must create an actual owned spill"
@@ -52,8 +51,10 @@ def test_spill_cleanup_preserves_caller_directory(tmp_path):
 def test_isolated_validation_uses_unicode_paths(tmp_path):
     source = tmp_path / "entrée العربية.csv"
     pl.DataFrame({"value": [1, 2]}).write_csv(source)
-    report = validate(source, schema={"columns": {"value": {"ge": 0}}},
-                      resources=ResourceLimits(isolate=True, wall_time=15,
-                                               temp_dir=tmp_path / "temporary é"))
+    report = validate(
+        source,
+        schema={"columns": {"value": {"ge": 0}}},
+        resources=ResourceLimits(isolate=True, wall_time=15, temp_dir=tmp_path / "temporary é"),
+    )
     assert report.exit_code() == 0
     source.unlink()

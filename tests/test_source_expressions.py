@@ -24,22 +24,31 @@ from qavf.sources.query import DatabaseSource, QuerySource
 from qavf.sources.sql import normalize_sql_paths, resolve_sql_paths
 
 
-@pytest.mark.parametrize("argument", [
-    "['a.csv'] || ['b.csv']", "['a.csv'][1]", "['a.csv']::VARCHAR[]",
-    "'a' || '.csv'", "list_concat(['a.csv'], ['b.csv'])",
-])
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "['a.csv'] || ['b.csv']",
+        "['a.csv'][1]",
+        "['a.csv']::VARCHAR[]",
+        "'a' || '.csv'",
+        "list_concat(['a.csv'], ['b.csv'])",
+    ],
+)
 def test_complete_dynamic_file_argument_rejected_atomically(argument, tmp_path):
     with pytest.raises(SourceError, match="dynamic"):
         normalize_sql_paths(f"SELECT * FROM read_csv({argument})", tmp_path)
 
 
-@pytest.mark.parametrize("argument,name", [
-    ("E'a\\tb.csv'", "a\tb.csv"),
-    ("E'a\\\'b.csv'", "a'b.csv"),
-    ("$tag$a]b.csv$tag$", "a]b.csv"),
-    ("'é.csv'", "é.csv"),
-    ("['a.csv']", "a.csv"),
-])
+@pytest.mark.parametrize(
+    "argument,name",
+    [
+        ("E'a\\tb.csv'", "a\tb.csv"),
+        ("E'a\\'b.csv'", "a'b.csv"),
+        ("$tag$a]b.csv$tag$", "a]b.csv"),
+        ("'é.csv'", "é.csv"),
+        ("['a.csv']", "a.csv"),
+    ],
+)
 def test_literal_forms_resolve_to_configuration_root(argument, name, tmp_path):
     if os.name == "nt" and any(ord(character) < 32 for character in name):
         pytest.skip("Windows forbids control characters in literal file names")
@@ -58,7 +67,8 @@ def test_named_paths_are_bound_and_input_mapping_is_unchanged(value, tmp_path):
     normalized, bound = normalize_sql_paths(sql, tmp_path, parameters)
     expected = (
         [str(tmp_path / "a.csv"), str(tmp_path / "b.csv")]
-        if isinstance(value, list) else str(tmp_path / "a.csv")
+        if isinstance(value, list)
+        else str(tmp_path / "a.csv")
     )
     assert normalized == sql
     assert bound["path"] == expected
@@ -77,7 +87,8 @@ def test_url_parameter_and_nonpath_literals_remain_unchanged(tmp_path):
 def test_file_parameter_names_follow_duckdb_case_insensitivity(tmp_path):
     sql = "SELECT * FROM read_csv($PaTh)"
     assert normalize_sql_paths(sql, tmp_path, {"path": "a.csv"}) == (
-        sql, {"path": str(tmp_path / "a.csv")}
+        sql,
+        {"path": str(tmp_path / "a.csv")},
     )
 
 
@@ -212,9 +223,13 @@ def test_native_and_eager_transient_retries_share_policy(tmp_path):
         assert len(eager_calls) == 2 and source.load_notes["retries_used"] == 1
 
 
-@pytest.mark.parametrize("error", [
-    SourceError("permanent"), SourceNotFoundError("absent", retryable=True),
-])
+@pytest.mark.parametrize(
+    "error",
+    [
+        SourceError("permanent"),
+        SourceNotFoundError("absent", retryable=True),
+    ],
+)
 def test_permanent_and_missing_source_failures_do_not_retry(error):
     source = QuerySource(
         QueryParams(sql="SELECT 1", retries=2, retry_delay_s=0), SourceEnvironment()

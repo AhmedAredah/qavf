@@ -47,11 +47,11 @@ from types import ModuleType
 from typing import Any, ClassVar, cast
 
 import polars as pl
-from pydantic import BaseModel, ConfigDict
 
 from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.severity import Severity
+from qavf.parameters import RuleParams as RuleParams
 from qavf.plugins.transactions import (
     LOCK as _registration_lock,
 )
@@ -79,19 +79,6 @@ def _import_plugin(module_name: str) -> ModuleType:
         ) from None
 
 
-class RuleParams(BaseModel):
-    """Base class for rule parameter models.
-
-    Unknown keys are rejected, and so are NaN and infinite floats: no threshold or
-    tolerance is meaningful as either (an infinite tolerance would silently accept
-    any change).
-    """
-
-    model_config = ConfigDict(
-        extra="forbid", frozen=True, use_attribute_docstrings=True, allow_inf_nan=False
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class Finding:
     """What a rule reports back to the engine.
@@ -106,6 +93,8 @@ class Finding:
     """Offending records. The engine samples and serialises them."""
     affected_count: int | None = None
     """Defaults to ``len(affected)``; set it when ``affected`` is itself a sample."""
+    affected_count_exact: bool = field(default=True, kw_only=True)
+    """False when the affected count is only a proven lower bound."""
     total_records: int | None = None
     """Items examined, counted in the same ``unit`` as ``affected_count``. Leave it
     ``None`` when there is no meaningful denominator."""
@@ -115,6 +104,12 @@ class Finding:
     affected_rows: int | None = None
     """Data rows involved, when known and ``unit`` is not ``rows`` (for ``rows`` it
     defaults to ``affected_count``)."""
+    row_column: str | None = field(default="_row", kw_only=True)
+    """Evidence field carrying source row position, independent of user names.
+
+    Set ``None`` when evidence has no row position. The legacy spelling remains
+    the default for existing plugins; collision-aware producers name their role.
+    """
     metrics: dict[str, Any] = field(default_factory=dict)
     skipped: bool = False
     """The rule does not apply (nothing configured for it, or optional data absent)."""
@@ -135,7 +130,11 @@ class Finding:
         truthy strings such as ``"false"`` must never become a passing verdict,
         and booleans or rounded numeric counts must not enter the audit ledger.
         """
-        for name in ("passed", "skipped", "assessed"):
+        if self.row_column is not None and (
+            not isinstance(self.row_column, str) or not self.row_column
+        ):
+            raise TypeError("Finding.row_column must be a nonempty string or None")
+        for name in ("passed", "skipped", "assessed", "affected_count_exact"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"Finding.{name} must be a boolean")
         for name in ("affected_count", "total_records", "affected_rows"):

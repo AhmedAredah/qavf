@@ -98,8 +98,7 @@ def _is_geographic(crs: str) -> bool:
     if resolved.is_geographic:
         axes = resolved.axis_info[:2]
         if len(axes) == 2 and all(
-            math.isclose(axis.unit_conversion_factor, math.pi / 180, rel_tol=1e-12)
-            for axis in axes
+            math.isclose(axis.unit_conversion_factor, math.pi / 180, rel_tol=1e-12) for axis in axes
         ):
             return True
         raise ValueError(f"geographic CRS {crs} must use degrees for haversine distances")

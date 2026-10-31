@@ -13,15 +13,22 @@ result = compare_datasets(
     "v1/inventory.parquet",
     "v2/inventory.parquet",
     keys=["county", "year", "pollutant"],
-    columns={"emissions_t": "emissions"},          # baseline name -> candidate name
+    columns={"emissions_t": "emissions"},  # baseline name -> candidate name
     units={"emissions": {"factor": 1000, "from_unit": "t", "to_unit": "kg"}},
     levels=[
         "structure",
         "coverage",
         {"level": "records", "top_n": 5},
-        {"level": "groups", "group_by": ["pollutant"],
-         "measures": ["count", "sum(emissions)", {"measure": "quantile", "column": "emissions", "p": 0.9}],
-         "rank": {"measure": "sum(emissions)", "top_k": 5}},
+        {
+            "level": "groups",
+            "group_by": ["pollutant"],
+            "measures": [
+                "count",
+                "sum(emissions)",
+                {"measure": "quantile", "column": "emissions", "p": 0.9},
+            ],
+            "rank": {"measure": "sum(emissions)", "top_k": 5},
+        },
     ],
     rtol=1e-6,
 )
@@ -51,8 +58,12 @@ from qavf import compare_datasets
 from qavf.compare import ComparisonSpec
 
 contract = ComparisonSpec(
-    baseline="reference", candidate="release", keys=("site",),
-    decision="material", rtol=0, atol=0,
+    baseline="reference",
+    candidate="release",
+    keys=("site",),
+    decision="material",
+    rtol=0,
+    atol=0,
 )
 result = compare_datasets("before.parquet", "after.parquet", configuration=contract)
 ```
@@ -160,13 +171,29 @@ result = compare_datasets(
     "v1/counts.parquet",
     "v2/counts.parquet",
     levels=[
-        {"level": "temporal", "time_column": "timestamp", "bucket": "day",
-         "time_zone": "America/Chicago", "group_by": ["site"], "measures": ["sum(volume)"]},
-        {"level": "temporal", "name": "hourly profile", "time_column": "timestamp",
-         "bucket": "hour_of_day", "measures": ["mean(volume)"]},
-        {"level": "series_shape", "time_column": "timestamp", "bucket": "hour",
-         "group_by": ["site"], "measure": "sum(volume)",
-         "profile": {"profile": "hour_of_day"}},
+        {
+            "level": "temporal",
+            "time_column": "timestamp",
+            "bucket": "day",
+            "time_zone": "America/Chicago",
+            "group_by": ["site"],
+            "measures": ["sum(volume)"],
+        },
+        {
+            "level": "temporal",
+            "name": "hourly profile",
+            "time_column": "timestamp",
+            "bucket": "hour_of_day",
+            "measures": ["mean(volume)"],
+        },
+        {
+            "level": "series_shape",
+            "time_column": "timestamp",
+            "bucket": "hour",
+            "group_by": ["site"],
+            "measure": "sum(volume)",
+            "profile": {"profile": "hour_of_day"},
+        },
     ],
 )
 ```
@@ -309,8 +336,14 @@ result = compare_datasets(
     "v1/trips.parquet",
     "v2/trips.parquet",
     keys=["trip_id"],
-    steps=[{"step": "assign_zones", "x": "lon", "y": "lat",
-            "layer": {"path": "zones/taz.geojson", "id": "taz"}}],
+    steps=[
+        {
+            "step": "assign_zones",
+            "x": "lon",
+            "y": "lat",
+            "layer": {"path": "zones/taz.geojson", "id": "taz"},
+        }
+    ],
     levels=[
         {"level": "spatial", "measures": ["count"], "weights": {"method": "rook"}},
         {"level": "temporal", "time_column": "day", "bucket": "week", "group_by": ["zone"]},
@@ -332,10 +365,16 @@ member: a `group_by` group (a zone column is a group column too) and, with `time
 time bucket within it.
 
 ```python
-levels=[{"level": "distribution", "columns": ["speed", {"column": "fc", "kind": "categorical"}],
-         "group_by": ["zone"], "time": {"time_column": "day", "bucket": "month"},
-         "thresholds": {"max_psi": 0.2, "max_ks": 0.1, "max_js": 0.05},
-         "quantiles": {"probabilities": [0.1, 0.5, 0.9]}}]
+levels = [
+    {
+        "level": "distribution",
+        "columns": ["speed", {"column": "fc", "kind": "categorical"}],
+        "group_by": ["zone"],
+        "time": {"time_column": "day", "bucket": "month"},
+        "thresholds": {"max_psi": 0.2, "max_ks": 0.1, "max_js": 0.05},
+        "quantiles": {"probabilities": [0.1, 0.5, 0.9]},
+    }
+]
 ```
 
 | Kind | Metrics (materiality) | Test (significance) |
@@ -360,11 +399,21 @@ The `relationships` level compares how columns relate, per member (`group_by`,
 `time`), with three optional parts:
 
 ```python
-levels=[{"level": "relationships", "group_by": ["county"],
-         "correlation": {"columns": ["aadt", "vmt", "crashes"], "max_change": 0.1},
-         "ratios": ["fatal / crashes", {"numerator": "nox", "denominator": "vmt", "rtol": 0.01}],
-         "agreement": {"columns": ["aadt"], "fit": "deming", "min_ccc": 0.99,
-                       "max_slope_deviation": 0.05, "max_abs_bias": 50}}]
+levels = [
+    {
+        "level": "relationships",
+        "group_by": ["county"],
+        "correlation": {"columns": ["aadt", "vmt", "crashes"], "max_change": 0.1},
+        "ratios": ["fatal / crashes", {"numerator": "nox", "denominator": "vmt", "rtol": 0.01}],
+        "agreement": {
+            "columns": ["aadt"],
+            "fit": "deming",
+            "min_ccc": 0.99,
+            "max_slope_deviation": 0.05,
+            "max_abs_bias": 50,
+        },
+    }
+]
 ```
 
 * `correlation`: every pair of `columns` is correlated on each side (Pearson, and
@@ -398,10 +447,19 @@ The `contribution` level says what explains the total change of an additive meas
 (`count`, `sum(x)`, `null_count(x)`), along one or more dimensions:
 
 ```python
-levels=[{"level": "contribution", "measure": "sum(fatal)", "share": 0.8,
-         "dimensions": ["zone", ["zone", "fc"],
-                        {"columns": ["zone"], "time": {"time_column": "day", "bucket": "month"}}],
-         "rates": [{"numerator": "fatal", "denominator": "vmt", "dimension": "zone"}]}]
+levels = [
+    {
+        "level": "contribution",
+        "measure": "sum(fatal)",
+        "share": 0.8,
+        "dimensions": [
+            "zone",
+            ["zone", "fc"],
+            {"columns": ["zone"], "time": {"time_column": "day", "bucket": "month"}},
+        ],
+        "rates": [{"numerator": "fatal", "denominator": "vmt", "dimension": "zone"}],
+    }
+]
 ```
 
 For each dimension every member's change (`candidate - baseline`, a member on one side

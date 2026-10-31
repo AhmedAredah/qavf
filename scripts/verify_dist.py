@@ -26,8 +26,19 @@ def package_files() -> dict[str, bytes]:
 def development_files() -> dict[str, bytes]:
     """The sdist must retain the exact inputs needed to repeat release checks."""
     inputs = (
-        "tests", "config", "docs", "scripts", ".github", ".gitattributes", ".gitignore",
-        "pyproject.toml", "uv.lock", "README.md", "CHANGELOG.md", "LICENSE",
+        "tests",
+        "config",
+        "docs",
+        "scripts",
+        ".github",
+        ".gitattributes",
+        ".gitignore",
+        "pyproject.toml",
+        "uv.lock",
+        "README.md",
+        "README_UPGRADE.md",
+        "CHANGELOG.md",
+        "LICENSE",
     )
     result = {}
     for name in inputs:

@@ -101,9 +101,11 @@ def test_evidence_from_several_files_names_each_file(tmp_path, suffix) -> None:
         first.name,
         0,
     )
-    located = _failed(str(tmp_path / f"*.{suffix}"), "INP-003", schema={
-        "primary_key": ["id"], "columns": {"x": {"nullable": True, "le": 1.5}}
-    })
+    located = _failed(
+        str(tmp_path / f"*.{suffix}"),
+        "INP-003",
+        schema={"primary_key": ["id"], "columns": {"x": {"nullable": True, "le": 1.5}}},
+    )
     [record] = located[0].affected_records
     assert (record["_row"], Path(record["_file"]).name, record["_file_row"]) == (
         4,
