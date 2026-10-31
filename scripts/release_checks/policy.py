@@ -49,17 +49,14 @@ def accepted_skip(nodeid: str, reason: str, env: dict[str, Any] | None = None) -
     if system == "Windows":
         if (
             nodeid.startswith(
-                "tests/test_review_072_boundaries.py::test_cli_never_replaces_selected_input["
+                "tests/test_review_boundaries.py::test_cli_never_replaces_selected_input["
             )
             and reason == "Windows filenames forbid these characters"
         ):
             return True
         if (
             nodeid
-            == (
-                "tests/test_review_072_boundaries.py::"
-                "test_protection_preserves_file_aliases[symlink]"
-            )
+            == ("tests/test_review_boundaries.py::test_protection_preserves_file_aliases[symlink]")
             and reason == "Windows symlink privileges unavailable"
         ):
             return True

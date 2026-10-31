@@ -6,240 +6,73 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.7.2] - 2026-10-31
-
-### Fixed
-
-- Share literal-first, hidden-inclusive file discovery between readers and CLI
-  publication guards; recheck input collisions immediately before atomic replacement.
-- Enforce a single spill writer, owner/handle lifetime, latched write failures,
-  and exact accounting for partial writes.
-- Recognize optional frame classes safely during imports. Replace metadata-only
-  typing protocols with actual Arrow/dataframe interchange protocols; type the
-  planning and profiling input surfaces consistently.
-- Execute independent SQLite reads outside the shared spill-allocation lock;
-  reserve/reconcile write growth and reject deferred result-bearing writes.
-
-### Changed
-
-- Coalesce small source batches using a bounded merge tree and independent IPC
-  chunks. Add `ResourceLimits(max_spill_files=...)` / `engine.max_spill_files`
-  (default 4096), shared spool working-memory telemetry, and explicit byte scope.
-- Inject source/SQL read dependencies, isolate local manifest identity, and adapt
-  existing plugins to a narrow owned-batch protocol. Preserve public facades.
-- Share normalized column applicability and outcome construction across vectorized
-  eager, lazy and SQL implementations; retain exact fallbacks.
-- Add failure-boundary, protocol, independent-collaborator, backend-parity and
-  concurrency regressions, plus a reproducible batch-spool benchmark.
-- Record current artifact validation separately from historical results; external
-  platform/service gates must actually execute before deployment certification.
-
-## [0.7.1] - 2026-10-31
-
-### Fixed
-
-- A custom batch source could suppress a read, schema, admission, or interruption
-  exception in its context manager and cause a partial dataset to pass. Completion
-  enforcement now belongs to the shared batch engine and covers every source
-  adapter. Failed attempts retain their original error and unwind owned buffers.
-- Removed duplicate suppression handling from the public batch descriptor's
-  adapter; conversion and reader ownership remain that adapter's responsibility.
-- Added regression coverage for custom source suppression, complete successful
-  streams, row limits, schema drift, read interruption, and quota cleanup.
-
-Continuation verification covers installed-package use on Python 3.12, 3.13,
-and 3.14. Exact results and remaining platform/service prerequisites are recorded
-in `validation/continuation/README.md` in the source ZIP. No remote publishing
-or cross-platform release certification is implied.
-
-## [0.7.0] - 2026-10-31
-
-### Correctness and resource ownership
-
-- Keep conformance and missing-fraction decisions on coherent observations;
-  preserve whole-row evidence and nanosecond group identities.
-- Isolate CSV helper names from user columns and bound rejection diagnostics.
-  Saturated rejection counts are explicit lower bounds and cannot establish a
-  pass when the configured threshold has not been conclusively assessed.
-- Widen float scaling and temporal bucket arithmetic, validate scale factors,
-  normalize supported scientific scalars, and preserve typed empty grids.
-- Make composite resource cleanup retryable and retain ownership until handles,
-  files, and leases have actually been released. Stage spill publication before
-  short metadata updates and reuse already-owned IPC without a second copy.
-- Apply row and serialized-byte evidence admission before expensive location or
-  result construction; retain complete counts and statistical decision families.
-
-### Performance and design
-
-- Reuse native-safe keyed comparison over owned aligned observations, fuse
-  compatible grouped measures, and stream categorical groups under admission.
-- Preallocate kNN edge arrays and exact seasonal Sen slope storage. Add explicit
-  slope byte admission; exact pair work remains quadratic.
-- Build only required group-order/deviation structures, use direct registry
-  lookup, and avoid full distinct work for obviously high-cardinality profiles.
-- Give each report independent render state and occurrence-based navigation;
-  reuse derived report analysis within a presentation operation.
-- Move neutral rule parameters out of the engine while preserving the old
-  import alias; add static input facades without eager optional imports.
-
-### Public API and assurance
-
-- Require DuckDB 1.3.0 or newer after minimum-version verification exposed
-  timezone metadata loss in DuckDB 1.2 CSV inference. The existing timezone
-  regression passes on the corrected minimum; other dependency floors remain.
-- Add owned `BatchSource`, data-free `explain`, and explicit `validity`,
-  `regression`, and `change` profiles. Profiles require user-supplied acceptance
-  contracts and never infer acceptance limits from the input.
-- Extend auxiliary crosswalk input adapters; serialized run configuration uses
-  named datasets for live sources. See the upgrade guide for this boundary.
-- Add regression tests, independently checked benchmark workloads, CI and release
-  verification workflows, and a real Windows process-tree timeout contract.
-- Resolve formatter debt. Include a concern-by-concern implementation record
-  and local validation evidence. Remote platform gates require their actual runs.
-
-See [the upgrade guide](README_UPGRADE.md) and
-[implementation status](docs/remediation_status.md) for compatibility details,
-measured tradeoffs, and verification scope.
-
-## [0.6.0] - 2026-10-30
+## [0.6.0] - 2026-10-31
 
 ### Added
 
-- **Stray values no longer hide a column's limits.** When a column declared `int`,
-  `float`, `decimal`, `bool`, `date` or `datetime` is read as text because of a few
-  cells, INP-002 reports exactly those cells with their rows and values, and INP-003
-  checks every limit on the remaining values instead of reporting them not assessed.
-  Text `missing_values` such as `N/A` now also work on these columns, and
-  `blank_as_missing` is accepted with any `dtype`.
-- **`text_columns`** for CSV file sources reads the named columns as written, so codes
-  and identifiers that look numeric keep their leading zeros. Columns declared
-  `dtype: str` are added automatically. `qavf init` drafts integer columns written
-  with leading zeros (`007`) as text.
-- **`normalize`** compares text in `isin`, `notin` and `unique` after normalizing it:
-  `case` ignores letter case and `trim` ignores surrounding whitespace.
-- An absent column names its likely spelling in the data (`ID` for `id`, `Site ID` for
-  `site_id`, a close misspelling) in INP-002, INP-003 and INP-004.
-- `.xlsm` workbooks are read as Excel; a legacy `.xls` workbook explains how to read it.
-- **Unreadable CSV lines are located.** When a CSV line cannot be read (a value of the
-  wrong type past the reader's type sample, extra or missing fields, a wrong encoding),
-  checks report how many lines fail, the first one's line number, column and text, and
-  what to set, instead of the reader's raw error. The lines are found with one bounded
-  pass, only after a read has failed.
-- **Lossy reads are reported.** With `store_rejects` or `ignore_errors`, INP-002 fails
-  when more lines were left out than the new `max_rejected_rows` (default 0), and lists
-  them by file and line.
-- INP-002 reports duplicate and blank CSV header names that the reader renamed (`v_1`,
-  `column3`), and a header row the reader did not recognize.
-- **Declared types are read, not guessed.** In a CSV, a column declared `int`, `float`,
-  `bool` or `date` (or `datetime` with a `format`) is read as text and converted in the
-  same scan, so the reader's sample of the first rows never decides its type. A value
-  that is not of the type is missing for every check, and INP-002 lists it with its row
-  and text. Polars and DuckDB recognize exactly the same text for each type.
-- `format` for `date` and `datetime` columns written another way than ISO 8601, and
-  `true_values`/`false_values` for `bool` columns (`Y`/`N`).
-- A column declared `int` accepts floats that are whole numbers, as spreadsheets store
-  every number; INP-002 lists the rows holding a fraction.
-- A text cell in an Excel number or date column names the cell and how to read it.
-- **Every row-level finding locates its rows.** Row expressions (INP-006) list
-  `_row` for their violating rows, found only after an expression fails. Evidence from
-  a dataset read from several files adds `_file` and `_file_row`. A failing
-  `max_null_fraction` lists the missing rows. The README describes how to read
-  evidence.
-- `not_null` in a check makes a field required only in the check's rows, e.g.
-  `{where: "status = 'closed'", not_null: true}`, and lists the rows missing it.
-
-### Fixed
-
-- A CSV value past the reader's type sample could be silently changed: in a column typed
-  as an integer from its first rows, `2.5` was read as 3, `0x10` as 16 and `1e3` as 1000,
-  and every check passed. Declared columns are now converted strictly (see above).
-- **Decimal text is converted exactly.** A `decimal` column read from text takes the
-  scale its values need (up to 38 digits); a value that does not fit is invalid and
-  listed by INP-002, never rounded into the limits.
-- Header names that only look generated (`column0`) or hold a delimiter (`"rate,count"`)
-  are no longer reported as renamed when the file really spells them that way.
-- A metric normalized by its own dataset (`normalize_by` on the same dataset) reads its
-  numerator and denominator from one snapshot of a changing source.
-- **Comparison error limits are hard limits.** `max_rmse`, `max_mae`, bias, agreement,
-  concordance and R² limits fail on their value under every decision policy; the
-  identity-line test decides only the slope and intercept limits. Previously an
-  exceeded error limit could pass when the fitted line stayed on the identity.
-- A comparison whose requested columns cannot all be compared (a type change, say) is
-  `incomplete` with a "values not compared" check, instead of passing on the rest.
-- **A report never replaces an input.** `qavf run` and `qavf compare-datasets` refuse a
-  report path naming one of the run's data or configuration files, including through
-  a link, before anything is written.
-- Configuration that reuses one object in many places is no longer expanded into a
-  tree: shared parts stay shared, a configuration expanding past 1,000,000 values is
-  refused, and a cyclic one is reported instead of overflowing the stack.
-- Streamed JSON reports equal Pydantic's own output for plugin result models,
-  including their extra fields and custom serializers.
-- Layers, crosswalks and weight tables treat a NaN identifier as missing, as every
-  other check does.
-- Comparison charts keep groups apart whose labels look alike (`('a, b', 'c')` and
-  `('a', 'b, c')`, floats equal to six digits, a null and the text `—`), and maps find
-  float zone ids.
-- A temporary file whose removal fails (a Windows sharing lock) stays charged to the
-  spill budget and is removed by the next cleanup; run cleanup attempts every step and
-  reports what failed.
-- **A rule calling `sys.exit` no longer ends the host program.** It is reported as an
-  ERROR (not assessed) in sequential, thread-pool and timed execution alike, including
-  a generator rule failing while its findings are read. `KeyboardInterrupt` still
-  stops the run.
-- `refresh()` of a component registry rebuilds its installed components: one whose
-  entry point was removed, or whose replacement failed to load, is no longer
-  available.
-- Whole counts reach statistical tests as exact integers (`2**53 + 1` is no longer
-  `2**53`). The exact Poisson test reports totals above `2**53`, and SciPy results that
-  are not probabilities, as not assessed instead of raising.
+- **Declared types are read, not guessed.** CSV columns declared `int`, `float`,
+  `decimal`, `bool`, `date` or `datetime` are converted strictly in the same scan.
+  INP-002 lists each value that is not of the type with its row and text; INP-003
+  still checks every limit on the remaining values.
+- `format` for dates and datetimes not written as ISO 8601, `true_values` and
+  `false_values` for booleans, and text `missing_values` (such as `N/A`) on typed
+  columns.
+- `text_columns` reads CSV columns as written, so codes such as `007` keep their
+  leading zeros; columns declared `dtype: str` are included automatically.
+- `normalize: {case, trim}` for `isin`, `notin` and `unique` on text.
+- `not_null` in a check requires a field only in the check's rows.
+- **Every row-level finding is located.** Evidence carries `_row`, and `_file` and
+  `_file_row` for multi-file datasets. Unreadable CSV lines are reported with their
+  file, line, column and text; `max_rejected_rows` and `rejects_budget` bound
+  lossy reads.
+- An absent column names its likely spelling in the data (`ID` for `id`).
+- `schema.evidence_columns`: failing rows show the checked columns and the key
+  (`checked`, the default) or whole rows (`all`).
+- `BatchSource` for caller-owned batch factories, `explain(...)` to list the checks a
+  configuration runs without reading data, and the `validity`, `regression` and
+  `change` profiles, which always need an explicit QA contract.
+- `affected_count_exact` on results: `False` marks a lower bound, shown as "at least".
+- `max_spill_files` resource limit; `.xlsm` workbooks.
 
 ### Changed
 
-- A value that is not of a column's declared type counts as missing for every check
-  other than INP-002, whichever way the data is read.
-- Zoned timestamps load and compare in UTC on every machine. They previously took the
-  host's time zone, so the same file and bounds could pass on one machine and fail on
-  another.
-- INP-004 duplicate-key evidence lists the first row positions of each key (`rows`).
-- A column's `unique` limit reports the rows holding repeated values, like other row
-  limits, instead of only stating that values repeat.
-- **Column-check evidence shows the checked columns.** A failing column check's rows
-  list the checked column, the columns of its `where` and unit column, and the
-  `primary_key`, with `_row` and `violates`; unrelated columns are no longer read for
-  each failing check. Set `evidence_columns: all` in a dataset's `schema` for whole
-  rows, as before.
-- `qavf.spatial.compose` documents its exactness per step: each step's weights are
-  exact and rounded once, so a chain of several steps is rounded once per step.
+- Licensed under the Apache License 2.0 (previously MIT).
+- DuckDB 1.3.0 or newer is required: 1.2 loses time zones when reading CSV files.
+- Zoned timestamps load and compare in UTC on every machine.
+- A value that is not of its declared type counts as missing for every check other
+  than INP-002.
+- Comparison error, bias, agreement, concordance and R² limits are hard limits under
+  every decision policy; the identity-line test decides only slope and intercept.
+- `qavf.engine.registry.RuleParams` moved to `qavf.parameters`; the old import
+  still works.
+
+### Fixed
+
+- A CSV value past the reader's type sample could be silently changed (`2.5` read
+  as 3) while every check passed.
+- Decimal text is converted exactly and never rounded into its limits.
+- False passes: a comparison that could not compare every requested column, a
+  custom batch source that suppressed a read error, and a saturated rejection count
+  are now incomplete instead of passing.
+- A report path naming an input of the run is refused before anything is written.
+- A rule calling `sys.exit` is reported as an ERROR instead of ending the program.
+- Exact counts above `2**53` are no longer rounded before statistical tests.
+- NaN identifiers count as missing in spatial layers, crosswalks and weight tables.
+- Streamed JSON reports match Pydantic's output, including plugin result models.
+- Chart groups with similar labels stay distinct; maps find float zone ids.
+- Plugin registries forget removed or failed entry points on `refresh()`.
+- Shared configuration objects are no longer expanded; cyclic ones are refused.
+- Temporary files that cannot be removed at once are retried and stay accounted.
 
 ### Performance
 
-- Declared-text checks convert columns in the same batched scan as the other checks,
-  without loading a converted copy of the column.
-- Parquet file row positions in evidence come from the file footers, not a scan.
-- `series_shape` lag searches and level-shift screens are admitted against `max_work`
-  before they run, with TMP-008's cost function, across every series and side; a
-  series beyond the budget is a not-assessed `resource limit` check.
-- A pandas frame or Arrow table that states more rows than its `row_budget` is
-  refused before it is converted.
-- Charts cut labels and tooltips to 200 characters before they are built.
-- Grid-cell assignment into another CRS admits at most `max_points` distinct points
-  and transforms them `batch_size` at a time, with 64-bit point ids and
-  operation-local registrations removed on every exit.
-- A spilled dataset is read natively, without a Python copy of its file, and outside
-  the cache and context locks, so other datasets and operations do not wait for it;
-  parallel readers of one dataset still read it once.
-- Unordered evidence samples of SQL queries (row expressions) count and keep their
-  first rows in one streamed pass instead of staging the whole result in a
-  materialized CTE; ordered samples (SQL assertions) keep the CTE.
-- An induced subgraph of a spatial weights graph reads only the selected rows.
-- Regression comparisons decide 64-bit integer closeness under a tolerance natively
-  and exactly, with unchanged results (3.5 to 10 times faster on the measured
-  100,000-row changed columns).
-- Nested cells are compared field by field from their columns, without decoding a
-  whole Struct value into Python, and integer and text cells stop at their first
-  difference.
-- Agreement and distribution metrics prepare each member's values once.
-- Sub-day sequence positions take typed bounds instead of sorting every label.
+- Failing-row evidence reads only the columns it shows; unordered SQL evidence is
+  sampled in one streamed pass.
+- Spilled data is read without a Python copy and outside shared locks.
+- Series-shape screens, cross-CRS grid assignment, chart text and over-budget
+  in-memory frames are bounded before work starts.
+- Faster exact integer tolerances in regression comparisons, field-by-field nested
+  comparisons, sparse subgraph selection and coalesced small source batches.
 
 ## [0.5.0] - 2026-10-23
 

@@ -24,7 +24,6 @@ SOURCE_INPUTS = (
     "pyproject.toml",
     "uv.lock",
     "README.md",
-    "README_UPGRADE.md",
     "CHANGELOG.md",
     "LICENSE",
     ".gitattributes",

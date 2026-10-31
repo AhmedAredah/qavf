@@ -1,4 +1,4 @@
-"""Regression cases for the independently reproduced 0.7.1 review findings."""
+"""Regression cases for independently reproduced review findings."""
 
 from __future__ import annotations
 

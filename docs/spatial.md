@@ -127,9 +127,7 @@ Ordinary calls use these defaults; larger admitted workloads can override them:
 These controls apply to polygon assignment. Grid-cell assignment in another CRS
 applies `max_points` and `batch_size` to the distinct points it transforms; a grid in
 the points' own CRS needs no transform, and attribute-zone steps retain their
-existing controls. New finite defaults can refuse workloads that
-previously attempted unrestricted assignment; increase them deliberately for larger
-validated workloads.
+existing controls. Increase the limits deliberately for larger validated workloads.
 
 Set these directly on an `assign_zones` step or `AssignmentPolicy`. For GEO-001,
 set `assignment_limits` on the point specification, for example

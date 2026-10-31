@@ -1,4 +1,4 @@
-"""Independent collaborator contracts for the 0.7.2 architecture boundaries."""
+"""Independent collaborator contracts for the architecture boundaries."""
 
 from __future__ import annotations
 

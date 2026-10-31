@@ -100,8 +100,7 @@ limiting displayed records alone does not limit the native rejection table.
 DuckDB's `rejects_limit` counts error entries per file. A malformed line can
 produce several entries. QAVF allocates the total budget across the manifest,
 then clamps any requested per-file limit to that allocation. Reader
-`rejects_limit=0` now means use the explicit bounded budget; it no longer permits
-unbounded rejection storage. The effective limit and budget appear in reader
+`rejects_limit=0` uses the bounded budget; rejection storage is never unbounded. The effective limit and budget appear in reader
 provenance. Unresolved remote wildcards cannot establish a total file count and
 are rejected for lossy capture; use explicit inputs or resolved manifests.
 

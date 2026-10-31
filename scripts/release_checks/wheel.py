@@ -20,7 +20,6 @@ TEST_INPUTS = (
     "config",
     "docs",
     "README.md",
-    "README_UPGRADE.md",
     "CHANGELOG.md",
     "LICENSE",
     "pyproject.toml",

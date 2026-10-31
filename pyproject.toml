@@ -3,7 +3,7 @@ name = "qavf"
 dynamic = ["version"]
 description = "Configurable, plugin-based data QA/QC: column limits, SQL checks, temporal and spatial outliers, regression testing and HTML reports, over any source DuckDB can read."
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Ahmed Aredah", email = "Ahmed.Aredah@gmail.com" }]
 requires-python = ">=3.12"
@@ -91,7 +91,7 @@ packages = ["qavf"]
 
 [tool.hatch.build.targets.sdist]
 # Root anchors prevent historical files with matching names entering the sdist.
-include = ["/qavf", "/tests", "/config", "/docs", "/scripts", "/.github", "/.gitattributes", "/.gitignore", "/pyproject.toml", "/uv.lock", "/README.md", "/README_UPGRADE.md", "/CHANGELOG.md", "/LICENSE"]
+include = ["/qavf", "/tests", "/config", "/docs", "/scripts", "/.github", "/.gitattributes", "/.gitignore", "/pyproject.toml", "/uv.lock", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 exclude = ["**/__pycache__", "**/*.pyc", "**/.pytest_cache"]
 
 [tool.uv]

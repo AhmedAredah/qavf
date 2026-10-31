@@ -19,16 +19,15 @@ def release_tree(tmp_path: Path, monkeypatch):
         "tests/test_contract.py": b"def test_truth(): assert True\n",
         "scripts/verify_release.py": b"# release entry point\n",
         "config/example.yaml": b"datasets: {}\n",
-        "docs/release_assurance.md": b"Required checks\n",
+        "docs/releasing.md": b"Release checks\n",
         ".github/workflows/verify.yml": b"name: verify\n",
         ".gitattributes": b"* text=auto eol=lf\n",
         ".gitignore": b"dist/\n",
         "pyproject.toml": b"[project]\nname = 'test'\n",
         "uv.lock": b"version = 1\n",
         "README.md": b"Example\n",
-        "README_UPGRADE.md": b"Upgrade steps\n",
         "CHANGELOG.md": b"Changes\n",
-        "LICENSE": b"MIT\n",
+        "LICENSE": b"Apache License 2.0\n",
     }
     for name, content in files.items():
         path = tmp_path / name

@@ -3,16 +3,13 @@
 [![CI](https://github.com/AhmedAredah/qavf/actions/workflows/ci.yml/badge.svg)](https://github.com/AhmedAredah/qavf/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/qavf)](https://pypi.org/project/qavf/)
 [![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/AhmedAredah/qavf/blob/main/pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/AhmedAredah/qavf/blob/main/LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/AhmedAredah/qavf/blob/main/LICENSE)
 
 **Configurable data QA/QC for Python.** Validate files, dataframes and database
 queries against declared limits, statistical expectations and stored baselines.
 QAVF reports violation counts with bounded evidence. Counts are exact unless
 explicitly labelled as lower bounds, and an insufficient lower bound cannot
 establish a pass.
-
-For this source update, read [the upgrade guide](README_UPGRADE.md) and
-[implementation and verification status](docs/remediation_status.md).
 
 - **Any input.** CSV, Parquet, JSON, Excel, globs and URLs; DuckDB, SQLite, PostgreSQL
   and MySQL tables; SQL queries; Polars, pandas and Arrow frames; Python loaders.
@@ -320,9 +317,9 @@ uv run pytest
 uv run ruff check . && uv run mypy qavf scripts
 ```
 
-See [release assurance](https://github.com/AhmedAredah/qavf/blob/main/docs/release_assurance.md)
-for the full verification matrix and [CHANGELOG.md](CHANGELOG.md) for changes.
+See [releasing](https://github.com/AhmedAredah/qavf/blob/main/docs/releasing.md)
+for the release checks and [CHANGELOG.md](CHANGELOG.md) for changes.
 
 ## License
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE)

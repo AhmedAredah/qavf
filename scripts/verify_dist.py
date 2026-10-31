@@ -36,7 +36,6 @@ def development_files() -> dict[str, bytes]:
         "pyproject.toml",
         "uv.lock",
         "README.md",
-        "README_UPGRADE.md",
         "CHANGELOG.md",
         "LICENSE",
     )

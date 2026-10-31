@@ -220,10 +220,9 @@ Scalar native float sum, mean and sample deviation now consume bounded batches w
 exact numerical state. Grouped floating, weighted and order-sensitive kernels retain
 their exact projected paths. STA outlier evidence contains raw checked values, group
 keys, diagnostics and a position from the same projected observation; unrelated
-columns are omitted. See [full-data loading](full_data_loading.md) for the capability
-map, remaining materialization, and current measurements.
+columns are omitted.
 
-## Bounded observation spooling (0.7.2)
+## Bounded observation spooling
 
 Small producer batches are detached and coalesced into independent IPC files.
 A merge tree preserves order and avoids repeatedly copying a growing prefix.
