@@ -38,3 +38,70 @@ Spatial coverage currently requires temporal identifiers representable at micros
 precision. Non-aligned Datetime(ns), Duration(ns) or Time identifiers are unassessed
 before Python conversion can merge identities; use explicit physical integer keys
 when finer-resolution identities are required.
+
+## Numeric text grammar and option equality (0.7)
+
+Declared numeric text is admitted by a shared grammar before conversion. The
+default integer grammar accepts `07`, `7`, and `+7` as the same integer, but
+continues to reject `7.0` to preserve existing type-checking contracts. Enable
+integral decimal notation explicitly when it is valid for your input:
+
+```yaml
+columns:
+  category:
+    dtype: int
+    number_grammar:
+      int_decimal: true
+      underscores: false
+    trim_whitespace: ascii
+    isin: ["07", "+8", "9.0"]
+    convert_options: true
+    each_allowed_once: true
+```
+
+Here `7`, `07`, `+7`, and `7.0` identify one value, including in keys. An integer
+never converts through floating point: `9007199254740993.0` remains exact,
+fractions such as `7.0000000000000000001` are invalid, and out-of-range values
+are invalid. With `int_decimal: true`, a decimal point may be followed only by
+zeros (or no digits); scientific integer notation remains invalid.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `number_grammar.int_decimal` | `false` | Admit integral decimal notation for integers. |
+| `number_grammar.underscores` | `false` | Admit one underscore between digits, such as `1_000`; doubled, leading, and trailing underscores remain invalid. |
+| `number_grammar.exponent` | `true` | Admit scientific notation for floats. Exact decimal columns retain decimal notation. |
+| `number_grammar.special_values` | `true` | Admit float `nan`, `inf`, and `infinity` spellings, case insensitively. NaN still means missing; `allow_infinite` still governs infinities. |
+| `trim_whitespace` | `ascii` | Strip surrounding U+0020 spaces before type parsing. `unicode` strips the explicitly shared Unicode whitespace set; `none` preserves all characters. |
+| `convert_options` | `false` | Parse string `isin`/`notin` options with the declared numeric grammar. Without it, wrong-type options retain the existing compatibility diagnostic. |
+
+Whitespace and grammar settings govern text interpretation, not already typed
+numeric arrays. Preserve text at ingestion when the original spelling matters.
+CSV columns declared as decimals retain their raw spelling until QAVF resolves
+an exact column scale. A named reader hint such as `DECIMAL(6,2)` cannot round
+`1.234` to `1.23` before validation. Positional numeric reader hints that conflict
+with declared validation raise a specific configuration error; use named hints
+or `VARCHAR` instead.
+Missing markers retain their existing exact comparison rule; they do not become
+valid numbers merely because they appear in an allowed list.
+
+`each_allowed_once` is a built-in domain contract requiring `isin`. It compiles
+to membership, uniqueness and an exact distinct-count bound, so it shares the
+existing SQL reductions and bounded evidence paths. Repeated configured options
+that convert to one value describe one domain member. Missing and N/A cells are
+outside this domain and follow their separate policies. A missing domain member,
+a repeated member, or an unexpected member fails the contract. `where` scopes
+the entire contract, including coverage.
+
+Case-insensitive collisions already use the built-in `unique` constraint:
+
+```yaml
+columns:
+  label:
+    dtype: str
+    unique: true
+    normalize: [case]
+```
+
+Combine `normalize: [case]`, `isin`, and `each_allowed_once` to require every
+distinct normalized text option exactly once. Normalization affects comparison;
+evidence retains the observed text.

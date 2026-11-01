@@ -49,6 +49,7 @@ def request_bytes(
         "version": 1,
         "settings": settings.model_dump(mode="python", by_alias=True),
         "source_path": settings.source_path,
+        "engine_fields_set": sorted(settings.engine.model_fields_set),
         "queries": queries,
         "options": dict(options or {}),
     }
@@ -70,6 +71,8 @@ def read_request(path: Path) -> tuple[QAVFSettings, dict[str, object], dict[str,
         raise ExecutionLimitError("invalid isolated request version")
     settings = QAVFSettings.model_validate(payload["settings"])
     settings.source_path = payload["source_path"]
+    if "engine_fields_set" in payload:
+        settings.engine.__pydantic_fields_set__ = set(payload["engine_fields_set"])
     queries: dict[str, object] = {
         name: Query(**value) for name, value in payload["queries"].items()
     }

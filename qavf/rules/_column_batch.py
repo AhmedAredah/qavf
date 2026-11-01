@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from fractions import Fraction
 from types import NotImplementedType
 from typing import Any
 
@@ -38,7 +39,7 @@ def exceeds_missing_fraction(check: ColumnCheck | None, missing: int, applicable
     """Whether the complete applicable population exceeds its missing-value limit."""
     if check is None or check.max_null_fraction is None:
         return False
-    return (missing / applicable if applicable else 0.0) > check.max_null_fraction
+    return (Fraction(missing, applicable) if applicable else Fraction(0)) > check.max_null_fraction
 
 
 def independent_scope(where: str | None, actual: dict[str, pl.DataType]) -> bool:

@@ -6,6 +6,8 @@ from collections.abc import Callable, Sequence
 
 import polars as pl
 
+from qavf.core.key_policy import decimal_key_domain
+
 
 class KeyTypeError(ValueError):
     """Two key columns cannot be compared without losing or inventing information."""
@@ -39,6 +41,11 @@ def key_casts(
         return target, target
     if left.is_float() and right.is_float():
         return pl.Float64(), pl.Float64()
+    if isinstance(left, pl.Decimal) and isinstance(right, pl.Decimal):
+        domain = decimal_key_domain((left.precision, left.scale), (right.precision, right.scale))
+        if domain is not None:
+            target = pl.Decimal(*domain)
+            return target, target
     if (left.is_integer() or left.is_float()) and (right.is_integer() or right.is_float()):
         if exact_float():
             return pl.Float64(), pl.Float64()

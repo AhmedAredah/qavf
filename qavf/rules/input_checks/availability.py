@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import polars as pl
@@ -100,6 +101,8 @@ class RequiredDatasetsRule(Rule):
                     affected=[{"dataset": name, "error": str(error)}],
                     unit="datasets",
                     datasets=(name,),
+                    check_id="dataset.available",
+                    parameters={"required": required},
                 )
             )
         return outcome(
@@ -107,6 +110,15 @@ class RequiredDatasetsRule(Rule):
             loaded,
             f"{plural(len(loaded), 'dataset')} accessible.",
             "No datasets are configured.",
+            check_id="dataset.available.summary",
+            checks=tuple(
+                {
+                    "check_id": "dataset.available",
+                    "datasets": (name,),
+                    "parameters": {"required": ctx.specs[name].required},
+                }
+                for name in loaded
+            ),
         )
 
 
@@ -139,7 +151,16 @@ class SchemaConformanceRule(_SelectsDatasets):
             try:
                 with DatasetView.open(ctx, dataset, schema) as view:
                     found = self._dataset(view)
-                failures.extend(found)
+                failures.extend(
+                    finding
+                    if finding.check_id
+                    else replace(
+                        finding,
+                        check_id="schema.contract",
+                        parameters=schema.model_dump(mode="python", exclude_defaults=True),
+                    )
+                    for finding in found
+                )
                 if found:
                     failing.add(dataset)
             except Exception as exc:
@@ -158,6 +179,15 @@ class SchemaConformanceRule(_SelectsDatasets):
             passed,
             f"{plural(len(passed), 'dataset')} conform to their schemas.",
             "No available dataset has a schema configured.",
+            check_id="schema.summary",
+            checks=tuple(
+                {
+                    "check_id": "schema.contract",
+                    "datasets": (dataset,),
+                    "parameters": schemas[dataset].model_dump(mode="python", exclude_defaults=True),
+                }
+                for dataset in passed
+            ),
         )
 
     def _dataset(self, view: DatasetView) -> list[Finding]:

@@ -38,6 +38,7 @@ from qavf.configuration import ConfigurationGraph
 from qavf.configuration import expand_env as expand_env
 from qavf.configuration import read_config_mapping as _read_config_mapping
 from qavf.engine.severity import Severity
+from qavf.number_grammar import AllowedValueDomain, NumberGrammar, Whitespace, converted_options
 from qavf.scalars import normalize_scalar, normalize_scalar_sequence
 from qavf.text_types import TEXT_DTYPES, TextType, Word
 from qavf.value_policy import TextNormalization
@@ -198,6 +199,12 @@ class ColumnConstraints(_Strict):
     (``{where: "status = 'closed'", not_null: true}``). Missing rows are listed."""
     unique: bool = False
     """No value occurs twice; missing values are exempt."""
+    each_allowed_once: bool = False
+    """Every distinct allowed value in ``isin`` must occur exactly once. Missing
+    and N/A values are outside the domain; their own policies still apply."""
+    convert_options: bool = False
+    """Parse numeric string options in ``isin``/``notin`` with the declared
+    column's number grammar. Off by default to preserve strict literal typing."""
     # modifiers
     normalize: list[TextNormalization] = Field(default_factory=list)
     """Compare text in ``isin``, ``notin`` and ``unique`` after normalizing it:
@@ -253,10 +260,24 @@ class ColumnConstraints(_Strict):
             )
         if self.isin is not None and not self.isin:
             raise ValueError("'isin: []' allows no value at all; list the allowed values")
+        if self.each_allowed_once:
+            if self.isin is None:
+                raise ValueError("'each_allowed_once' requires 'isin'")
+            if any(
+                value is None or (isinstance(value, float) and math.isnan(value))
+                for value in self.isin
+            ):
+                raise ValueError("'each_allowed_once' domain cannot include missing values")
+        if self.convert_options and self.isin is None and self.notin is None:
+            raise ValueError("'convert_options' requires 'isin' or 'notin'")
         if self.normalize and self.isin is None and self.notin is None and not self.unique:
             raise ValueError("'normalize' goes with 'isin', 'notin' or 'unique'")
         if len(set(self.normalize)) != len(self.normalize):
             raise ValueError("'normalize' lists a normalization twice")
+        if sum(form in self.normalize for form in ("NFC", "NFD", "NFKC", "NFKD")) > 1:
+            raise ValueError("'normalize' accepts one Unicode normalization form")
+        if "case" in self.normalize and "casefold" in self.normalize:
+            raise ValueError("choose either case or casefold normalization")
         if self.regex is not None:
             _check_regex(self.regex)
         for name in ("std", "distinct_count"):
@@ -267,27 +288,28 @@ class ColumnConstraints(_Strict):
 
 
 def _check_where(condition: str, what: str = "where condition") -> None:
-    """Compile a ``where`` condition (or another Polars SQL expression, named by
-    ``what``) with the engine that evaluates it."""
-    import polars as pl
+    """Admit SQL syntax independently of optional installed execution engines.
+
+    Name/function binding belongs to the selected backend and is isolated to
+    each contract. A machine's optional packages cannot change configuration.
+    """
+    import duckdb
+
+    from qavf.sources.sql import _parser
 
     try:
-        pl.sql_expr(condition)
-    except Exception as exc:
-        raise ValueError(f"invalid {what} {condition!r}: {exc}") from exc
+        statements = _parser().extract_statements(f"SELECT 1 WHERE ({condition})")
+        if len(statements) != 1:
+            raise ValueError(f"invalid {what}: expected one expression")
+    except duckdb.Error as exc:
+        raise ValueError(f"invalid {what}: {exc}") from None
 
 
 def _check_regex(pattern: str) -> None:
-    """Compile ``pattern`` with the engine that evaluates it (Polars' Rust regex)."""
-    import polars as pl
+    """Admit shared syntax; selected backends compile their own dialect."""
+    from qavf.regex_policy import check_regex_syntax
 
-    try:
-        pl.Series([""], dtype=pl.String).str.contains(f"^(?:{pattern})$")
-    except Exception as exc:
-        reason = str(exc).strip().splitlines()
-        raise ValueError(
-            f"invalid regex {pattern!r}: {reason[-1] if reason else type(exc).__name__}"
-        ) from exc
+    check_regex_syntax(pattern)
 
 
 class ColumnCheck(ColumnConstraints):
@@ -330,6 +352,20 @@ class ColumnSpec(ColumnConstraints):
 
     dtype: DType | None = None
     """Logical type. ``float`` also accepts integers; ``datetime`` also accepts dates."""
+    number_grammar: NumberGrammar = Field(default_factory=NumberGrammar)
+    """Lexical grammar for numeric text; defaults preserve strict integer spelling."""
+    trim_whitespace: Whitespace = "ascii"
+    """Trim surrounding U+0020 spaces (``ascii``, default), the shared Unicode
+    whitespace set (``unicode``), or no characters (``none``) before type parsing."""
+    decimal_precision: int | None = Field(default=None, ge=1, le=38)
+    decimal_scale: int | None = Field(default=None, ge=0, le=38)
+    """Optional exact fixed-point contract; precision and scale must be supplied together."""
+    datetime_unit: Literal["ms", "us", "ns"] = "us"
+    timezone: str | None = None
+    """Optional IANA timezone for text timestamps; canonical values are UTC-naive."""
+    ambiguous: Literal["raise", "earliest", "latest", "null"] = "raise"
+    nonexistent: Literal["raise", "null"] = "raise"
+    """DST folds require earliest/latest to be accepted; gaps are always invalid text."""
     required: bool = True
     nullable: bool = False
     """Allow missing values. NaN counts as missing, exactly like null."""
@@ -340,6 +376,10 @@ class ColumnSpec(ColumnConstraints):
     ``nullable`` and ``max_null_fraction``. They are normalized to null for every
     QA consumer, including statistics, reconciliation, keys and expressions;
     each check then applies its documented null policy."""
+    na_values: list[str] = Field(default_factory=list)
+    """Valid, case-sensitive not-applicable tokens. They are distinct from missing
+    values, satisfy nullability, and are excluded from value checks and aggregate
+    populations. Token matching follows ``trim_whitespace``. No tokens are built in."""
     blank_as_missing: bool = False
     """Normalize empty and whitespace-only text to missing for every QA consumer. With
     a non-text ``dtype``, this applies while a column read as text is checked against
@@ -371,11 +411,17 @@ class ColumnSpec(ColumnConstraints):
         return TextType.model_validate(
             {
                 "dtype": self.dtype,
+                "number_grammar": self.number_grammar,
+                "trim_whitespace": self.trim_whitespace,
                 "missing": [value for value in self.missing_values if isinstance(value, str)],
                 "blank_as_missing": self.blank_as_missing,
                 "format": self.format,
                 "true_values": self.true_values,
                 "false_values": self.false_values,
+                "datetime_unit": self.datetime_unit,
+                "timezone": self.timezone,
+                "ambiguous": self.ambiguous,
+                "nonexistent": self.nonexistent,
             }
         )
 
@@ -384,12 +430,52 @@ class ColumnSpec(ColumnConstraints):
         inline = self.constraints()
         if inline and self.normalize:
             inline["normalize"] = list(self.normalize)
+        if inline:
+            inline["convert_options"] = self.convert_options
+            inline["each_allowed_once"] = self.each_allowed_once
         implicit = [ColumnCheck.model_validate(inline)] if inline else []
-        return implicit + list(self.checks)
+        return [self._resolved_check(check) for check in implicit + list(self.checks)]
+
+    def _resolved_check(self, check: ColumnCheck) -> ColumnCheck:
+        """Compile optional domain conveniences to the shared primitive contracts."""
+        if not check.convert_options and not check.each_allowed_once and not self.timezone:
+            return check
+        raw = check.model_dump()
+        if self.timezone:
+            from qavf.text_policies import temporal_literal
+
+            for name in ("ge", "le", "gt", "lt"):
+                raw[name] = temporal_literal(raw[name], self)
+            for name in ("isin", "notin"):
+                if raw[name] is not None:
+                    raw[name] = [temporal_literal(value, self) for value in raw[name]]
+        if check.convert_options:
+            if self.dtype not in ("int", "float", "decimal"):
+                raise ValueError("'convert_options' requires a declared numeric dtype")
+            for name in ("isin", "notin"):
+                if raw[name] is not None:
+                    raw[name] = converted_options(
+                        raw[name], self.dtype, self.number_grammar, self.trim_whitespace
+                    )
+        if check.each_allowed_once:
+            count = AllowedValueDomain.resolved(raw["isin"], check.normalize).cardinality
+            if check.distinct_count and (
+                (check.distinct_count.ge is not None and check.distinct_count.ge > count)
+                or (check.distinct_count.le is not None and check.distinct_count.le < count)
+            ):
+                raise ValueError("'distinct_count' contradicts 'each_allowed_once' domain size")
+            raw.update(unique=True, distinct_count={"ge": count, "le": count})
+            if raw["name"] is None:
+                raw["name"] = "each allowed value exactly once"
+        return ColumnCheck.model_validate(raw)
 
     @model_validator(mode="after")
     def _compatible_with_dtype(self) -> ColumnSpec:
         """With a declared ``dtype``, reject limits that cannot apply to it."""
+        if self.na_values:
+            from qavf.applicability import NotApplicablePolicy
+
+            NotApplicablePolicy.from_spec(self).validate(self)
         if self.not_null:
             raise ValueError(
                 "'not_null' goes in a check, usually with 'where'; for the whole column "
@@ -397,6 +483,18 @@ class ColumnSpec(ColumnConstraints):
             )
         if self.format is not None and self.dtype not in ("date", "datetime"):
             raise ValueError("'format' goes with dtype date or datetime")
+        if (self.decimal_precision is None) != (self.decimal_scale is None):
+            raise ValueError("decimal_precision and decimal_scale must be supplied together")
+        if self.decimal_precision is not None:
+            assert self.decimal_scale is not None
+            if self.dtype != "decimal":
+                raise ValueError("decimal_precision/decimal_scale require dtype decimal")
+            if self.decimal_scale > self.decimal_precision:
+                raise ValueError("decimal_scale cannot exceed decimal_precision")
+        if (self.datetime_unit != "us" or self.timezone is not None) and self.dtype != "datetime":
+            raise ValueError("datetime_unit and timezone require dtype datetime")
+        if self.timezone is None and (self.ambiguous != "raise" or self.nonexistent != "raise"):
+            raise ValueError("DST policies require timezone")
         words = (self.true_values, self.false_values)
         if self.dtype != "bool" and words != (["true"], ["false"]):
             raise ValueError("'true_values' and 'false_values' go with dtype bool")
@@ -438,19 +536,80 @@ class ColumnSpec(ColumnConstraints):
         return self
 
 
+class UniqueKeySpec(_Strict):
+    """A composite alternate key and its explicit null-equality contract."""
+
+    columns: list[str] = Field(min_length=1)
+    nulls: Literal["exempt", "equal", "forbid"] = "exempt"
+    """``exempt`` ignores rows with any null component; ``equal`` compares nulls
+    as equal at the same position; ``forbid`` reports them as invalid key rows."""
+    where: str | None = None
+    """Assess only rows where this expression on canonical values is true."""
+    name: str | None = None
+
+    @model_validator(mode="after")
+    def _condition(self) -> UniqueKeySpec:
+        if self.where is not None:
+            _check_where(self.where)
+        return self
+
+
+class GroupedValueSpec(_Strict):
+    """Occurrence bounds for an allowed domain independently within each group."""
+
+    column: str
+    group_by: list[str] = Field(min_length=1)
+    allowed_values: list[Any] = Field(min_length=1)
+    min_occurrences: int = Field(default=1, ge=0)
+    max_occurrences: int | None = Field(default=1, ge=0)
+    allow_other_values: bool = False
+    where: str | None = None
+    expected_groups: list[list[Any]] | None = None
+    name: str | None = None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> GroupedValueSpec:
+        if len(set(self.group_by)) != len(self.group_by):
+            raise ValueError("group_by columns must be distinct")
+        if self.column in self.group_by:
+            raise ValueError("the value column cannot also identify its group")
+        if self.max_occurrences is not None and self.min_occurrences > self.max_occurrences:
+            raise ValueError("min_occurrences must not exceed max_occurrences")
+        if any(value is None for value in self.allowed_values):
+            raise ValueError("allowed_values cannot contain missing values")
+        if self.expected_groups is not None and any(
+            len(group) != len(self.group_by) for group in self.expected_groups
+        ):
+            raise ValueError("each expected group must match the group_by width")
+        if self.where is not None:
+            _check_where(self.where)
+        return self
+
+
 class SchemaSpec(_Strict):
     """Expectations for a whole dataset."""
 
     columns: dict[str, ColumnSpec] = Field(default_factory=dict)
+    na_groups: list[list[str]] = Field(default_factory=list)
+    """Column groups whose rows contain either zero or all N/A tokens (INP-009).
+    Missing or invalid values do not count as N/A. Each column must declare
+    ``na_values``; groups may overlap and are assessed independently."""
     primary_key: list[str] = Field(default_factory=list)
     """Columns that together must identify every row uniquely; none may be null."""
     strict: bool = False
     """Reject columns that are not declared."""
     min_rows: int = Field(default=1, ge=0)
     max_rows: int | None = Field(default=None, ge=0)
-    unique_keys: list[list[str]] = Field(default_factory=list)
-    """Further column sets that must each be unique (alternate keys). As in SQL, a row
-    with a null in the set is exempt (and counted)."""
+    unique_keys: list[list[str] | UniqueKeySpec] = Field(default_factory=list)
+    """Alternate keys. Legacy column lists exempt null-bearing rows. Structured
+    entries select ``nulls: exempt``, ``equal`` or ``forbid`` explicitly."""
+    grouped_values: list[GroupedValueSpec] = Field(default_factory=list)
+    """Per-group domain coverage and occurrence bounds (INP-004). Observed groups
+    are retained before ``where`` filtering; ``expected_groups`` also assesses
+    completely absent groups. Null group components compare equal."""
+    duplicate_rows_per_key: Annotated[int, Field(strict=True, gt=0)] | Literal["all"] = 10
+    """Maximum zero-based row positions per sampled duplicate key, or ``all``.
+    Key and row totals remain exact independently of this evidence limit."""
     unique_rows: bool = False
     """No two rows may be identical in every column."""
     evidence_columns: Literal["checked", "all"] = "checked"
@@ -460,15 +619,42 @@ class SchemaSpec(_Strict):
 
     @model_validator(mode="after")
     def _consistent_key(self) -> SchemaSpec:
-        seen_keys: set[tuple[str, ...]] = set()
-        for columns in self.unique_keys:
+        from qavf.applicability import NotApplicablePolicy
+
+        for contract in self.grouped_values:
+            literals = [(contract.column, value) for value in contract.allowed_values]
+            literals.extend(
+                (column, value)
+                for group in contract.expected_groups or []
+                for column, value in zip(contract.group_by, group, strict=True)
+            )
+            for column, value in literals:
+                spec = self.columns.get(column)
+                if spec and NotApplicablePolicy.from_spec(spec).matches(value):
+                    raise ValueError(
+                        f"grouped_values literal {value!r} for {column!r} is a declared N/A token"
+                    )
+        seen_groups: set[frozenset[str]] = set()
+        for group in self.na_groups:
+            if len(group) < 2 or len(group) != len(set(group)):
+                raise ValueError("na_groups entries require at least two distinct columns")
+            if frozenset(group) in seen_groups:
+                raise ValueError(f"N/A group {group!r} is listed twice")
+            seen_groups.add(frozenset(group))
+            for column in group:
+                if column not in self.columns or not self.columns[column].na_values:
+                    raise ValueError(f"N/A group column {column!r} must declare na_values")
+        seen_keys: set[tuple[tuple[str, ...], str | None]] = set()
+        for key in self.alternate_keys:
+            columns = key.columns
             if not columns:
                 raise ValueError("unique_keys entries must name at least one column")
             if len(set(columns)) != len(columns):
                 raise ValueError(f"unique key {columns} repeats a column")
-            if tuple(columns) in seen_keys:
+            identity = (tuple(columns), key.where)
+            if identity in seen_keys:
                 raise ValueError(f"unique key {columns} is listed twice")
-            seen_keys.add(tuple(columns))
+            seen_keys.add(identity)
         if self.max_rows is not None and self.min_rows > self.max_rows:
             hint = (
                 "" if "min_rows" in self.model_fields_set else " (the default; set it explicitly)"
@@ -492,6 +678,14 @@ class SchemaSpec(_Strict):
             if not spec.required:
                 raise ValueError(f"primary-key column {column!r} must be required")
         return self
+
+    @property
+    def alternate_keys(self) -> list[UniqueKeySpec]:
+        """Resolve legacy list declarations without changing their public shape."""
+        return [
+            key if isinstance(key, UniqueKeySpec) else UniqueKeySpec(columns=key)
+            for key in self.unique_keys
+        ]
 
 
 class ForeignKeySpec(_Strict):
@@ -629,6 +823,8 @@ class DatasetSpec(_Strict):
         else:
             return None
         config.update(self.effective_load_policy().model_dump(exclude_unset=True))
+        self._preserve_applicability(config)
+        self._preserve_decimal_text(config)
         text = self._declared_text(config)
         if text:
             config["text_columns"] = list(dict.fromkeys([*config.get("text_columns", []), *text]))
@@ -636,6 +832,62 @@ class DatasetSpec(_Strict):
         if declared:
             config["declared_columns"] = {**declared, **config.get("declared_columns", {})}
         return config
+
+    def _preserve_decimal_text(self, config: dict[str, Any]) -> None:
+        """Keep decimal spellings intact until their exact column scale is known.
+
+        Unlike fixed-width text types, decimal conversion is resolved after
+        ingestion. A reader's DECIMAL precision/scale hint must not round those
+        values before the validation policy can inspect them.
+        """
+        if not self._csv(config) or self.schema_spec is None:
+            return
+        from qavf.sources.csv_diagnostics import CsvPolicy
+
+        original = {new: old for old, new in self.rename.items()}
+        governed = [
+            original.get(column, column)
+            for column, spec in self.schema_spec.columns.items()
+            if spec.dtype == "decimal"
+        ]
+        if governed:
+            config["options"] = CsvPolicy.protect_columns(config.get("options", {}), governed)
+
+    def _preserve_applicability(self, config: Mapping[str, Any]) -> None:
+        """A CSV reader must not erase declared N/A before validation sees it."""
+        if not self._csv(config) or self.schema_spec is None:
+            return
+        from qavf.applicability import NotApplicablePolicy
+
+        options = {str(name).casefold(): value for name, value in config.get("options", {}).items()}
+        markers = options.get("nullstr", [])
+        markers = markers if isinstance(markers, list) else [markers]
+        original = {new: old for old, new in self.rename.items()}
+        typed = options.get(
+            "types", options.get("dtypes", options.get("column_types", options.get("columns", {})))
+        )
+        declared = config.get("declared_columns", {})
+        for column, spec in self.schema_spec.columns.items():
+            if not spec.na_values:
+                continue
+            policy = NotApplicablePolicy.from_spec(spec)
+            if any(policy.matches(marker) for marker in markers):
+                raise ValueError(f"CSV nullstr would erase na_values in column {column!r}")
+            source_name = original.get(column, column)
+            text_types = {"VARCHAR", "STRING", "TEXT"}
+            if source_name in declared or (
+                isinstance(typed, Mapping)
+                and source_name in typed
+                and str(typed[source_name]).upper() not in text_types
+            ):
+                raise ValueError(f"CSV column {column!r} with na_values must be read as text")
+            if isinstance(typed, list) and any(
+                str(dtype).upper() not in text_types for dtype in typed
+            ):
+                raise ValueError(
+                    "CSV positional types with na_values must all be text; "
+                    "use named types for other columns"
+                )
 
     def _declared_types(self, config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         """Columns of a CSV file source to read as text and convert to their declared
@@ -651,8 +903,12 @@ class DatasetSpec(_Strict):
         original = {new: old for old, new in self.rename.items()}
         declared = {}
         for column, spec in self.schema_spec.columns.items():
+            if spec.na_values:
+                continue  # Preserve applicability tokens until column checks consume them.
             text = spec.text_type()
-            if text is None or (text.dtype == "datetime" and text.format is None):
+            if text is None or (
+                text.dtype == "datetime" and text.format is None and not text.governed_datetime
+            ):
                 continue
             declared[original.get(column, column)] = text.model_dump()
         return declared
@@ -669,10 +925,11 @@ class DatasetSpec(_Strict):
             return False  # the source's own validation reports an unknown format
 
     def _declared_text(self, config: Mapping[str, Any]) -> list[str]:
-        """Source names of the columns declared ``dtype: str`` in a CSV file source.
+        """Source names of columns that must retain raw CSV text.
 
         A type sniffed from a sample would turn codes such as ``007`` into numbers
-        and drop their leading zeros before any check could see them.
+        and drop their leading zeros before any check could see them. Exact
+        decimals need their original fraction to resolve a lossless column scale.
         """
         if not self._csv(config) or self.schema_spec is None:
             return []
@@ -680,7 +937,7 @@ class DatasetSpec(_Strict):
         return [
             original.get(column, column)
             for column, spec in self.schema_spec.columns.items()
-            if spec.dtype == "str"
+            if spec.dtype in ("str", "decimal") or spec.na_values
         ]
 
     def effective_load_policy(self) -> SourcePolicy:

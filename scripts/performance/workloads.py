@@ -310,7 +310,10 @@ def verify_outcome(
     rule_ids = {key[0] for key in (*failures, *passed)}
     normalized = []
     if report.incomplete:
-        raise AssertionError("benchmark validation is incomplete")
+        problems = [
+            (r.rule_id, r.check, r.message) for r in report.results if r.status.value == "ERROR"
+        ]
+        raise AssertionError(f"benchmark validation is incomplete: {problems!r}")
     content_identity = {}
     if expected_fingerprints:
         datasets = {dataset.name: dataset for dataset in report.metadata.datasets}

@@ -135,12 +135,13 @@ def test_duplicate_and_blank_headers_are_reported(tmp_path) -> None:
     ]
 
 
-def test_an_unrecognized_header_row_is_explained(tmp_path) -> None:
+def test_malformed_record_is_reported_instead_of_inventing_a_header(tmp_path) -> None:
     path = tmp_path / "t.csv"
     path.write_text("id,name,v\n" + "".join(f"{i},n{i},{i}\n" for i in range(39)) + "40,a, b,5\n")
     [schema_failure] = _failed(str(path), {"columns": {"v": {}}}, "INP-002")
-    problems = [r["problem"] for r in schema_failure.affected_records]
-    assert any("header row was not recognized" in p for p in problems)
+    assert schema_failure.status is Status.ERROR
+    assert "CSV row 41, line 41" in schema_failure.message
+    assert "too many columns" in schema_failure.message
 
 
 def _never_read(*_args: object) -> list[str | None]:

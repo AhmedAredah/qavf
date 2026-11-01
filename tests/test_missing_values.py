@@ -164,7 +164,11 @@ def test_alternate_unique_keys() -> None:
     result = checks["t: unique (code, site)"]
     assert result.status is Status.FAIL and result.affected_rows == 2
     summary = [r for r in report.results_for("INP-004") if r.status is Status.PASS]
-    assert not summary  # the dataset is not clean
+    # Independently successful contracts retain their own outcome identities;
+    # they must not label the whole dataset as clean when an alternate key fails.
+    assert len(summary) == 1 and summary[0].check_id == "key.primary"
+    assert summary[0].columns == ["id"]
+    assert "t" not in summary[0].metrics["passed_checks"]
     clean = _run({"t": frame.with_columns(pl.Series("code", ["a", "b", None, None]))}, datasets)
     [ok] = clean.results_for("INP-004")
     assert ok.status is Status.PASS

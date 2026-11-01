@@ -7,10 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from qavf.engine.context import DataContext
-from qavf.engine.runner import QARunner, config_digest
+from qavf.audit_codec import canonical_digest as config_digest
 from qavf.execution.protocol import read_request, write_result
-from qavf.inputs.normalize import _adapt
 from qavf.redaction import exception_details, redact
 from qavf.reports.models import _iter_snapshot_json
 from qavf.settings import QAVFSettings
@@ -36,6 +34,10 @@ def _local_settings(settings: QAVFSettings, directory: Path) -> QAVFSettings:
     raw["engine"].update(execution_mode="in_process", temp_directory=directory)
     local = QAVFSettings.model_validate(raw)
     local.source_path = settings.source_path
+    local.engine.__pydantic_fields_set__ = settings.engine.model_fields_set | {
+        "execution_mode",
+        "temp_directory",
+    }
     return local
 
 
@@ -61,11 +63,22 @@ def run(request_path: Path | str, result_path: Path | str, control: dict[str, An
     try:
         settings, queries, options = read_request(request_path)
         local = _local_settings(settings, request_path.parent / "work")
-        frames = _adapt(queries, local)
+        native = control["operation"] == "validate" and options.get("backend") == "duckdb"
+        if not native:
+            from qavf.engine.context import DataContext
+            from qavf.engine.runner import QARunner
+            from qavf.inputs.normalize import _adapt
+
+            frames = _adapt(queries, local)
         usage = _usage(control)
         if control["operation"] == "validate":
-            runner = QARunner(local)
-            report = runner.run(frames=frames)
+            if native:
+                from qavf.core.runner import _fit_report, validate_core
+
+                report = validate_core(queries, config=local)
+            else:
+                runner = QARunner(local)
+                report = runner.run(frames=frames)
             config = redact(settings.model_dump(mode="python", by_alias=True))
             metadata = report.metadata.model_copy(
                 update={
@@ -74,7 +87,12 @@ def run(request_path: Path | str, result_path: Path | str, control: dict[str, An
                     "resource_usage": {**report.metadata.resource_usage, **usage},
                 }
             )
-            report = runner._fit_report_budget(report.model_copy(update={"metadata": metadata}))
+            report = report.model_copy(update={"metadata": metadata})
+            report = (
+                _fit_report(report, local.engine.max_report_bytes)
+                if native
+                else runner._fit_report_budget(report)
+            )
             chunks = report.iter_json_chunks()
         elif control["operation"] == "compare":
             from qavf.regression._inputs import compare_context

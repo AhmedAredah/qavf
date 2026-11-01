@@ -121,7 +121,9 @@ def test_native_sum_mean_missing_scope_and_empty_are_exact(tmp_path, scope, expe
         tmp_path, [1e16, 1.0, -1e16, None, float("nan"), -999.0], check, markers=[-999]
     ) as ctx:
         result = ColumnCheckRule().evaluate(ctx)
-        assert all(f.assessed for f in result), [f.message for f in result]
+        assert all(f.assessed for f in result) is expected, [f.message for f in result]
+        if not expected:
+            assert any(not f.assessed and "undefined" in f.message for f in result)
         assert all(f.passed for f in result) is expected
 
 

@@ -20,6 +20,7 @@ from qavf._version import __version__
 
 if TYPE_CHECKING:
     from qavf.api import validate
+    from qavf.capabilities import BackendCapabilities, Capability, backend_capabilities
     from qavf.compare.api import compare_datasets
     from qavf.compare.results import DatasetComparison
     from qavf.engine.compilation import ConfigurationError, build_registry
@@ -45,7 +46,11 @@ if TYPE_CHECKING:
     from qavf.sources import DataSource, SourceParams
 
 _EXPORTS = {
+    "BackendCapabilities": "qavf.capabilities",
+    "Capability": "qavf.capabilities",
+    "backend_capabilities": "qavf.capabilities",
     "BatchSource": "qavf.inputs.descriptors",
+    "CheckIdentity": "qavf.reports.models",
     "ComparisonResult": "qavf.regression.models",
     "ConfigurationError": "qavf.engine.compilation",
     "DataContext": "qavf.engine.context",
@@ -86,7 +91,10 @@ _EXPORTS = {
 }
 
 __all__ = [
+    "BackendCapabilities",
     "BatchSource",
+    "Capability",
+    "CheckIdentity",
     "ComparisonResult",
     "ConfigurationError",
     "DataContext",
@@ -114,6 +122,7 @@ __all__ = [
     "ValidationPlan",
     "__version__",
     "assert_outputs_match",
+    "backend_capabilities",
     "build_registry",
     "compare_datasets",
     "compare_frames",
@@ -132,7 +141,14 @@ def __getattr__(name: str) -> Any:
     module = _EXPORTS.get(name)
     if module is None:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(module), name)
+    try:
+        value = getattr(import_module(module), name)
+    except ModuleNotFoundError as exc:
+        if exc.name == "polars":
+            from qavf.optional import require_polars
+
+            require_polars(name)
+        raise
     globals()[name] = value
     return value
 

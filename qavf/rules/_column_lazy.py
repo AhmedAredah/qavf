@@ -16,7 +16,12 @@ from qavf.rules._column_batch import (
     exceeds_missing_fraction,
     independent_scope,
 )
-from qavf.rules._column_contract import ColumnOutcome, ColumnPlan, _unsafe_unit_cast
+from qavf.rules._column_contract import (
+    ColumnOutcome,
+    ColumnPlan,
+    _unsafe_unit_cast,
+    require_statistic_population,
+)
 from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._predicates import compatibility_error, is_nan, row_tests
 from qavf.rules._temporal import temporal_evidence
@@ -90,6 +95,8 @@ def _lazy_column_reduction(
             if name != "distinct_count" and not actual[column].is_numeric():
                 raise ValueError(f"{name} requires a numeric column, found {actual[column]}")
             bound = constraints[name]
+            if name != "distinct_count":
+                reducers["usable"] = value.count()
             if name in ("min", "max", "distinct_count"):
                 scalar_statistics[name] = bound
                 reducers["value_" + name] = (
@@ -168,6 +175,12 @@ def _lazy_column_reduction(
     def finish(summary: dict[str, Any]) -> Finding | NotImplementedType | None:
         applicable = int(summary["applicable"] or 0)
         outcome.require_applicable(applicable)
+        if check is not None and "usable" in summary:
+            require_statistic_population(
+                set(check.constraints())
+                & (set(COLUMN_CONSTRAINTS) - {"unique", "max_null_fraction"}),
+                int(summary["usable"] or 0),
+            )
         problems = []
         for name in COLUMN_CONSTRAINTS:
             if name in scalar_statistics:

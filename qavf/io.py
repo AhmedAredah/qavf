@@ -13,16 +13,15 @@ from io import IOBase
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, cast
 
-import polars as pl
-
 from qavf.output_format import table_output
 from qavf.redaction import redact_text
 from qavf.sources.base import SourceEnvironment
-from qavf.sources.file import FileSource
 from qavf.sources.local_files import discover_local_files
 from qavf.sources.parameters import FileParams
 
 if TYPE_CHECKING:
+    import polars as pl
+
     from qavf.settings import QAVFSettings
 
 logger = logging.getLogger(__name__)
@@ -73,6 +72,11 @@ def read_table(path: str | Path, fmt: str | None = None) -> pl.DataFrame:
         qavf.sources.SourceNotFoundError: if the file does not exist.
         qavf.sources.SourceError: if it cannot be read.
     """
+    from qavf.optional import require_polars
+
+    require_polars("read_table returning a Polars DataFrame")
+    from qavf.sources.file import FileSource
+
     params = FileParams.model_validate({"type": "file", "path": str(path), "format": fmt})
     return FileSource(params, SourceEnvironment()).load()
 

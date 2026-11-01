@@ -22,6 +22,11 @@ datasets:
     rename: {Station_ID: station}     # applied after loading
     schema:
       primary_key: [station, timestamp]
+      duplicate_rows_per_key: 10      # positive integer or all; exact totals never sampled
+      unique_keys: []                 # lists retain null exemption; or:
+                                      # [{columns: [station, serial], nulls: equal}]
+                                      # nulls: exempt | equal | forbid
+      na_groups: []                  # all-or-none N/A across groups of declared columns
       strict: false                   # true: reject undeclared columns
       min_rows: 1
       max_rows: 50000000
@@ -42,6 +47,15 @@ datasets:
           max_null_fraction: 0.02     # ... but at most 2 %
           missing_values: ['N/A']     # placeholders that mean missing; text ones also
                                       # apply when a stray value leaves the column as text
+          na_values: []               # valid not-applicable tokens, distinct from missing_values
+          trim_whitespace: ascii      # ASCII space only | unicode | none
+          number_grammar:
+            int_decimal: false        # int only: opt into exact integral forms such as 7.0
+            underscores: false        # allow digit separators, e.g. 1_000
+            exponent: true            # allow e/E notation (int also needs int_decimal)
+            special_values: true      # admit nan/inf spellings; missing/finite rules still apply
+          convert_options: false      # numeric isin/notin literals use the declared grammar
+          each_allowed_once: false    # with isin: require every converted allowed value once
           ge: 0                       # inline limits: graded at INP-003's severity
           notin: [-999, -9999]        # sentinel values
           checks:                     # extra checks, each with its own severity
@@ -337,7 +351,7 @@ engine:
   max_report_bytes: 16777216          # fail explicitly if essential outcomes cannot fit
   memory_budget_bytes: null          # planning/post-collection target, not an OS RSS cap
   cache_max_bytes: 268435456          # tracked retained caches
-  spill_max_bytes: 1073741824         # run-owned temporary storage allocation
+  spill_max_bytes: 1073741824         # explicit cap; omit for data/key-aware automatic planning
   temp_directory: null               # optional parent directory for run temporary files
   native_threads: null               # DuckDB thread allocation; Polars pool is process-global
   rule_timeout_s: null               # cooperative; cannot kill arbitrary plugin threads

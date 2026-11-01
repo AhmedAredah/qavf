@@ -17,7 +17,12 @@ from qavf.rules._column_batch import (
     exceeds_missing_fraction,
     independent_scope,
 )
-from qavf.rules._column_contract import ColumnOutcome, ColumnPlan, _unsafe_unit_cast
+from qavf.rules._column_contract import (
+    ColumnOutcome,
+    ColumnPlan,
+    _unsafe_unit_cast,
+    require_statistic_population,
+)
 from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._predicates import compatibility_error, is_nan
 from qavf.rules._regex import sql_compatible
@@ -170,6 +175,8 @@ def _native_column_reduction(
             f"count(DISTINCT {value}) FILTER (WHERE {scope})"
         )
     for name in statistics:
+        if name != "distinct_count":
+            reducers["usable"] = f"count({value}) FILTER (WHERE {scope})"
         if name != "distinct_count" and not dtype.is_numeric():
             raise ValueError(f"{name} requires a numeric column, found {dtype}")
         if name == "distinct_count":
@@ -186,6 +193,7 @@ def _native_column_reduction(
     def finish(summary: dict[str, Any]) -> Finding | NotImplementedType | None:
         applicable = int(summary["applicable"])
         outcome.require_applicable(applicable)
+        require_statistic_population(statistics, int(summary.get("usable") or 0))
         problems = []
         for name, bound in statistics.items():
             result = summary["stat_" + name]

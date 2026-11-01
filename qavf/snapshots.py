@@ -35,6 +35,7 @@ class SnapshotModel(BaseModel):
         "notes",
         "fingerprint",
         "params",
+        "parameters",
         "extensions",
         "config",
         "resource_usage",

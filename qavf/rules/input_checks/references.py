@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from dataclasses import replace
+from typing import Any, ClassVar
 
 import polars as pl
 
@@ -14,6 +15,7 @@ from qavf.rules._execution import (
     KeyBackend,
     KeyRelation,
     align_key_relations,
+    key_na_rows,
     key_relation,
     observed_keys,
     paired_key_backend,
@@ -73,12 +75,22 @@ class ReferentialIntegrityRule(_SelectsDatasets):
         selection = self.params.datasets
         failures: list[Finding] = []
         passed: list[str] = []
+        identities: list[dict[str, Any]] = []
         exempt: dict[str, int] = {}
+        exempt_na: dict[str, int] = {}
+        parent_exempt_na: dict[str, int] = {}
         for dataset, spec in ctx.specs.items():
             if selection is not None and dataset not in selection:
                 continue
             for fk in spec.foreign_keys:
                 label = f"{dataset}({', '.join(fk.columns)}) -> {fk.ref_dataset}"
+                first_failure = len(failures)
+                identity: dict[str, Any] = {
+                    "check_id": "key.reference",
+                    "columns": tuple(fk.columns),
+                    "datasets": (dataset, fk.ref_dataset),
+                    "parameters": fk.model_dump(mode="python"),
+                }
                 try:
                     if not ctx.has(dataset):
                         if _must_assess(ctx, dataset, selection):
@@ -107,6 +119,12 @@ class ReferentialIntegrityRule(_SelectsDatasets):
                         for name in (dataset, fk.ref_dataset)
                     )
                     if backend is not None and stable:
+                        for name, columns, counts in (
+                            (dataset, fk.columns, exempt_na),
+                            (fk.ref_dataset, fk.target_columns, parent_exempt_na),
+                        ):
+                            if count := key_na_rows(ctx, name, columns):
+                                counts[label] = count
                         clean = self._relation_rules(
                             ctx, dataset, label, fk, failures, exempt, backend
                         )
@@ -114,6 +132,18 @@ class ReferentialIntegrityRule(_SelectsDatasets):
                         projections = {dataset: list(fk.columns)}
                         projections.setdefault(fk.ref_dataset, []).extend(fk.target_columns)
                         with ctx.projected_observations(projections) as observations:
+                            for name, columns, counts in (
+                                (dataset, fk.columns, exempt_na),
+                                (fk.ref_dataset, fk.target_columns, parent_exempt_na),
+                            ):
+                                if count := key_na_rows(
+                                    ctx,
+                                    name,
+                                    columns,
+                                    plan=observations[name].scan(),
+                                    collector=observations.collect,
+                                ):
+                                    counts[label] = count
                             frequency = fresh_internal("rows", child_columns)
                             parent_frequency = fresh_internal(
                                 "rows", [*child_columns, *parent_columns, frequency]
@@ -125,6 +155,7 @@ class ReferentialIntegrityRule(_SelectsDatasets):
                                 fk.columns,
                                 frequency,
                                 collector=observations.collect,
+                                exclude_na=True,
                             )
                             parent = observed_keys(
                                 ctx,
@@ -133,12 +164,14 @@ class ReferentialIntegrityRule(_SelectsDatasets):
                                 fk.target_columns,
                                 parent_frequency,
                                 collector=observations.collect,
+                                exclude_na=True,
                             )
                             clean = self._check_relations(
                                 ctx, dataset, label, fk, failures, exempt, child, parent
                             )
                     if clean:
                         passed.append(label)
+                        identities.append(identity)
                 except Exception as exc:
                     failures.append(
                         Finding.unassessed(
@@ -148,13 +181,23 @@ class ReferentialIntegrityRule(_SelectsDatasets):
                             datasets=(dataset, fk.ref_dataset),
                         )
                     )
+                finally:
+                    failures[first_failure:] = [
+                        replace(finding, **identity) for finding in failures[first_failure:]
+                    ]
         return outcome(
             failures,
             passed,
             f"{plural(len(passed), 'foreign key')} fully resolved.",
             "No foreign keys are configured.",
+            check_id="key.reference.summary",
+            checks=tuple(identities),
             # Exempt rows follow the declared match policy, including on failure.
-            summary_metrics={"rows_exempt_null_keys": exempt} if exempt else {},
+            summary_metrics={
+                **({"rows_exempt_null_keys": exempt} if exempt else {}),
+                **({"exempt_na_rows": exempt_na} if exempt_na else {}),
+                **({"parent_exempt_na_rows": parent_exempt_na} if parent_exempt_na else {}),
+            },
         )
 
     @staticmethod
@@ -173,9 +216,14 @@ class ReferentialIntegrityRule(_SelectsDatasets):
             "rows",
             [*ctx.schema(dataset), *ctx.schema(fk.ref_dataset), frequency],
         )
-        child = key_relation(ctx, dataset, fk.columns, frequency, backend=backend)
+        child = key_relation(ctx, dataset, fk.columns, frequency, backend=backend, exclude_na=True)
         parent = key_relation(
-            ctx, fk.ref_dataset, fk.target_columns, parent_frequency, backend=backend
+            ctx,
+            fk.ref_dataset,
+            fk.target_columns,
+            parent_frequency,
+            backend=backend,
+            exclude_na=True,
         )
         return ReferentialIntegrityRule._check_relations(
             ctx, dataset, label, fk, failures, exempt, child, parent

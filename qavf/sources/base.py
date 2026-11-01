@@ -38,7 +38,6 @@ from pathlib import Path
 from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
-import polars as pl
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from qavf.plugins.transactions import (
@@ -51,6 +50,8 @@ from qavf.plugins.transactions import (
 from qavf.redaction import exception_details, redact_text
 
 if TYPE_CHECKING:
+    import polars as pl
+
     from qavf.settings import ConnectionSpec, SecretSpec
 
 logger = logging.getLogger(__name__)
@@ -154,6 +155,8 @@ class SourceEnvironment:
 
     connection_budget: ConnectionBudget | None = None
     """Shared run-wide allocator for native connection memory and spill capacity."""
+    text_functions: bool = False
+    """Register optional shared Unicode/temporal functions only for contracts that need them."""
 
     def resolve(self, path: str | Path) -> Path:
         """Resolve ``path`` against :attr:`base_dir` unless it is absolute."""

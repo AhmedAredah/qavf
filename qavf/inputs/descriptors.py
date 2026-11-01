@@ -8,10 +8,13 @@ from contextlib import AbstractContextManager
 from copy import deepcopy
 from dataclasses import KW_ONLY, dataclass, field
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import duckdb
-import polars as pl
+
+if TYPE_CHECKING:
+    import polars as pl
+    import pyarrow as pa
 
 from qavf.settings import DatasetSpec, ExpressionCheck, ForeignKeySpec, SchemaSpec, SourcePolicy
 from qavf.sources.base import SourceError
@@ -221,7 +224,8 @@ class BatchSource:
     Polars/pandas frames or Arrow tables/record batches. The manager closes the
     stream on success, error and cancellation. Cancellation is checked between
     batches; callbacks that block must provide their own interruptible I/O.
-    The declared schema is checked without opening the stream. Every batch must
+    The declared Arrow schema/type mapping (or optional Polars dtype mapping) is
+    checked without opening the stream. Every batch must
     have exactly that schema and order. QAVF retains or spills one coherent
     snapshot under the run's resource policy for all subsequent checks.
 
@@ -232,7 +236,7 @@ class BatchSource:
     """
 
     factory: Callable[..., AbstractContextManager[Iterable[object]]]
-    schema: Mapping[str, pl.DataType | type[pl.DataType]]
+    schema: pa.Schema | Mapping[str, pa.DataType | pl.DataType | type[pl.DataType]]
     kwargs: Mapping[str, Any] = field(default_factory=dict)
     replayable: bool = False
     retry_safe: bool = False
@@ -240,14 +244,32 @@ class BatchSource:
     def __post_init__(self) -> None:
         if not callable(self.factory):
             raise TypeError("BatchSource.factory must be callable")
-        if not isinstance(self.schema, Mapping) or not self.schema:
-            raise ValueError("BatchSource.schema must be a nonempty column/type mapping")
-        if any(not isinstance(name, str) or not name for name in self.schema):
+        import pyarrow as pa
+
+        if isinstance(self.schema, pa.Schema):
+            schema = self.schema
+            names = schema.names
+        elif isinstance(self.schema, Mapping) and self.schema:
+            if all(isinstance(dtype, pa.DataType) for dtype in self.schema.values()):
+                schema = pa.schema(self.schema)
+                names = schema.names
+            else:
+                from qavf.optional import require_polars
+
+                pl = require_polars("BatchSource with Polars dtype declarations")
+                try:
+                    schema = dict(pl.Schema(self.schema))
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"invalid BatchSource schema: {exc}") from None
+                names = list(schema)
+        else:
+            raise ValueError(
+                "BatchSource.schema must be a nonempty Arrow schema or column/type mapping"
+            )
+        if not names or any(not isinstance(name, str) or not name for name in names):
             raise TypeError("BatchSource schema column names must be nonempty strings")
-        try:
-            schema = dict(pl.Schema(self.schema))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"invalid BatchSource schema: {exc}") from None
+        if len({name.casefold() for name in names}) != len(names):
+            raise ValueError("BatchSource schema column names must be unique ignoring case")
         if not isinstance(self.kwargs, Mapping) or any(
             not isinstance(key, str) for key in self.kwargs
         ):
@@ -256,5 +278,7 @@ class BatchSource:
             raise TypeError("BatchSource replayable and retry_safe must be booleans")
         if self.retry_safe and not self.replayable:
             raise ValueError("a retry-safe BatchSource must also be replayable")
-        object.__setattr__(self, "schema", MappingProxyType(schema))
+        object.__setattr__(
+            self, "schema", schema if isinstance(schema, pa.Schema) else MappingProxyType(schema)
+        )
         object.__setattr__(self, "kwargs", MappingProxyType(dict(self.kwargs)))

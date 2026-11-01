@@ -202,6 +202,12 @@ class _BatchInput(DataSource[SourceParams]):
         return type(self)(self.batch, self.bound_environment(env), policy)
 
     def batch_schema(self) -> dict[str, pl.DataType]:
+        import pyarrow as pa
+
+        if isinstance(self.batch.schema, pa.Schema):
+            frame = pl.from_arrow(pa.Table.from_batches([], schema=self.batch.schema))
+            assert isinstance(frame, pl.DataFrame)
+            return dict(frame.schema)
         return dict(pl.Schema(self.batch.schema))
 
     @contextmanager
@@ -232,7 +238,7 @@ class _BatchInput(DataSource[SourceParams]):
             if dict(frame.schema) != self.batch_schema():
                 raise SourceError("BatchSource batch schema/order differs from its declaration")
             # Dict equality ignores order; column order is part of this contract.
-            if frame.columns != list(self.batch.schema):
+            if frame.columns != list(self.batch_schema()):
                 raise SourceError("BatchSource batch schema/order differs from its declaration")
             yield frame
 

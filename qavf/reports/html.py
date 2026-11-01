@@ -212,7 +212,7 @@ def iter_template(
     Raises:
         ResourceLimitError: once the page exceeds the output limit.
     """
-    from qavf.engine.resources import ResourceLimitError
+    from qavf.resource_errors import ResourceLimitError
 
     written = 0
     for text in (env or _environment(limits)).get_template(name).generate(**context):

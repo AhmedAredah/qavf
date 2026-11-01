@@ -25,6 +25,7 @@ from qavf.sources.base import (
     SourceParams,
     TypeViolations,
 )
+from qavf.sources.csv_diagnostics import CsvPolicy
 from qavf.sources.csv_probe import (
     REJECT_OPTIONS,
     REJECTED_SAMPLE,
@@ -305,7 +306,9 @@ class FileSource(DataSource[FileParams]):
                     "for multiple workbooks"
                 )
             location = location[0]
-        options = dict(params.options)
+        options = (
+            CsvPolicy.options(params.options, location) if fmt == "csv" else dict(params.options)
+        )
         count_rejects = fmt == "csv" and (
             options.get("ignore_errors") is True or options.get("store_rejects") is True
         )
@@ -330,6 +333,7 @@ class FileSource(DataSource[FileParams]):
             options["stop_at_empty"] = False
         typed = TypedColumns({})
         if fmt == "csv" and (params.text_columns or params.declared_columns):
+            options = CsvPolicy.protect_columns(options, params.declared_columns)
             typed = self._read_as_text(location, options, notes)
         if params.options:
             notes["reader_options"] = redact(dict(params.options))
@@ -380,24 +384,37 @@ class FileSource(DataSource[FileParams]):
         """Read ``text_columns`` and ``declared_columns`` as VARCHAR; return the
         declared ones, by header name, for conversion in the scan.
 
-        Columns the reader is told to type another way (explicit per-column types,
-        an explicit ``columns`` layout, positional ``types``) are left alone.
+        Declared validation sees raw text even when a named reader type was
+        supplied. Explicit types on ungoverned ``text_columns`` retain their
+        historical precedence. Positional numeric conflicts are rejected before
+        this method; positional text and named layouts can convert safely.
         """
         key = next((k for k in ("types", "dtypes", "column_types") if k in options), "types")
         given = options.get(key) or {}
-        if "columns" in options or not isinstance(given, dict):
-            return TypedColumns({})
         text = {name.casefold() for name in self.params.text_columns}
         declared = {name.casefold(): kind for name, kind in self.params.declared_columns.items()}
-        taken = {str(name).casefold() for name in given}
-        matched = [
-            name
-            for name in self._header_probe(location, options).header()
-            if (name.casefold() in text or name.casefold() in declared)
-            and name.casefold() not in taken
-        ]
-        if matched and options.get("all_varchar") is not True:
-            options[key] = {**dict.fromkeys(matched, "VARCHAR"), **given}
+        layout = options.get("columns")
+        available = (
+            list(layout)
+            if isinstance(layout, dict)
+            else self._header_probe(location, options).header()
+        )
+        if isinstance(layout, dict) or not isinstance(given, dict):
+            matched = [name for name in available if name.casefold() in declared]
+        else:
+            taken = {str(name).casefold() for name in given} - declared.keys()
+            matched = [
+                name
+                for name in available
+                if (name.casefold() in text or name.casefold() in declared)
+                and name.casefold() not in taken
+            ]
+            if matched and options.get("all_varchar") is not True:
+                existing_names = {str(name).casefold() for name in given}
+                additions = {
+                    name: "VARCHAR" for name in matched if name.casefold() not in existing_names
+                }
+                options[key] = {**additions, **given}
         as_text = [name for name in matched if name.casefold() in text]
         if as_text:
             notes["text_columns"] = as_text
@@ -491,22 +508,29 @@ class FileSource(DataSource[FileParams]):
     def explain_failure(self, error: SourceError) -> SourceError | None:
         """Name the Excel cell or locate the CSV lines behind a read error.
 
-        CSV lines are found once, with one bounded pass that keeps no data; clean
-        reads never pay for it.
+        Native rejection capture and structural diagnosis are cached after a
+        failed read. Clean input pays only for the bounded first-record probe.
         """
         failure = ReadFailure(self.describe(), error)
         explained = failure.excel_cell()
         if explained is not None or not failure.is_csv() or not self._is_csv():
             return explained
-        explained = failure.undetected_layout()
         probe = self._csv_probe()
-        if explained is not None or probe is None:
-            return explained
+        if probe is None:
+            return failure.undetected_layout()
         with self._state_lock:
             if not hasattr(self, "_diagnosis"):
                 self._diagnosis = probe.unreadable()
+                self._structural_issue = CsvPolicy.diagnose(probe.read.location, probe.read.options)
             rejected: RejectedRows | None = self._diagnosis
-        return failure.located(rejected) if rejected is not None and rejected.sample else None
+            issue = self._structural_issue
+        if issue is not None and (
+            rejected is None or not rejected.sample or rejected.sample[0]["error"] != "CAST"
+        ):
+            return failure.structural(issue, rejected)
+        if rejected is not None and rejected.sample:
+            return failure.located(rejected)
+        return failure.undetected_layout()
 
     def header_problems(self) -> list[dict[str, Any]]:
         """Duplicate, blank or unrecognized CSV header names (see :class:`HeaderReview`)."""

@@ -1,41 +1,38 @@
-"""Pluggable data sources: files, SQL, databases and Python callables via DuckDB."""
+"""Pluggable sources, imported on demand without loading optional adapters."""
 
-from qavf.sources.base import (
-    DataSource,
-    ScanPlan,
-    SourceEnvironment,
-    SourceError,
-    SourceIntegrityError,
-    SourceNotFoundError,
-    SourceParams,
-    SourceRegistry,
-)
-from qavf.sources.file import FileSource
-from qavf.sources.formats import infer_format
-from qavf.sources.frames import as_polars
-from qavf.sources.parameters import DatabaseParams, FileParams, PythonParams, QueryParams
-from qavf.sources.python import PythonSource
-from qavf.sources.query import DatabaseSource, QuerySource
-from qavf.sources.sql import validate_query
+from __future__ import annotations
 
-__all__ = [
-    "DataSource",
-    "DatabaseParams",
-    "DatabaseSource",
-    "FileParams",
-    "FileSource",
-    "PythonParams",
-    "PythonSource",
-    "QueryParams",
-    "QuerySource",
-    "ScanPlan",
-    "SourceEnvironment",
-    "SourceError",
-    "SourceIntegrityError",
-    "SourceNotFoundError",
-    "SourceParams",
-    "SourceRegistry",
-    "as_polars",
-    "infer_format",
-    "validate_query",
-]
+from importlib import import_module
+
+_EXPORTS = {
+    **dict.fromkeys(
+        (
+            "DataSource",
+            "ScanPlan",
+            "SourceEnvironment",
+            "SourceError",
+            "SourceIntegrityError",
+            "SourceNotFoundError",
+            "SourceParams",
+            "SourceRegistry",
+        ),
+        "base",
+    ),
+    "FileSource": "file",
+    "infer_format": "formats",
+    "as_polars": "frames",
+    **dict.fromkeys(("DatabaseParams", "FileParams", "PythonParams", "QueryParams"), "parameters"),
+    "PythonSource": "python",
+    "DatabaseSource": "query",
+    "QuerySource": "query",
+    "validate_query": "sql",
+}
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(name)
+    value = getattr(import_module(f"qavf.sources.{_EXPORTS[name]}"), name)
+    globals()[name] = value
+    return value

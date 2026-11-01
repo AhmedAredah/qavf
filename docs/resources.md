@@ -64,12 +64,44 @@ receives it. Upstream joins, sorting and aggregate state may still exceed the ro
 result limit. Native reservations use the worker capacity of the selected execution
 mode, including one worker for sequential execution and at most the scheduled tasks.
 When a memory target is present, automatic rule scheduling allows at most one worker
-per 32 MiB of target memory, with a minimum of one worker. Each worker reserves two
-possible native handles; this avoids dividing a small target among many idle handles.
+per 32 MiB of target memory, with a minimum of one worker. The metadata-only planner
+also estimates the largest key operator from declared key widths and file sizes or
+known frame row counts, and reduces concurrency when that operator needs a larger
+share of the target. Each worker reserves two possible native handles.
 `max_workers` is a ceiling, not a requirement to run that many checks concurrently.
 A directly constructed `DataContext` defaults to two native handles; advanced users
 can explicitly change `connection_slots`. Reservations remain conservative fixed
 ceilings within the selected concurrency, not dynamically resized live connections.
+
+Starting with 0.7, an omitted memory target and an omitted `spill_max_bytes` use
+data-aware automatic planning. The legacy `spill_max_bytes` schema default of
+1 GiB remains a baseline, rather than a cap on an automatically planned large
+key workload. An explicitly supplied value, including zero or exactly 1 GiB,
+remains a cap. `ResourceLimits(max_spill=...)` is always explicit.
+Automatic memory leaves at least 128 MiB per potential native handle when host
+capacity permits, so a tiny CSV is not assigned a limit smaller than DuckDB's
+reader buffers. Automatic targets are capped against available host/container
+memory, and automatic spill against available disk space. Linux reclaimable
+filesystem cache is distinguished from live allocations. Unknown remote sources
+and streams retain conservative defaults without consuming the stream to estimate
+its size. Estimates are not promises that every operator can spill.
+
+Automatic native query threads are also limited by each connection's memory
+share (128 MiB of planning headroom per thread, with at least one thread).
+Reducing Python worker count therefore cannot accidentally increase native CSV
+reader concurrency beyond that share. An explicit `native_threads` value is
+preserved. The actual native thread allowance is recorded in resource diagnostics.
+
+The decision is recorded under `metadata.resource_usage.resource_plan`, including
+input bytes, estimated key state, worker/connection capacity, effective budgets and
+whether the memory/spill choice was automatic. No sampling or extra full scan is
+performed to make the decision. Explicit memory and native DuckDB limits are never
+increased by the planner.
+
+One immutable plan is reused by scheduling and context allocation throughout a
+run. Reducing the worker count therefore does not recalculate a smaller automatic
+budget. The key allowance accounts for both the retained/native split and the two
+possible handles per worker, subject to available capacity and explicit caps.
 
 HTML presentation adds markup and escaping and has no independent file-size ceiling.
 Writing or rendering reports after validation returns runs in the parent, outside

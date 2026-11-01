@@ -29,10 +29,7 @@ from qavf.engine.owned_ipc import _OwnedIpcFrame, project_ipc, read_owned_ipc, r
 from qavf.engine.retention import RetainedBudget, RetainedLease
 from qavf.engine.session import KeyedLocks, RunSession
 from qavf.engine.spill import SpillBudget, SpillFile, SpillLease
-
-
-class ResourceLimitError(RuntimeError):
-    """A configured retention or spill budget was exceeded."""
+from qavf.resource_errors import ResourceLimitError as ResourceLimitError
 
 
 def _locked(method):
@@ -522,6 +519,7 @@ class RunResources:
         with contextlib.ExitStack() as setup:
             setup.callback(shutil.rmtree, self.directory, ignore_errors=True)
             self.session = RunSession()
+            self.plan: dict[str, Any] = {}
             # DuckDB creates its connection-specific leaf on first spill, but
             # does not create missing ancestors of that leaf.
             (self.directory / "duckdb").mkdir()
@@ -642,6 +640,7 @@ class RunResources:
             cached = self.frames.bytes + self.pandas.bytes + self.memo.bytes
             retained, retained_peak = self.retained_budget.snapshot()
         result = {
+            "resource_plan": getattr(self, "plan", {}),
             **self.spill_budget.file_usage(),
             "spool_working_bytes": self.spool_budget.snapshot()[0],
             "peak_spool_working_bytes": self.spool_budget.snapshot()[1],

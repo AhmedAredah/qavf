@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import NotImplementedType
 from typing import Any, ClassVar
 
@@ -69,6 +70,51 @@ class ColumnCheckRule(_SelectsDatasets):
         failures: list[Finding] = []
         passed: list[str] = []
         schemas, blocked = _schemas(ctx, self.params.datasets, "column QA limits")
+        contracts: dict[str, list[dict[str, Any]]] = {}
+        for dataset, schema in schemas.items():
+            for column, spec in schema.columns.items():
+                prefix = f"{dataset}.{column}"
+                common = {"datasets": (dataset,), "columns": (column,)}
+                contracts[prefix] = [
+                    {
+                        **common,
+                        "check_id": "column.available",
+                        "parameters": {"required": spec.required},
+                    }
+                ]
+                for label, parameters in (
+                    ("not null", {"nullable": spec.nullable}),
+                    ("finite", {"allow_infinite": spec.allow_infinite}),
+                    (
+                        "units",
+                        {
+                            "unit": spec.unit,
+                            "unit_column": spec.unit_column,
+                            "allowed_units": spec.allowed_units,
+                        },
+                    ),
+                ):
+                    contracts[f"{prefix}: {label}"] = [
+                        {
+                            **common,
+                            "check_id": f"column.{label.replace(' ', '_')}",
+                            "parameters": parameters,
+                        }
+                    ]
+                for check in spec.all_checks():
+                    kind = (
+                        "each_allowed_once"
+                        if getattr(check, "each_allowed_once", False)
+                        else "constraints"
+                    )
+                    descriptor = {
+                        **common,
+                        "check_id": f"column.{kind}",
+                        "parameters": check.model_dump(mode="python", exclude_defaults=True),
+                    }
+                    contracts.setdefault(f"{prefix}: {values._check_name(check)}", []).append(
+                        descriptor
+                    )
         failures += blocked
         for dataset, schema in schemas.items():
             try:
@@ -84,17 +130,44 @@ class ColumnCheckRule(_SelectsDatasets):
                 continue
             failures += dataset_failures
             passed += dataset_passed
+        # These labels are keys generated alongside the original contracts, not
+        # parsed text. A named check can carry punctuation/arbitrary column names.
+        identified = []
+        for finding in failures:
+            descriptors = contracts.get(finding.check or "", [])
+            if finding.check_id or not descriptors:
+                identified.append(finding)
+            else:
+                identified.append(replace(finding, **descriptors[0], checks=tuple(descriptors)))
         return outcome(
-            failures,
+            identified,
             passed,
             f"{plural(len(passed), 'column check')} passed.",
             "No column QA limits are configured.",
+            check_id="column.summary",
+            checks=tuple(descriptor for label in passed for descriptor in contracts.get(label, ())),
         )
 
     def _dataset(
         self, ctx: DataContext, dataset: str, schema: SchemaSpec
     ) -> tuple[list[Finding], list[str]]:
         actual = ctx.schema(dataset)
+        na_columns = [
+            column for column, spec in schema.columns.items() if column in actual and spec.na_values
+        ]
+        if na_columns:
+            from qavf.rules._applicable_columns import ApplicableColumns
+
+            remaining = {
+                column: spec for column, spec in schema.columns.items() if column not in na_columns
+            }
+            failures, passed = (
+                self._dataset(ctx, dataset, schema.model_copy(update={"columns": remaining}))
+                if remaining
+                else ([], [])
+            )
+            found, good = ApplicableColumns(self, ctx, dataset, schema, na_columns).assess()
+            return failures + found, passed + good
         text = [
             column
             for column, spec in schema.columns.items()
@@ -317,7 +390,8 @@ class ConvertedColumns:
         self.columns = columns
 
     def assess(self) -> tuple[list[Finding], list[str]]:
-        conversions = [TextConversion(c, self.schema.columns[c]) for c in self.columns]
+        actual = self.ctx.schema(self.dataset)
+        conversions = [TextConversion(c, self.schema.columns[c], actual[c]) for c in self.columns]
         with self.ctx.observe(self.dataset, self._needed()) as observed:
             plan = ConvertedPlan.resolved(conversions, observed.reduce)
             with observed.derived(plan) as converted:

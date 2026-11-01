@@ -6,6 +6,162 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-01
+
+### Fixed
+
+- **G01:** Prove lossless foreign-key type alignment before native comparisons;
+  integers, floats, decimals, booleans and text cannot match through lossy casts.
+- **G02:** Allocate collision-free internal row identifiers and generate source
+  positions independently of user columns named `rowid` or internal-looking names.
+- **G03:** Treat undeclared floating-point NaN as missing in key contracts.
+- **G04:** Apply default infinity rejection to inferred floating-point columns.
+- **G05:** Reject blank/duplicate CSV headers and names that collide under DuckDB
+  identifier equality, including separate files in a file set.
+- **G06:** Use exact sum/mean/median and missing-fraction decisions instead of
+  rounded SQL reductions; overflow does not silently change a bound decision.
+- **G07:** Exclude individually unrepresentable decimal outliers from scale
+  inference so they do not invalidate representable cells in the same column.
+- **G08:** Exempt declared N/A values on both sides of compatibility foreign keys
+  before matching or cardinality checks; retain separate exact exemption totals.
+- **G09:** Native regexes outside the proven shared Rust/RE2 subset produce a
+  specific unassessed outcome with backend guidance, preventing Unicode false
+  failures. The optional backend retains Rust regex semantics.
+- **G10:** Match custom Unicode boolean words with shared lowercase semantics,
+  retaining a native fast path for ASCII-only declarations.
+- **G11:** Admit input SQL/regex configuration independently of installed optional
+  packages; bind each contract in its selected backend. Comparison alignment
+  continues to validate its explicitly Polars-specific expression language.
+- **G12:** Isolate compilation/execution errors per contract. A failed fused query
+  falls back to independent checks so later valid checks still run.
+- **G13:** Preserve expression names and attach identities to contracts rather
+  than display labels; retain key identities for all-N/A and summarized outcomes.
+- **G14:** Exempt an absent nullable measurement from its row-unit check.
+- **G15:** Preserve exact nanosecond, nested temporal, timezone and out-of-range
+  evidence through native extraction and report serialization; handle DuckDB
+  1.3.1 timestamp formatting and decimal cast differences explicitly.
+- **G16:** Make unassessed messages, unknown counts and completeness truthful;
+  missing-key declarations report structural violations, and undefined numeric
+  aggregates report ERROR consistently across backends.
+- **G17:** Validate complete configured source mappings, including unknown fields,
+  declared type hints and load-policy overrides, before reading data.
+- **G18:** Apply renames simultaneously, permitting valid swaps.
+- **G19:** Reject borrowed one-pass Arrow readers without consuming them; accept
+  explicitly owned, replay-aware `BatchSource` factories with Arrow schemas.
+- **G20:** Record native source fingerprints, load times, reader settings, renames,
+  configuration/plan digests, environment, rule provenance and execution timings.
+- **G21:** Include condition dependencies in evidence for conditional checks.
+- **G25:** Translate strict CSV failures consistently during metadata probing,
+  column discovery and loading, with row/physical-line diagnostics.
+
+### Performance
+
+- **G22:** Admit evidence bytes inside DuckDB before large values cross into
+  Python. Cheap type-aware size bounds reject oversized cells before JSON sizing;
+  exact totals remain independent of the bounded sample.
+- **G23:** Project required columns while retaining the original source schema
+  for structural checks. Release independent snapshots after their final
+  consumer; preserve coherent FK/SQL dependencies, including named source-query
+  ordering. Skip unnecessary N/A and empty duplicate-sample scans.
+- **G24:** Reject oversized eager inputs before copying and limit native/batch
+  admission to `row_budget + 1` rows before building a full snapshot. This bounds
+  retained result rows, not upstream work performed by blocking SQL operators.
+- Cache process-stable environment metadata and parsed dependency expressions.
+  Add `scripts/benchmark_core_071.py` for repeatable before/after startup,
+  projection, lifetime, row-budget and evidence measurements with correctness
+  checks; retain the original large-CSV benchmark.
+
+### Added
+
+- **D01:** Core-only `--help`, `--version`, `schema`, `list-rules`, `run` and report
+  output; explicit CLI `--backend` selection and an import-light capability API.
+- **D02:** Reuse the process supervisor, source connection/secret setup and
+  ownership contracts in the native core. Support configured databases/queries,
+  transient replay-safe retries, owned batches, `engine.require`, input hashes,
+  cooperative native rule-stage timeouts, and isolated hard process limits.
+  Preserve omitted resource defaults across process transport. Capability
+  records explicitly distinguish optional advanced rules/plugins and readers.
+- **D03:** Opt-in `datetime_unit`, IANA `timezone`, and explicit DST ambiguity/gap
+  policies, with canonical UTC comparison and lossless nanosecond evidence.
+  Preserve declared timezone-aware Arrow nanoseconds before DuckDB ingestion;
+  reject unsupported nested/native-Parquet representations before precision loss.
+- **D04:** Opt-in `decimal_precision` and `decimal_scale` exact fixed-point
+  contracts for text and physical decimals, with no rounding of invalid values.
+- **D05:** Conditional composite unique keys (`where`, optional `name`) and
+  grouped allowed-domain occurrence bounds (`grouped_values`), including nullable
+  groups, explicit absent groups, bounded evidence and exact totals.
+- **D06:** Opt-in NFC/NFD/NFKC/NFKD/casefold normalization and explicit decimal/
+  grouping separators with strict grouping validation and converted equality.
+
+All additions are generic validation policies. Existing API signatures/default
+semantics remain available, Polars remains an optional extra, and the DuckDB
+minimum remains 1.3.1. Behavior changes above correct false decisions or make
+previously unassessed outcomes explicit; new domain policies require opt-in.
+
+## [0.7.0] - 2026-11-01
+
+### Added
+
+- Configurable duplicate evidence with `schema.duplicate_rows_per_key` (a positive
+  integer or `all`, default 10). Exact key, involved-row and surplus-row totals
+  remain independent of evidence limits; completeness and truncation are explicit.
+- Nullable alternate-key contracts: `unique_keys` accepts
+  `{columns: [...], nulls: exempt|equal|forbid}`. Existing list declarations retain
+  their null-exempt behavior. Primary keys continue to forbid missing values.
+- `na_values` on columns distinguishes valid not-applicable tokens from missing
+  or invalid values. `schema.na_groups` and INP-009 enforce all-or-none applicability
+  across arbitrary column groups. No domain-specific tokens are built in.
+- `convert_options` compares numeric allowed/excluded values after the declared
+  conversion policy; `each_allowed_once` enforces exact domain coverage and
+  uniqueness. Existing `normalize: [case]` plus `unique` remains the built-in
+  case-insensitive collision check.
+- `number_grammar` controls integral decimal notation, digit separators, exponents
+  and special values. `trim_whitespace` selects ASCII-space, Unicode-whitespace or
+  no trimming. Integral decimal input remains opt-in; conversion never rounds a
+  fractional number into an integer.
+- Structured check identity on every result: `check_id`, `scope`, `columns`,
+  `parameters`, and constituent `checks`, including summarized passing checks.
+  Existing result fields and plugin constructors remain supported.
+- A DuckDB/Arrow validation backend for declared input contracts, available without
+  Polars. `validate(..., backend="duckdb")` selects it explicitly; `auto` preserves
+  the existing backend when Polars is installed. Unsupported optional capabilities
+  raise an actionable dependency error instead of silently skipping checks.
+
+### Changed
+
+- Polars is an optional `polars` extra. `stats`, `spatial` and `all` include the
+  optional backend for their existing advanced capabilities. The pandas extra
+  supports pandas 2.1.3. DuckDB's minimum remains 1.3.1; Arrow's remains 16.
+- Automatic resource planning considers input size, declared key width, available
+  host/container memory and temporary-disk space. Large key operations reduce
+  concurrent connections instead of splitting their allowance among idle workers.
+  Explicit memory and spill limits remain authoritative.
+
+### Fixed
+
+- Duplicate keys use canonical declared values for reader-forced text, Arrow,
+  pandas, Polars, Parquet and query inputs, matching value validation. Invalid
+  typed text no longer creates misleading raw-text duplicate groups.
+- Strict CSV parsing cannot silently skip malformed leading records. Unterminated
+  quotes and ragged rows report logical row and physical line locations, including
+  multiline records. The failure-only diagnostic parser adds no full scan to a
+  successful read. Explicit dialect settings remain supported.
+- ASCII trimming has identical semantics in DuckDB and dataframe execution;
+  Unicode spaces are accepted only when the configured policy permits them.
+- Explicit numeric CSV reader hints cannot round or normalize governed values
+  before their declared grammar is checked. Ungoverned reader hints retain their
+  existing precedence; ambiguous positional conflicts receive a clear error.
+
+### Performance
+
+- Public validation imports are lazy. Bounded SQL syntax caching avoids repeated
+  parsing while resolving current input bindings and paths on every call.
+- Duplicate row-position evidence joins only sampled key groups, avoiding
+  all-domain position lists. The native backend fuses column predicates and keeps
+  input processing in DuckDB rather than converting through Polars.
+- Added `scripts/benchmark_validation.py`, before/after measurements and profiling
+  notes in `docs/benchmark_070.md`, plus regression tests for every change above.
+
 ## [0.6.0] - 2026-10-31
 
 ### Added

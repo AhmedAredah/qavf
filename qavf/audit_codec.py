@@ -22,14 +22,26 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from qavf._audit_temporal import normalize_temporal_scalar
+from qavf._audit_temporal import ZonedNanosecondTimestamp, normalize_temporal_scalar
 
 FLOAT_TAG = "$float"
 _VALUE_TAG = "$qavf_value"
 _MAPPING_TAG = "$qavf_mapping"
 _RESERVED = {FLOAT_TAG, _VALUE_TAG, _MAPPING_TAG}
 _FLOATS = {"NaN": math.nan, "Infinity": math.inf, "-Infinity": -math.inf}
-_SCALARS = (str, bool, int, float, Decimal, date, time, timedelta, Path, bytes)
+_SCALARS = (
+    str,
+    bool,
+    int,
+    float,
+    Decimal,
+    date,
+    time,
+    timedelta,
+    Path,
+    bytes,
+    ZonedNanosecondTimestamp,
+)
 
 
 class AuditSizeError(ValueError):
@@ -185,6 +197,14 @@ def _timezone_value(value: Any) -> tzinfo | None:
 
 
 def _encode(value: Any) -> Any:
+    if isinstance(value, ZonedNanosecondTimestamp):
+        return {
+            _VALUE_TAG: [
+                "zoned_timestamp_ns",
+                value.utc_nanoseconds,
+                _timezone_tag(value.as_datetime()),
+            ]
+        }
     if isinstance(value, np.datetime64 | np.timedelta64):
         return {_VALUE_TAG: ["numpy_temporal", value.dtype.str, int(value.astype("int64"))]}
     if isinstance(value, float) and not math.isfinite(value):
@@ -245,6 +265,11 @@ def decode_audit(value: Any) -> Any:
                 if not isinstance(parts, list) or not parts:
                     raise ValueError("invalid rich audit value")
                 match parts:
+                    case ["zoned_timestamp_ns", int(physical), zone]:
+                        decoded_zone = _timezone_value(zone)
+                        if decoded_zone is None:
+                            raise ValueError("nanosecond timestamp requires a timezone")
+                        return ZonedNanosecondTimestamp(physical, decoded_zone)
                     case ["numpy_temporal", str(dtype), int(physical)]:
                         native_type = np.dtype(dtype)
                         if native_type.kind not in "Mm":

@@ -10,6 +10,7 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
 from qavf.redaction import exception_details, redact_text
+from qavf.rules._column_batch import exceeds_missing_fraction
 from qavf.rules._column_contract import ColumnOutcome, ColumnPlan
 from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._predicates import (
@@ -217,7 +218,7 @@ def evaluate_eager(
             try:
                 if check.max_null_fraction is not None:
                     fraction = scope_missing / scope_rows if scope_rows else 0.0
-                    if fraction > check.max_null_fraction:
+                    if exceeds_missing_fraction(check, scope_missing, scope_rows):
                         missing_rows = True
                         problems.append(
                             f"missing fraction {fraction:.4g} (null or NaN) exceeds "
@@ -241,6 +242,9 @@ def evaluate_eager(
                         )
                         continue
                     value = values._statistic(scope, statistic)
+                    if value is None:
+                        unusable.append(f"{statistic} is undefined: insufficient usable values")
+                        continue
                     if not values._within(value, bounds):
                         problems.append(
                             f"{statistic} {values._show(value)} outside "

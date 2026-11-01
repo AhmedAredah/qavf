@@ -13,6 +13,7 @@ from qavf.engine.registry import Finding
 from qavf.engine.sql_read import NativeReadUnavailable
 from qavf.numeric import stable_float_statistic
 from qavf.rules._column_batch import ColumnInputs, exceeds_missing_fraction
+from qavf.rules._column_contract import require_statistic_population
 from qavf.settings import ColumnCheck
 from qavf.sources.sql import quote_identifier
 
@@ -85,6 +86,7 @@ def native_float_statistics(
             f"fewer than min_applicable_rows {check.min_applicable_rows}"
         )
     problems = []
+    require_statistic_population(statistics, accumulator.count)
     for statistic, bounds in statistics.items():
         value = {"sum": accumulator.total, "mean": accumulator.mean}.get(
             statistic, lambda: deviation

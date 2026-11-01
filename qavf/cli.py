@@ -13,32 +13,89 @@ import logging
 import os
 import sys
 from collections.abc import Sequence
+from importlib import import_module
 from pathlib import Path
-from typing import Any
-
-import yaml
-from pydantic import ValidationError
+from typing import TYPE_CHECKING, Any
 
 from qavf._version import __version__
-from qavf.configuration import read_config_mapping
-from qavf.engine.resources import ResourceLimitError
-from qavf.engine.runner import ConfigurationError, QARunner, build_registry, build_source_registry
 from qavf.engine.severity import Severity
-from qavf.io import ProtectedInputs, atomic_write
-from qavf.profiling import profile_input
-from qavf.redaction import exception_details
-from qavf.regression.compare_outputs import compare_outputs
-from qavf.reports.html import write_html
-from qavf.scaffold import (
-    SCHEMA_FILENAME,
-    config_json_schema,
-    render_config,
-    validate_margin,
-    write_json_schema,
-)
-from qavf.settings import QAVFSettings, check_sql_names, load_settings
-from qavf.sources.base import SourceError
-from qavf.sources.formats import file_name
+from qavf.optional import OptionalDependencyError, has_polars, require_polars
+
+if TYPE_CHECKING:
+    import yaml
+
+    from qavf.configuration import read_config_mapping
+    from qavf.engine.compilation import build_registry, build_source_registry
+    from qavf.engine.runner import QARunner
+    from qavf.io import ProtectedInputs, atomic_write
+    from qavf.profiling import profile_input
+    from qavf.redaction import exception_details
+    from qavf.regression.compare_outputs import compare_outputs
+    from qavf.reports.html import write_html
+    from qavf.scaffold import config_json_schema, render_config, write_json_schema
+    from qavf.settings import QAVFSettings, check_sql_names, load_settings
+    from qavf.sources.formats import file_name
+
+# Keep the historical module-level helper names available for callers and
+# monkeypatching, without importing a dataframe engine just to parse arguments.
+_LAZY_IMPORTS = {
+    "yaml": ("yaml", None),
+    "ValidationError": ("pydantic", "ValidationError"),
+    "ConfigurationError": ("qavf.engine.compilation", "ConfigurationError"),
+    "ResourceLimitError": ("qavf.resource_errors", "ResourceLimitError"),
+    "SourceError": ("qavf.sources.base", "SourceError"),
+    "QARunner": ("qavf.engine.runner", "QARunner"),
+    "build_registry": ("qavf.engine.compilation", "build_registry"),
+    "build_source_registry": ("qavf.engine.compilation", "build_source_registry"),
+    "read_config_mapping": ("qavf.configuration", "read_config_mapping"),
+    "ProtectedInputs": ("qavf.io", "ProtectedInputs"),
+    "atomic_write": ("qavf.io", "atomic_write"),
+    "profile_input": ("qavf.profiling", "profile_input"),
+    "exception_details": ("qavf.redaction", "exception_details"),
+    "compare_outputs": ("qavf.regression.compare_outputs", "compare_outputs"),
+    "write_html": ("qavf.reports.html", "write_html"),
+    "config_json_schema": ("qavf.scaffold", "config_json_schema"),
+    "render_config": ("qavf.scaffold", "render_config"),
+    "validate_margin": ("qavf.scaffold", "validate_margin"),
+    "write_json_schema": ("qavf.scaffold", "write_json_schema"),
+    "QAVFSettings": ("qavf.settings", "QAVFSettings"),
+    "check_sql_names": ("qavf.settings", "check_sql_names"),
+    "load_settings": ("qavf.settings", "load_settings"),
+    "file_name": ("qavf.sources.formats", "file_name"),
+}
+SCHEMA_FILENAME = "qavf.schema.json"
+
+
+def __getattr__(name: str) -> Any:
+    target = _LAZY_IMPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module, attribute = target
+    value = import_module(module)
+    if attribute is not None:
+        value = getattr(value, attribute)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY_IMPORTS))
+
+
+def _use(*names: str) -> None:
+    """Resolve command dependencies without replacing caller overrides."""
+    for name in names:
+        if name not in globals():
+            __getattr__(name)
+
+
+def _native(args: argparse.Namespace) -> bool:
+    backend = getattr(args, "backend", "auto")
+    if backend == "duckdb" or (backend == "auto" and not has_polars()):
+        return True
+    require_polars(f"qavf {args.command} --backend polars")
+    return False
+
 
 logger = logging.getLogger("qavf")
 
@@ -47,8 +104,13 @@ EXIT_OK, EXIT_QA_FAILED, EXIT_USAGE = 0, 1, 2
 
 def _margin(text: str) -> float:
     """argparse type for profiling margins: a finite number >= 0."""
+    import math
+
     try:
-        return validate_margin(float(text))
+        value = float(text)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("margin must be a finite number >= 0")
+        return value
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
@@ -84,6 +146,12 @@ def _parser() -> argparse.ArgumentParser:
         "--fail-on", type=Severity, choices=list(Severity), help="override engine.fail_on"
     )
     run.add_argument("--no-parallel", action="store_true", help="run rules sequentially")
+    run.add_argument(
+        "--backend",
+        choices=["auto", "duckdb", "polars"],
+        default="auto",
+        help="validation backend (auto: Polars when installed, otherwise DuckDB)",
+    )
 
     init = commands.add_parser("init", help="write a complete starting configuration")
     init.add_argument("-o", "--output", type=Path, default=Path("qavf.yaml"))
@@ -115,6 +183,7 @@ def _parser() -> argparse.ArgumentParser:
     schema = commands.add_parser("schema", help="write the configuration JSON Schema")
     schema.add_argument("-o", "--output", type=Path, help="file to write (default: stdout)")
     schema.add_argument("-c", "--config", type=Path, help="configuration (for plugin discovery)")
+    schema.add_argument("--backend", choices=["auto", "duckdb", "polars"], default="auto")
 
     profile = commands.add_parser("profile", help="print inferred QA limits for a data file")
     profile.add_argument("path")
@@ -124,6 +193,12 @@ def _parser() -> argparse.ArgumentParser:
     rules = commands.add_parser("list-rules", help="list discovered rules")
     rules.add_argument("-c", "--config", type=Path, help="configuration (for plugin discovery)")
     rules.add_argument("--format", choices=["table", "markdown", "json"], default="table")
+    rules.add_argument("--backend", choices=["auto", "duckdb", "polars"], default="auto")
+
+    capabilities = commands.add_parser("capabilities", help="show backend capabilities as JSON")
+    capabilities.add_argument(
+        "--backend", choices=["duckdb", "polars"], help="one backend (default: both)"
+    )
 
     compare = commands.add_parser("compare", help="compare an output file with a baseline")
     compare.add_argument("baseline")
@@ -183,6 +258,7 @@ def _configure_logging(verbosity: int) -> None:
 
 
 def _settings(path: Path | None) -> QAVFSettings:
+    _use("load_settings", "QAVFSettings")
     return load_settings(path) if path else QAVFSettings()
 
 
@@ -201,6 +277,7 @@ def _check_report_destinations(html: Path | None, json_path: Path | None) -> Non
 def _cmd_run(args: argparse.Namespace) -> int:
     from qavf.reports.presentation import HtmlLimits
 
+    _use("load_settings", "ProtectedInputs")
     settings = load_settings(args.config)
     if args.no_parallel:
         settings.engine.parallel = False
@@ -217,11 +294,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _check_report_destinations(html_path, json_path)
     protected = ProtectedInputs.of_settings(settings, args.config)
     protected.check(html_path, json_path)
-    report = QARunner(settings).run()
+    if _native(args):
+        from qavf.api import validate
+
+        report = validate(config=settings, backend="duckdb")
+    else:
+        _use("QARunner")
+        report = QARunner(settings).run()
     fail_on = settings.engine.fail_on
     with protected.publication():
         written = []
         if html_path is not None:
+            _use("write_html")
             written.append(
                 write_html(
                     report,
@@ -260,6 +344,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _parse_dataset(argument: str) -> tuple[str, str]:
+    _use("file_name")
     # A raw URI's query may contain '='; only a leading NAME= is a name separator.
     name, separator, tail = argument.partition("=")
     if separator and name.isidentifier():
@@ -275,6 +360,18 @@ def _parse_dataset(argument: str) -> tuple[str, str]:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
+    _use(
+        "yaml",
+        "check_sql_names",
+        "profile_input",
+        "build_registry",
+        "QAVFSettings",
+        "render_config",
+        "config_json_schema",
+        "build_source_registry",
+        "write_json_schema",
+        "atomic_write",
+    )
     output: Path = args.output
     if output.suffix.lower() not in {".yaml", ".yml", ".json"}:
         raise ValueError("configuration output must use .yaml, .yml or .json")
@@ -338,9 +435,17 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 def _cmd_schema(args: argparse.Namespace) -> int:
     settings = _settings(args.config)
-    schema = config_json_schema(build_registry(settings), build_source_registry(settings))
-    text = write_json_schema(schema)
+    if _native(args):
+        from qavf.cli_core import config_json_schema as core_schema
+
+        schema = core_schema(settings)
+        text = json.dumps(schema, indent=2) + "\n"
+    else:
+        _use("config_json_schema", "build_registry", "build_source_registry", "write_json_schema")
+        schema = config_json_schema(build_registry(settings), build_source_registry(settings))
+        text = write_json_schema(schema)
     if args.output:
+        _use("atomic_write")
         atomic_write(args.output, text)
         print(f"JSON Schema written: {args.output}")
     else:
@@ -349,6 +454,7 @@ def _cmd_schema(args: argparse.Namespace) -> int:
 
 
 def _cmd_profile(args: argparse.Namespace) -> int:
+    _use("profile_input", "yaml")
     profile = profile_input(args.path, margin=args.margin, max_categories=args.max_categories)
     sys.stdout.write(
         yaml.safe_dump({"schema": profile.schema}, sort_keys=False, allow_unicode=True)
@@ -357,8 +463,15 @@ def _cmd_profile(args: argparse.Namespace) -> int:
 
 
 def _cmd_list_rules(args: argparse.Namespace) -> int:
-    registry = build_registry(_settings(args.config))
-    rules = list(registry)
+    rules: Sequence[Any]
+    settings = _settings(args.config)
+    if _native(args):
+        from qavf.cli_core import core_rules
+
+        rules = core_rules(settings)
+    else:
+        _use("build_registry")
+        rules = list(build_registry(settings))
     if args.format == "json":
         payload = [
             {
@@ -400,6 +513,7 @@ def _column_map(pairs: Sequence[str]) -> dict[str, str]:
 
 
 def _cmd_compare(args: argparse.Namespace) -> int:
+    _use("compare_outputs")
     result = compare_outputs(
         args.baseline,
         args.candidate,
@@ -425,6 +539,7 @@ def _comparison_spec(path: Path | None) -> dict[str, Any]:
     """The comparison options of a YAML or JSON spec file (empty without one)."""
     if path is None:
         return {}
+    _use("read_config_mapping")
     loaded, _ = read_config_mapping(path)
     if clash := sorted({"baseline", "candidate"} & set(loaded)):
         raise ValueError(
@@ -438,6 +553,7 @@ def _comparison_spec(path: Path | None) -> dict[str, Any]:
 def _cmd_compare_datasets(args: argparse.Namespace) -> int:
     from qavf.compare.api import compare_datasets
 
+    _use("ProtectedInputs")
     _check_report_destinations(args.html, args.json)
     protected = ProtectedInputs([args.config, args.baseline, args.candidate])
     protected.check(args.html, args.json)
@@ -470,6 +586,7 @@ def _cmd_compare_datasets(args: argparse.Namespace) -> int:
 def _cmd_baseline(args: argparse.Namespace) -> int:
     from qavf.regression.baselines import accept_baseline
 
+    _use("compare_outputs")
     target = Path(args.destination)
     if target.exists():
         if not args.force:
@@ -496,6 +613,13 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
 def _cmd_demo(args: argparse.Namespace) -> int:
     from qavf.demo import write_demo_project
 
+    _use(
+        "config_json_schema",
+        "build_registry",
+        "build_source_registry",
+        "QAVFSettings",
+        "write_json_schema",
+    )
     target: Path = args.directory
     if target.exists() and any(target.iterdir()) and not args.force:
         raise ValueError(f"{target} is not empty (use --force)")
@@ -509,8 +633,17 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_capabilities(args: argparse.Namespace) -> int:
+    from qavf.capabilities import backend_capabilities
+
+    backends = [args.backend] if args.backend else ["duckdb", "polars"]
+    print(json.dumps({name: backend_capabilities(name).to_dict() for name in backends}, indent=2))
+    return EXIT_OK
+
+
 _COMMANDS = {
     "run": _cmd_run,
+    "capabilities": _cmd_capabilities,
     "init": _cmd_init,
     "schema": _cmd_schema,
     "profile": _cmd_profile,
@@ -526,18 +659,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``qavf`` console script."""
     args = _parser().parse_args(argv)
     _configure_logging(args.verbose)
+    if args.command == "capabilities":
+        return _COMMANDS[args.command](args)
+    from qavf.resource_errors import ResourceLimitError
+    from qavf.sources.base import SourceError
+
     try:
+        if args.command in {"init", "profile", "compare", "compare-datasets", "baseline", "demo"}:
+            require_polars(f"qavf {args.command}")
         return _COMMANDS[args.command](args)
     except (
-        ConfigurationError,
-        ValidationError,
-        FileNotFoundError,
+        OptionalDependencyError,
         SourceError,
         ResourceLimitError,
         KeyError,
         ValueError,
-        OSError,  # unreadable configuration, unwritable report location, ...
+        OSError,
     ) as exc:
+        _use("exception_details")
         message = exception_details(exc)
         logger.debug("Command failed: %s", message)
         print(f"error: {message}", file=sys.stderr)

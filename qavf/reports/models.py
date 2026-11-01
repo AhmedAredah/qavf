@@ -42,6 +42,7 @@ _AUDIT_JSON_FIELDS = frozenset(
         "notes",
         "fingerprint",
         "params",
+        "parameters",
         "extensions",
         "config",
         "resource_usage",
@@ -142,10 +143,56 @@ def _json(value: Any) -> bytes:
     )
 
 
+class CheckIdentity(SnapshotModel):
+    """Immutable check contract; display labels and evidence are not identifiers.
+
+    ``check_id`` names the operation. The complete identity includes its rule,
+    dataset/column scope and effective parameters; no label parsing is needed.
+    Empty columns explicitly denotes a dataset, rule, or run-level check.
+    """
+
+    audit_fields: ClassVar[tuple[str, ...]] = ("parameters",)
+    rule_id: str
+    check_id: str
+    scope: str = "rule"
+    datasets: list[str] = Field(default_factory=list)
+    columns: list[str] = Field(default_factory=list)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+def check_identity(
+    rule_id: str,
+    *,
+    check_id: str | None = None,
+    datasets: Sequence[str] = (),
+    columns: Sequence[str] = (),
+    parameters: Mapping[str, Any] | None = None,
+    scope: str | None = None,
+) -> CheckIdentity:
+    """Build a scoped contract for engines and third-party rule producers."""
+    return CheckIdentity(
+        rule_id=rule_id,
+        check_id=check_id or rule_id,
+        scope=scope
+        or (
+            "column"
+            if len(columns) == 1
+            else "columns"
+            if columns
+            else "dataset"
+            if datasets
+            else "rule"
+        ),
+        datasets=list(datasets),
+        columns=list(columns),
+        parameters=dict(parameters or {}),
+    )
+
+
 class RuleResult(SnapshotModel):
     """Outcome of one rule execution."""
 
-    audit_fields: ClassVar[tuple[str, ...]] = ("affected_records", "metrics")
+    audit_fields: ClassVar[tuple[str, ...]] = ("affected_records", "metrics", "parameters")
 
     rule_id: str
     name: str
@@ -153,6 +200,12 @@ class RuleResult(SnapshotModel):
     category: str
     check: str | None = None
     """Which of a rule's separately graded checks this is (``None`` for single-check rules)."""
+    check_id: str = ""
+    scope: str = "rule"
+    columns: list[str] = Field(default_factory=list)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    checks: list[CheckIdentity] = Field(default_factory=list)
+    """Complete constituent identities; retained when optional evidence is removed."""
     status: Status
     severity: Severity
     message: str
@@ -162,9 +215,13 @@ class RuleResult(SnapshotModel):
     """Total number of offending items, counted in :attr:`unit` (may exceed
     ``len(affected_records)``, which is a sample)."""
     affected_count_exact: bool = True
-    """False when ``affected_count`` is a verified lower bound, not an exact total.
+    """False when ``affected_count`` is a lower bound or the total is unassessed.
     This decision-critical field is retained independently of optional evidence.
     """
+    evidence_complete: bool | None = None
+    """Whether all offending items/positions are represented, when known."""
+    evidence_truncated: bool = False
+    """Optional evidence was sampled, capped, or removed; exact totals are independent."""
     total_records: int | None = None
     """Number of items the rule examined, in the same :attr:`unit`, when meaningful.
     ``None`` when there is no meaningful denominator (e.g. column-level problems)."""
@@ -181,6 +238,37 @@ class RuleResult(SnapshotModel):
     recommendation: str = ""
     metrics: dict[str, Any] = Field(default_factory=dict)
     datasets: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def complete_identity(cls, value: Any) -> Any:
+        """Older result constructors/JSON gain a truthful rule-level identity."""
+        if not isinstance(value, Mapping) or "rule_id" not in value:
+            return value
+        value = dict(value)
+        identity = check_identity(
+            value["rule_id"],
+            check_id=value.get("check_id"),
+            datasets=value.get("datasets", ()),
+            columns=value.get("columns", ()),
+            parameters=value.get("parameters"),
+            scope=value.get("scope"),
+        )
+        value["check_id"] = identity.check_id
+        value["scope"] = identity.scope
+        return value
+
+    @property
+    def identity(self) -> CheckIdentity:
+        """This result's own identity, without duplicating it in persisted JSON."""
+        return check_identity(
+            self.rule_id,
+            check_id=self.check_id,
+            scope=self.scope,
+            datasets=self.datasets,
+            columns=self.columns,
+            parameters=self.parameters,
+        )
 
     @property
     def label(self) -> str:

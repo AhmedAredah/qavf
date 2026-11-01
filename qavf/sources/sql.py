@@ -62,7 +62,9 @@ def _parser() -> duckdb.DuckDBPyConnection:
     """A per-thread connection used only to parse SQL (opening one costs ~40 ms)."""
     con = getattr(_PARSER, "con", None)
     if con is None:
-        con = _PARSER.con = duckdb.connect()
+        # Parsing never runs parallel operators. Avoid constructing the default
+        # native worker pool for every Python validation worker.
+        con = _PARSER.con = duckdb.connect(config={"threads": 1})
     return con
 
 
@@ -274,6 +276,17 @@ def _argument_end(tokens: list[_SqlToken], start: int) -> int:
     raise SourceError("unterminated SQL file argument")
 
 
+def _parse_sql_syntax(sql: str) -> tuple[list[_SqlToken], dict[str, Any]]:
+    row = _parser().execute(f"SELECT json_serialize_sql({sql_literal(sql)})").fetchone()
+    return _tokens(sql), json.loads(row[0]) if row else {"error": True}
+
+
+# The returned syntax is internal and treated as immutable. Bound values and
+# filesystem observations never enter this cache. The input-size gate below
+# keeps generated giant queries from displacing a run's actual working data.
+_sql_syntax = functools.lru_cache(maxsize=128)(_parse_sql_syntax)
+
+
 def normalize_sql_paths(
     sql: str,
     base_dir: Path,
@@ -292,12 +305,12 @@ def normalize_sql_paths(
     parameter_names = {name.casefold(): name for name in bound}
     if len(parameter_names) != len(bound):
         raise SourceError("SQL parameter names must not repeat with different casing")
-    tokens = _tokens(sql)
     # DuckDB identifies actual table references; the lexer supplies exact spans.
     # This keeps EXTRACT(... FROM 'date') and other expression grammar untouched.
     try:
-        row = _parser().execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
-        tree = json.loads(row[0]) if row else {"error": True}
+        # Retain syntax only: resolving paths must still observe newly created
+        # literal files with glob characters and each call's parameter bindings.
+        tokens, tree = _sql_syntax(sql) if len(sql) <= 32768 else _parse_sql_syntax(sql)
     except (duckdb.Error, TypeError, ValueError) as exc:
         raise redacted_error(exc) from None
     if tree.get("error"):

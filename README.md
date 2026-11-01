@@ -41,9 +41,11 @@ brew install AhmedAredah/tap/qavf                             # macOS and Linux 
 docker run --rm -v "$PWD:/work" ghcr.io/ahmedaredah/qavf run -c qavf.yaml
 ```
 
-Python 3.12 or newer on Linux, macOS or Windows. The `stats` extra adds SciPy-based
-tests; `pandas` adds pandas adapters; `spatial` adds indexed neighbour searches and
-authoritative CRS resolution; `all` installs all three. In GitHub Actions, use
+Python 3.12 or newer on Linux, macOS or Windows. `pip install qavf` provides
+DuckDB/Arrow validation without Polars. The `polars` extra installs the full
+execution backend; `stats` adds that backend and SciPy-based tests; `pandas` adds
+pandas adapters; `spatial` adds the full backend, indexed neighbour searches and
+authoritative CRS resolution; `all` installs every extra. In GitHub Actions, use
 [`AhmedAredah/qavf-action`](https://github.com/AhmedAredah/qavf-action).
 
 ## Quick start
@@ -96,6 +98,10 @@ assertions:
 [`config/qavf.full.yaml`](https://github.com/AhmedAredah/qavf/blob/main/config/qavf.full.yaml)
 documents every option. Paths are relative to the configuration file, and any string
 may use `${ENV_VAR}` so credentials stay out of the file.
+
+See [0.7 configuration and backend compatibility](docs/upgrade_070.md) for
+nullable keys, N/A tokens, number grammar, structured check identity, and the
+capabilities of each backend.
 
 ## Cloud storage
 
@@ -182,6 +188,7 @@ whole rows.
 | INP-006 | ERROR* | Row expressions hold |
 | INP-007 | ERROR* | SQL assertions return no rows |
 | INP-008 | ERROR | Newest date/time value is recent enough |
+| INP-009 | ERROR | N/A tokens apply to all or none of a column group |
 | TMP-001 | WARNING | Period-over-period change within a rate |
 | TMP-002 | WARNING | Series trend in their declared direction |
 | TMP-003 | WARNING | No period is a significant and material trend outlier |
@@ -283,11 +290,18 @@ for one comparison.
 | `qavf init -d [NAME=]PATH` | Profile data and write a starting configuration |
 | `qavf profile PATH` | Print inferred QA limits for a file |
 | `qavf schema` | Write the configuration JSON Schema for editor support |
-| `qavf list-rules` | List discovered rules |
+| `qavf list-rules` | List supported or discovered rules |
+| `qavf capabilities` | Show the backend capability catalog as JSON |
 | `qavf compare BASELINE CANDIDATE -k KEY` | Compare an output with a baseline (`--map OLD=NEW`) |
 | `qavf compare-datasets BASELINE CANDIDATE -c SPEC` | Compare two datasets at several levels; write `--html`/`--json` reports |
 | `qavf baseline SOURCE DEST -k KEY` | Accept an output as a baseline |
 | `qavf demo DIR` | Write a runnable demo project |
+
+`--help`, `--version`, `schema`, `list-rules` and native `run` work with the core
+installation. `run`, `schema` and `list-rules` accept `--backend auto|duckdb|polars`;
+`auto` uses Polars when installed, otherwise DuckDB. Advanced profiling, comparison,
+scaffolding and demo commands require `qavf[polars]`. Inspect the import-light
+[capability catalog](docs/backend_capabilities.md) before selecting a backend.
 
 Exit codes: `0` passed, `1` QA failed or outputs differ, `2` usage, configuration or
 resource error.
@@ -323,3 +337,5 @@ for the release checks and [CHANGELOG.md](CHANGELOG.md) for changes.
 ## License
 
 [Apache License 2.0](LICENSE)
+
+See the [0.7.1 implementation and verification report](docs/release_071_report.md) for the additional audit fixes, capability boundaries and measured benchmarks.

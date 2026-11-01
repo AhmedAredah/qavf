@@ -14,6 +14,7 @@
 | [INP-006](#inp-006) | input | ERROR | Row expressions |
 | [INP-007](#inp-007) | input | ERROR | SQL assertions |
 | [INP-008](#inp-008) | input | ERROR | Data freshness |
+| [INP-009](#inp-009) | input | ERROR | Not-applicable values |
 | [REC-001](#rec-001) | reconciliation | ERROR | Totals reconcile |
 | [REC-002](#rec-002) | reconciliation | ERROR | Shares sum to total |
 | [REC-003](#rec-003) | reconciliation | ERROR | Complete key grid |
@@ -248,6 +249,18 @@ One dataset column whose newest value must be recent.
 | `name` | `str \| None` | `None` |  |
 
 *When it fails:* Stale data usually means an upstream job did not run or a file was not refreshed. Check the producing pipeline's last run before trusting downstream results.
+
+### INP-009
+
+**Not-applicable values** · default severity `ERROR`
+
+Declared N/A values are counted independently; configured groups are all or none N/A in each row.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `datasets` | `tuple[str, ...] \| None` | `None` | Datasets to examine; every configured dataset when omitted. |
+
+*When it fails:* Make every column in the group applicable, or mark every column with its declared N/A token.
 
 
 ## Reconciliation

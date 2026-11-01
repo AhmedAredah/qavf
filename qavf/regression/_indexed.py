@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator, Mapping, Sequence
 from io import BytesIO
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import polars as pl
 
@@ -137,7 +137,9 @@ def _stage(
                         )
         batch = encode_temporal(batch)
         if casts:
-            batch = batch.cast(pl.Schema(casts))
+            # Polars 1.32 accepts Schema at runtime; its Mapping key annotation
+            # is invariant and rejects that supported argument in newer mypy.
+            batch = batch.cast(cast(Any, pl.Schema(casts)))
         for row in batch.iter_rows():
             encoded_key = canonical_key(tuple(row[index] for index in indexes), max_bytes=limit)
             yield ordinal, encoded_key, _row_bytes(row, limit)

@@ -9,9 +9,9 @@ from typing import Literal
 import polars as pl
 
 from qavf.engine.context import DataContext
-from qavf.engine.sql import missing_sql
 from qavf.keys import KeyTypeError, key_casts
 from qavf.rules._key_summary import KeySelection, KeySummary, summarize_keys
+from qavf.rules._key_values import CanonicalKeyValues
 from qavf.rules.helpers import missing_expr
 from qavf.sources.sql import quote_identifier
 
@@ -51,12 +51,15 @@ def _native_key_type(dtype: pl.DataType) -> str:
         pl.Binary(): "BLOB",
         pl.Date(): "DATE",
         pl.Time(): "TIME",
+        pl.Null(): "VARCHAR",
     }
     if dtype in native:
         return native[dtype]
     if isinstance(dtype, pl.Decimal):
         return f"DECIMAL({dtype.precision or 38}, {dtype.scale})"
-    if isinstance(dtype, pl.Datetime) and dtype.time_zone is None:
+    if isinstance(dtype, pl.Datetime):
+        if dtype.time_zone is not None:
+            return "TIMESTAMPTZ"
         return {"ns": "TIMESTAMP_NS", "us": "TIMESTAMP", "ms": "TIMESTAMP_MS"}[dtype.time_unit]
     raise KeyTypeError(f"SQL cannot align key type {dtype} losslessly; use a typed source")
 
@@ -218,11 +221,11 @@ def key_relation(
     normalize_missing: bool = True,
     backend: KeyBackend | None = None,
     _snapshot: pl.DataFrame | None = None,
+    exclude_na: bool = False,
 ) -> KeyRelation:
     """Group keys at the source using a fixed paired backend when supplied."""
     keys = tuple(columns)
     schema = {name: ctx.schema(dataset)[name] for name in keys}
-    result_schema = {**schema, frequency: pl.UInt64()}
     selected_backend = (
         "polars"
         if _snapshot is not None
@@ -232,20 +235,14 @@ def key_relation(
         selected = ", ".join(quote_identifier(name) for name in keys)
         source = quote_identifier(dataset)
         if normalize_missing:
-            spec = ctx.specs.get(dataset)
-            contracts = spec.schema_spec.columns if spec is not None and spec.schema_spec else {}
-            normalized = ", ".join(
-                f"CASE WHEN {missing_sql(name, schema[name], contracts.get(name))} THEN NULL "
-                f"ELSE {quote_identifier(name)} END AS {quote_identifier(name)}"
-                for name in keys
-            )
-            source = f"(SELECT {normalized} FROM {source}) AS normalized_keys"
+            query, schema = CanonicalKeyValues(ctx, dataset, keys).sql(exclude_na=exclude_na)
+            source = f"({query}) AS normalized_keys"
         return KeyRelation(
             ctx,
             (dataset,),
             keys,
             frequency,
-            result_schema,
+            {**schema, frequency: pl.UInt64()},
             sql=(
                 f"SELECT {selected}, count(*)::UBIGINT AS {quote_identifier(frequency)} "
                 f"FROM {source} GROUP BY {selected}"
@@ -256,22 +253,14 @@ def key_relation(
         )
     plan = (_snapshot.lazy() if _snapshot is not None else ctx.scan(dataset)).select(keys)
     if normalize_missing:
-        spec = ctx.specs.get(dataset)
-        columns_spec = spec.schema_spec.columns if spec is not None and spec.schema_spec else {}
-        empty = pl.DataFrame(schema=schema)
-        plan = plan.with_columns(
-            pl.when(missing_expr(empty, name, columns_spec.get(name)))
-            .then(None)
-            .otherwise(pl.col(name))
-            .alias(name)
-            for name in keys
-        )
+        plan = CanonicalKeyValues(ctx, dataset, keys).lazy(plan, exclude_na=exclude_na)
+        schema = dict(plan.collect_schema())
     return KeyRelation(
         ctx,
         (dataset,),
         keys,
         frequency,
-        result_schema,
+        {**schema, frequency: pl.UInt64()},
         lazy=(
             plan.group_by(keys, maintain_order=True).agg(pl.len().cast(pl.UInt64).alias(frequency))
         ),
@@ -323,10 +312,11 @@ def observed_keys(
     frequency: str,
     *,
     collector: Callable[[pl.LazyFrame], pl.DataFrame],
+    exclude_na: bool = False,
 ) -> KeyRelation:
     """Group one coherent projected observation without collecting its key domain."""
     keys = tuple(columns)
-    plan = normalized_plan(ctx, dataset, plan.select(keys))
+    plan = CanonicalKeyValues(ctx, dataset, keys).lazy(plan, collector, exclude_na=exclude_na)
     schema = dict(plan.collect_schema())
     return KeyRelation(
         ctx,
@@ -339,6 +329,41 @@ def observed_keys(
         ),
         collector=collector,
     )
+
+
+def key_na_rows(
+    ctx: DataContext,
+    dataset: str,
+    columns: Iterable[str],
+    *,
+    plan: pl.LazyFrame | None = None,
+    collector: Callable[[pl.LazyFrame], pl.DataFrame] | None = None,
+) -> int:
+    """Count N/A key rows on the same observation used for key comparisons.
+
+    A composite key is exempt when any component is declared not applicable.
+    No reduction is performed when none of its columns declares N/A tokens.
+    """
+    values = CanonicalKeyValues(ctx, dataset, columns)
+    if not values.na_policies:
+        return 0
+    if plan is None and ctx.execution_kind(dataset) == "native_sql":
+        return int(
+            ctx.sql(
+                f"SELECT count(*) FILTER (WHERE {values.na_sql()}) "
+                f"FROM {quote_identifier(dataset)}",
+                datasets=(dataset,),
+                normalize_missing=False,
+            ).item()
+        )
+
+    def reduction(source):
+        return source.select(values.na_expr().sum())
+
+    if plan is None:
+        return int(ctx.reduce(dataset, reduction).item())
+    collect = collector or (lambda selected: ctx.collect(dataset, selected))
+    return int(collect(reduction(plan)).item())
 
 
 def key_frequencies(

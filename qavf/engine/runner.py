@@ -57,6 +57,7 @@ from qavf.reports.models import (
     RuleInfo,
     RuleResult,
     RunMetadata,
+    check_identity,
     evidence_json_size,
     normalize_evidence,
 )
@@ -215,13 +216,24 @@ class QARunner:
 
             return validate_isolated(self.settings, frames)
         rules = self.plan()
-        workers = self._worker_count(len(rules))
+        workers = self._worker_count(len(rules), frames)
         # Parallel rules each run DuckDB queries with their own thread pool; share the
         # CPUs between the two levels instead of oversubscribing them.
         from qavf.engine.thread_budget import connection_threads
+        from qavf.resource_plan import ResourcePlan
 
-        threads = connection_threads(self.settings.engine.native_threads, workers)
-        context = ctx or self.context(frames, threads, workers=workers)
+        resource_plan = ResourcePlan.build(self.settings, frames, requested_workers=workers)
+        workers = resource_plan.workers
+        per_connection = (
+            resource_plan.memory_bytes // 2 // resource_plan.connection_slots
+            if resource_plan.memory_bytes is not None
+            else None
+        )
+        threads = connection_threads(
+            self.settings.engine.native_threads, workers, memory_bytes=per_connection
+        )
+        with resource_plan.bind(self.settings, frames):
+            context = ctx or self.context(frames, threads, workers=workers)
         from qavf.engine.planning import build_plan
 
         with contextlib.ExitStack() as ownership:
@@ -325,6 +337,8 @@ class QARunner:
             r.model_copy(
                 update={
                     "affected_records": [],
+                    "evidence_complete": False if r.affected_count else r.evidence_complete,
+                    "evidence_truncated": True,
                     "metrics": {"passed_checks": r.metrics["passed_checks"]}
                     if r.metrics.get("passed_checks")
                     else {},
@@ -440,14 +454,15 @@ class QARunner:
             )
         return results
 
-    def _worker_count(self, n_rules: int) -> int:
+    def _worker_count(self, n_rules: int, frames: Mapping[str, Any] | None = None) -> int:
         engine = self.settings.engine
         if not engine.parallel or n_rules < 2:
             return 1
         limit = engine.max_workers or min(_MAX_DEFAULT_WORKERS, os.cpu_count() or 1)
         from qavf.engine.thread_budget import memory_workers
 
-        return memory_workers(max(1, min(limit, n_rules)), engine.memory_budget_bytes)
+        requested = memory_workers(max(1, min(limit, n_rules)), engine.memory_budget_bytes)
+        return requested
 
     def _run_with_deadlines(
         self, rules: list[Rule], ctx: DataContext, workers: int, timeout: float
@@ -919,12 +934,30 @@ class QARunner:
         message = _bounded_diagnostic(redact_text(message), max(0, byte_limit - used))
         if coverage is not None:
             metrics["passed_checks"] = _jsonable(coverage)
+        complete = raw_metrics.get("duplicate_positions_complete")
+        evidence_truncated = bool(raw_metrics.get("duplicate_positions_truncated"))
+        if finding and finding.affected is not None and count > len(bounded_records):
+            complete, evidence_truncated = False, True
+        if len(bounded_records) != len(records) or sample_truncated:
+            complete, evidence_truncated = False, True
+        if metrics_dropped:
+            evidence_truncated = True
         return RuleResult(
             rule_id=rule.rule_id,
             name=rule.name,
             description=rule.description,
             category=rule.category,
             check=finding.check if finding else None,
+            check_id=finding.check_id if finding and finding.check_id else rule.rule_id,
+            columns=list(finding.columns if finding else ()),
+            parameters=redact(
+                finding.parameters
+                if finding and finding.parameters
+                else rule.params.model_dump(mode="python", exclude_defaults=True)
+            ),
+            checks=[check_identity(rule.rule_id, **redact(dict(check))) for check in finding.checks]
+            if finding and finding.checks
+            else [],
             status=status,
             severity=severity or (finding.severity if finding else None) or rule.severity,
             # Messages often quote errors, which may quote connection strings or URLs.
@@ -932,6 +965,8 @@ class QARunner:
             affected_records=bounded_records,
             affected_count=count,
             affected_count_exact=finding.affected_count_exact if finding else True,
+            evidence_complete=complete,
+            evidence_truncated=evidence_truncated,
             total_records=finding.total_records if finding else None,
             unit=unit,
             affected_rows=affected_rows,

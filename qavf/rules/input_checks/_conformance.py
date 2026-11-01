@@ -13,7 +13,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar
 
 import polars as pl
@@ -113,9 +113,19 @@ class ColumnConformance(ABC):
     def finding(self) -> Finding | None:
         """The failing values; ``None`` when every value conforms."""
         try:
-            return self._assess()
+            result = self._assess()
         except Exception as exc:
-            return self.view.unassessed(self.check, exc)
+            result = self.view.unassessed(self.check, exc)
+        return (
+            replace(
+                result,
+                check_id="column.dtype",
+                columns=(self.column,),
+                parameters={"dtype": self.spec.dtype},
+            )
+            if result is not None
+            else None
+        )
 
     @abstractmethod
     def _assess(self) -> Finding | None: ...
@@ -137,7 +147,7 @@ class TextValues(ColumnConformance):
         the row count, the invalid count and the first invalid rows."""
         view, column = self.view, self.column
         kind = described(str(self.spec.dtype))
-        conversion = TextConversion(column, self.spec)
+        conversion = TextConversion(column, self.spec, view.actual[column])
         context = view.context(column)
         scope = (
             nullcontext(view.observation)

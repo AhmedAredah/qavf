@@ -15,4 +15,5 @@ def validate(
     config: Configuration = ...,
     resources: ResourceLimits | None = ...,
     profile: ProfileName | None = ...,
+    backend: str = ...,
 ) -> QAReport: ...

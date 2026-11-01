@@ -12,13 +12,15 @@ from collections.abc import Callable, Sequence
 from datetime import date, datetime, time
 from decimal import Decimal
 from fractions import Fraction
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-import polars as pl
+if TYPE_CHECKING:
+    import polars as pl
 
+from qavf.number_grammar import COMPARISON_WHITESPACE, exact_decimal
 from qavf.scalars import normalize_scalar
 
-RowTest = Callable[[str], pl.Expr]
+RowTest = Callable[[str], "pl.Expr"]
 Ambiguous = Literal["raise", "earliest", "latest", "null"]
 _SHORT_LIST = 32
 
@@ -38,6 +40,7 @@ def zoned(
     and nonexistence (spring-forward gap) handling is chosen by the caller:
     ``"null"`` marks such times instead of guessing.
     """
+
     if aware:
         return value.dt.convert_time_zone(zone)
     return value.dt.replace_time_zone(zone, ambiguous=ambiguous, non_existent=non_existent)
@@ -51,6 +54,8 @@ def temporal_ticks(value: date | datetime, dtype: pl.DataType) -> Fraction:
     on one microsecond literal before any conversion to the input's unit.
     Fractional ticks are retained for boundaries finer than a Date/ms column.
     """
+    import polars as pl
+
     stamp = value if isinstance(value, datetime) else datetime.combine(value, time())
     # pandas Timestamp is a datetime subclass, but carries a nanosecond
     # remainder that Polars' Python datetime literal boundary otherwise drops.
@@ -77,11 +82,15 @@ def temporal_ticks(value: date | datetime, dtype: pl.DataType) -> Fraction:
 
 def is_temporal(dtype: pl.DataType) -> bool:
     """Whether ``dtype`` is a Polars date or datetime type."""
+    import polars as pl
+
     return dtype == pl.Date or isinstance(dtype, pl.Datetime)
 
 
 def is_text(dtype: pl.DataType) -> bool:
     """Whether ``dtype`` holds text: String, Categorical or Enum (logical ``str``)."""
+    import polars as pl
+
     return dtype == pl.String or isinstance(dtype, pl.Categorical | pl.Enum)
 
 
@@ -91,6 +100,8 @@ def is_nan(value: Any) -> bool:
 
 
 def _fits(value: Any, dtype: pl.DataType) -> bool:
+    import polars as pl
+
     try:
         pl.Series([value], dtype=dtype, strict=True)
     except (OverflowError, TypeError, ValueError, pl.exceptions.PolarsError):
@@ -106,6 +117,8 @@ def members(values: Sequence[Any], dtype: pl.DataType) -> tuple[list[Any], list[
     integer column, ``300`` for ``UInt8``, a huge integer for a float column) can
     never match and is dropped. NaN and null are left out: both count as missing.
     """
+    import polars as pl
+
     usable: list[Any] = []
     foreign: list[Any] = []
     for value in values:
@@ -131,15 +144,10 @@ def members(values: Sequence[Any], dtype: pl.DataType) -> tuple[list[Any], list[
                 if converted is not None and converted == value:
                     usable.append(converted)
         elif dtype.is_decimal():
+            assert isinstance(dtype, pl.Decimal)
             if number or isinstance(value, Decimal):
-                requested = (
-                    Decimal.from_float(value) if isinstance(value, float) else Decimal(value)
-                )
-                try:
-                    converted = pl.Series([requested], dtype=dtype, strict=True).item()
-                except (OverflowError, TypeError, ValueError, pl.exceptions.PolarsError):
-                    continue
-                if converted == requested:
+                converted = exact_decimal(value, dtype.precision or 38, dtype.scale or 0)
+                if converted is not None:
                     usable.append(converted)
             else:
                 foreign.append(value)
@@ -178,13 +186,14 @@ def missing_markers(spec: Any, dtype: pl.DataType) -> list[Any]:
     column) stand for placeholders while the column is read as text. Once the
     column holds that type, they cannot occur and are not compared.
     """
+
     values = list(spec.missing_values)
     if getattr(spec, "dtype", None) not in (None, "str") and not is_text(dtype):
         values = [value for value in values if not isinstance(value, str)]
     return values
 
 
-TextNormalization = Literal["case", "trim"]
+TextNormalization = Literal["case", "trim", "casefold", "NFC", "NFD", "NFKC", "NFKD"]
 """How text is compared: ``case`` ignores letter case, ``trim`` surrounding whitespace."""
 
 
@@ -192,14 +201,22 @@ def normalized_text(
     expr: pl.Expr, normalize: Sequence[TextNormalization], dtype: pl.DataType
 ) -> pl.Expr:
     """``expr`` as text, compared under ``normalize`` (unchanged when it is empty)."""
+    import polars as pl
+
     if not normalize:
         return expr
     if not is_text(dtype):
         raise ValueError(f"normalize applies to text columns, not {dtype}")
     text = expr.cast(pl.String)
+    forms: tuple[Literal["NFC", "NFD", "NFKC", "NFKD"], ...] = ("NFC", "NFD", "NFKC", "NFKD")
+    for form in forms:
+        if form in normalize:
+            text = text.str.normalize(form)
     if "trim" in normalize:
-        text = text.str.strip_chars()
-    if "case" in normalize:
+        text = text.str.strip_chars(COMPARISON_WHITESPACE)
+    if "casefold" in normalize:
+        text = text.map_elements(str.casefold, return_dtype=pl.String)
+    elif "case" in normalize:
         text = text.str.to_lowercase()
     return text
 
@@ -215,6 +232,8 @@ def membership(
     (:func:`members`), so no comparison mixes types, which Polars 2 rejects and
     which could otherwise round large integers. ``normalize`` applies the same
     text normalization to the values and the column."""
+    import polars as pl
+
     if normalize and values:
         values = (
             pl.DataFrame({"v": pl.Series(values, dtype=pl.String)})
@@ -252,4 +271,6 @@ def membership(
 
 def _text(column: str) -> pl.Expr:
     # Categorical and Enum values are text too; their string view is checked.
+    import polars as pl
+
     return pl.col(column).cast(pl.String)

@@ -171,6 +171,16 @@ class DataContext:
             name: value for name, value in (frames or {}).items() if isinstance(value, DataSource)
         }
         supplied_sources = {**dict(sources or {}), **direct_sources}
+        if not self.env.text_functions:
+            from qavf.text_policies import requires_sql_functions, text_type_requires_sql_functions
+
+            needs_text_functions = requires_sql_functions(specifications) or any(
+                text_type_requires_sql_functions(column)
+                for source in supplied_sources.values()
+                for column in getattr(source.params, "declared_columns", {}).values()
+            )
+            if needs_text_functions:
+                self.env = replace(self.env, text_functions=True)
         frames = {
             name: value
             for name, value in (frames or {}).items()
@@ -274,6 +284,7 @@ class DataContext:
             KeyError, ValueError: for an invalid source specification.
         """
         from qavf.execution.policy import check_policy
+        from qavf.text_policies import requires_sql_functions
 
         check_policy(settings.engine)
         if settings.engine.execution_mode == "isolated":
@@ -289,6 +300,7 @@ class DataContext:
             connections=settings.connections,
             secrets=settings.secrets,
             threads=threads,
+            text_functions=requires_sql_functions(settings),
             memory_limit=settings.engine.duckdb_memory_limit,
             temp_directory=(
                 settings.resolve(settings.engine.temp_directory)
@@ -307,6 +319,24 @@ class DataContext:
         from qavf.engine.thread_budget import memory_workers
 
         workers = memory_workers(workers, settings.engine.memory_budget_bytes)
+        from qavf.resource_plan import ResourcePlan
+
+        resource_plan = ResourcePlan.for_context(settings, frames, requested_workers=workers)
+        workers = resource_plan.workers
+        if threads is None:
+            from qavf.engine.thread_budget import connection_threads
+
+            per_connection = (
+                resource_plan.memory_bytes // 2 // resource_plan.connection_slots
+                if resource_plan.memory_bytes is not None
+                else None
+            )
+            env = replace(
+                env,
+                threads=connection_threads(
+                    settings.engine.native_threads, workers, memory_bytes=per_connection
+                ),
+            )
         context = cls(
             frames=frames,
             specs=settings.datasets,
@@ -320,9 +350,9 @@ class DataContext:
             evidence_bytes=settings.engine.max_evidence_bytes,
             concurrent_loads=settings.engine.concurrent_loads,
             cache_max_bytes=settings.engine.cache_max_bytes,
-            spill_max_bytes=settings.engine.spill_max_bytes,
+            spill_max_bytes=resource_plan.spill_bytes,
             max_spill_files=settings.engine.max_spill_files,
-            memory_budget_bytes=settings.engine.memory_budget_bytes,
+            memory_budget_bytes=resource_plan.memory_bytes,
             temp_directory=(
                 settings.resolve(settings.engine.temp_directory)
                 if settings.engine.temp_directory is not None
@@ -330,6 +360,10 @@ class DataContext:
             ),
             connection_slots=2 * workers,
         )
+        context._resources.plan = {
+            **resource_plan.diagnostics(),
+            "native_threads_per_connection": env.threads,
+        }
 
         try:
             for name, spec in settings.datasets.items():

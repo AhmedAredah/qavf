@@ -42,14 +42,20 @@ def apply_profile(settings: QAVFSettings, name: ProfileName) -> QAVFSettings:
     ):
         raise ValueError("engine category filters exclude checks required by the profile")
     rules = dict(settings.rules)
-    for rule_id in _INPUT_RULES:
+    has_applicability = any(
+        spec.schema_spec is not None
+        and any(column.na_values for column in spec.schema_spec.columns.values())
+        for spec in settings.datasets.values()
+    )
+    input_rules = (*_INPUT_RULES, "INP-009") if has_applicability else _INPUT_RULES
+    for rule_id in input_rules:
         if rule_id in rules and not rules[rule_id].enabled:
             raise ValueError(f"profile {name!r} conflicts with disabled {rule_id}")
         rules.setdefault(rule_id, RuleSettings())
     # Expanded checks are the effective configuration and enter the plan digest.
     # Preserve explicit custom checks while avoiding unrelated unconfigured rules.
     extensions = dict(settings.extensions)
-    provenance = {"name": name, "input_rules": list(_INPUT_RULES)}
+    provenance = {"name": name, "input_rules": list(input_rules)}
     if "qavf.profile" in extensions and extensions["qavf.profile"] != provenance:
         raise ValueError("extensions['qavf.profile'] conflicts with the selected profile")
     extensions["qavf.profile"] = provenance

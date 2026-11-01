@@ -22,6 +22,7 @@ def test_input_category_discovery_runs_all_exported_rules_once():
         input_checks.ReferentialIntegrityRule,
         input_checks.ExpressionRule,
         input_checks.SqlAssertionRule,
+        input_checks.ApplicabilityRule,
     }
     assert len(found) == len(expected)
     assert set(found) == expected
@@ -35,8 +36,12 @@ def test_input_category_discovery_runs_all_exported_rules_once():
         datasets={
             "child": {
                 "schema": {
-                    "columns": {"id": {"dtype": "int"}, "value": {"ge": 0}},
+                    "columns": {
+                        "id": {"dtype": "int", "na_values": ["N/A"]},
+                        "value": {"ge": 0, "na_values": ["N/A"]},
+                    },
                     "primary_key": ["id"],
+                    "na_groups": [["id", "value"]],
                 },
                 "foreign_keys": [{"columns": ["id"], "ref_dataset": "parent"}],
                 "expressions": [{"expr": "value >= id"}],

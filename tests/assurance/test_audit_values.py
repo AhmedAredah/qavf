@@ -66,10 +66,6 @@ def test_pandas_zoned_microseconds_preserve_zone_fold_and_instant(fold):
     "value,reason",
     [
         (pd.NaT, "NaT is ambiguous"),
-        (
-            pd.Timestamp("2026-01-01T00:00:00.000000001", tz="America/New_York"),
-            "timezone and nanosecond precision",
-        ),
     ],
 )
 def test_unsupported_temporals_fail_before_persisting_lossy_values(value, reason):
@@ -103,3 +99,43 @@ def test_report_snapshot_round_trip_keeps_pandas_nanosecond_evidence():
         assert payload["stamp"].astype("int64") == 1
         assert payload["duration"].astype("int64") == 1
         assert canonical_digest(payload) == canonical_digest(values)
+
+
+@pytest.mark.parametrize("fold", [0, 1])
+def test_zoned_nanoseconds_preserve_instant_zone_and_fold_without_pandas_on_decode(
+    fold, monkeypatch
+):
+    from qavf._audit_temporal import ZonedNanosecondTimestamp
+
+    local = datetime(2026, 11, 1, 1, 30, tzinfo=ZoneInfo("America/New_York"), fold=fold)
+    value = pd.Timestamp(local) + pd.Timedelta(1, unit="ns")
+    encoded = encode_audit(value)
+    streamed = json.loads(b"".join(iter_audit_json(value)))
+    expected_ticks, expected_text = value.value, value.isoformat()
+    monkeypatch.delitem(sys.modules, "pandas")
+    for representation in (encoded, streamed):
+        restored = decode_audit(representation)
+        assert isinstance(restored, ZonedNanosecondTimestamp)
+        assert restored.utc_nanoseconds == expected_ticks
+        assert restored.isoformat() == expected_text
+        assert restored.tzinfo.key == "America/New_York" and restored.fold == fold
+        assert encode_audit(restored) == encoded
+
+
+def test_zoned_nanosecond_report_snapshot_round_trip():
+    value = pd.Timestamp("2024-01-01T00:00:00.123456789", tz="America/New_York")
+    result = RuleResult(
+        rule_id="AUDIT-001",
+        name="audit",
+        description="exact aware timestamp",
+        category="assurance",
+        status="FAIL",
+        severity="ERROR",
+        message="nanosecond evidence",
+        metrics={"stamp": value},
+        affected_records=[{"stamp": value}],
+    )
+    restored = RuleResult.model_validate_json(result.model_dump_json())
+    assert restored.metrics["stamp"].utc_nanoseconds == value.value
+    assert restored.affected_records[0]["stamp"].isoformat() == value.isoformat()
+    assert canonical_digest(restored.metrics) == canonical_digest(result.metrics)

@@ -21,11 +21,12 @@ import duckdb
 
 from qavf.redaction import redact_text
 from qavf.sources.base import RejectedRows, SourceEnvironment, SourceError, TypeViolations
+from qavf.sources.csv_diagnostics import CsvIssue
 from qavf.sources.errors import redacted_error
 from qavf.sources.formats import GLOB_PATTERN
 from qavf.sources.native import connect
 from qavf.sources.sql import quote_identifier, sql_literal
-from qavf.text_types import TextType, sql_stripped, sql_value
+from qavf.text_types import TextType, sql_prepared, sql_value
 
 REJECTED_SAMPLE = 100
 """Failing lines or values located per file or column, for messages and evidence."""
@@ -158,14 +159,16 @@ class TypedColumns:
     def wrap(self, sql: str, available: Sequence[str]) -> str:
         """``sql`` with each declared column replaced by its converted value.
 
-        Each column is stripped once, in an inner projection: DuckDB evaluates a
+        Each column is prepared once, in an inner projection: DuckDB evaluates a
         repeated expression again at every reference.
         """
         q = quote_identifier
         if not available or not self.columns.keys() <= set(available):
             raise SourceError("cannot establish the complete CSV conversion column namespace")
         stripped = self._stripped_names(available)
-        strips = ", ".join(f"{sql_stripped(q(c))} AS {q(stripped[c])}" for c in self.columns)
+        strips = ", ".join(
+            f"{sql_prepared(q(c), self.columns[c])} AS {q(stripped[c])}" for c in self.columns
+        )
         converted = {
             c: sql_value(q(c), text, q(stripped[c]))[0] for c, text in self.columns.items()
         }
@@ -225,7 +228,9 @@ class TypedColumns:
     def _text(self, stripped: Mapping[str, str], shown: list[str]) -> str:
         q = quote_identifier
         columns = [q(c) for c in dict.fromkeys([*self.columns, *shown])]
-        columns += [f"{sql_stripped(q(c))} AS {q(stripped[c])}" for c in self.columns]
+        columns += [
+            f"{sql_prepared(q(c), self.columns[c])} AS {q(stripped[c])}" for c in self.columns
+        ]
         return f"SELECT {', '.join(columns)}"
 
     def _invalid(self, column: str, stripped: Mapping[str, str]) -> str:
@@ -381,6 +386,31 @@ class ReadFailure:
             f"{self.source}: the reader could not detect the CSV layout (delimiter, quoting, "
             "header) from its first rows, often because an early line has extra or missing "
             "fields. Set options {delim: ','} (and quote or header) so the line can be located"
+        )
+
+    def structural(self, issue: CsvIssue, rejected: RejectedRows | None) -> SourceError:
+        """Use physical line positions from the failed-input diagnostic reader."""
+        if rejected is None or not rejected.sample:
+            return SourceError(redact_text(issue.message(self.source)))
+        count = f"{rejected.count:,}" if rejected.exact else f"at least {rejected.count:,}"
+        rows = "row" if rejected.exact and rejected.count == 1 else "rows"
+        where = f"CSV row {issue.row:,}, line {issue.line:,}"
+        if issue.end_line > issue.line:
+            where += f" through line {issue.end_line:,}"
+        if self.source != redact_text(issue.file):
+            where += f" of {redact_text(issue.file)}"
+        if issue.code == "UNTERMINATED QUOTE":
+            detail = "The quoted field is unterminated: its closing quote is missing."
+        elif issue.expected is not None:
+            detail = f"Expected {issue.expected} fields, found {issue.actual}."
+        else:
+            detail = "A delimiter or record terminator must follow a closing quote."
+        advice = self._ADVICE.get(issue.code, "")
+        return SourceError(
+            redact_text(
+                f"{count} {rows} of {self.source} cannot be read. The first is {where} "
+                f"({issue.code.lower()}): {issue.text!r}. {detail} {advice}"
+            ).rstrip(" .")
         )
 
     def located(self, rejected: RejectedRows) -> SourceError:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,20 @@ import polars as pl
 from qavf.engine.registry import Finding
 from qavf.settings import COLUMN_CONSTRAINTS, ROW_CONSTRAINTS, ColumnCheck, ColumnSpec, SchemaSpec
 from qavf.value_policy import is_text
+
+
+def require_statistic_population(statistics: Iterable[str], usable: int) -> None:
+    """Undefined numeric statistics are unassessed, never fabricated violations.
+
+    Invoke after the real reduction; zero-row binder preflights are not data.
+    Empty distinct cardinality remains a defined count of zero.
+    """
+    for name in sorted(statistics):
+        minimum = 2 if name == "std" else 0 if name == "distinct_count" else 1
+        if usable < minimum:
+            raise ValueError(
+                f"{name} is undefined: {usable} usable value(s), at least {minimum} required"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +55,13 @@ class ColumnPlan:
         """Only this contract, for projected fallback through the eager kernel."""
         raw = self.spec.model_dump()
         defaults = ColumnSpec().model_dump()
-        for name in (*ROW_CONSTRAINTS, *COLUMN_CONSTRAINTS, "normalize"):
+        for name in (
+            *ROW_CONSTRAINTS,
+            *COLUMN_CONSTRAINTS,
+            "normalize",
+            "convert_options",
+            "each_allowed_once",
+        ):
             raw[name] = defaults[name]
         raw.update(
             checks=[],

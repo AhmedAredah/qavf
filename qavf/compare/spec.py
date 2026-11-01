@@ -22,7 +22,7 @@ from qavf.inference.decision import DEFAULT_ALPHA, DEFAULT_POLICY
 from qavf.inference.resampling import DEFAULT_MAX_WORK, DEFAULT_SEED
 from qavf.inference.results import Correction, DecisionPolicy
 from qavf.rules.regression_checks import ColumnTolerance
-from qavf.settings import DType, NumericBound, _check_where
+from qavf.settings import DType, NumericBound
 
 Side = Literal["baseline", "candidate"]
 SideSelection = Literal["baseline", "candidate", "both"]
@@ -33,6 +33,16 @@ DEFAULT_LEVELS = ("structure", "coverage", "records")
 
 def _repeated(values: list[str] | tuple[str, ...]) -> list[str]:
     return sorted(value for value, count in Counter(values).items() if count > 1)
+
+
+def _check_where(condition: str, what: str = "where condition") -> None:
+    """Comparison alignment explicitly executes in Polars, so bind that dialect."""
+    import polars as pl
+
+    try:
+        pl.sql_expr(condition)
+    except Exception as exc:
+        raise ValueError(f"invalid {what} {condition!r}: {exc}") from exc
 
 
 class CastSpec(RuleParams):

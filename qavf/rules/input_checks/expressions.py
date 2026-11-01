@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from typing import ClassVar
+from dataclasses import replace
+from typing import Any, ClassVar
 
 import polars as pl
 
@@ -60,6 +61,7 @@ class ExpressionRule(_SelectsDatasets):
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         failures: list[Finding] = []
         passed: list[str] = []
+        identities: list[dict[str, Any]] = []
         known_unavailable = ctx.unavailable()
         for dataset, spec in ctx.specs.items():
             selection = self.params.datasets
@@ -75,7 +77,7 @@ class ExpressionRule(_SelectsDatasets):
                             f"Not assessed: {reason}.",
                             check=f"{dataset}: {expression.name or expression.expr}",
                             severity=expression.severity,
-                            datasets=(dataset,),
+                            **_expression_identity(dataset, expression),
                         )
                         for expression in spec.expressions
                     ]
@@ -93,30 +95,35 @@ class ExpressionRule(_SelectsDatasets):
                             f"on {dataset} could not read its input: {_reason(exc)}",
                             check=f"{dataset}: {expression.name or expression.expr}",
                             severity=expression.severity,
-                            datasets=(dataset,),
+                            **_expression_identity(dataset, expression),
                         )
                         for expression in spec.expressions
                     )
                     continue
-                found, successful = self._evaluate_observed(ctx, dataset, rows, observed)
+                found, successful, assessed = self._evaluate_observed(ctx, dataset, rows, observed)
                 failures.extend(found)
                 passed.extend(successful)
+                identities.extend(assessed)
         return outcome(
             failures,
             passed,
             f"{plural(len(passed), 'row expression')} hold.",
             "No row expressions are configured.",
+            check_id="row.expression.summary",
+            checks=tuple(identities),
         )
 
     @staticmethod
     def _evaluate_observed(
         ctx: DataContext, dataset: str, rows: int, observed: Observation
-    ) -> tuple[list[Finding], list[str]]:
+    ) -> tuple[list[Finding], list[str], list[dict[str, Any]]]:
         failures: list[Finding] = []
         passed: list[str] = []
+        identities: list[dict[str, Any]] = []
         table = quote_identifier(dataset)
         located = ViolatingRows(ctx, dataset, observed)
         for expression in ctx.specs[dataset].expressions:
+            identity = _expression_identity(dataset, expression)
             label = expression.name or expression.expr
             fallback = "true" if expression.null_as == "pass" else "false"
             condition = f"NOT coalesce(({expression.expr}), {fallback})"
@@ -134,12 +141,13 @@ class ExpressionRule(_SelectsDatasets):
                         f"evaluated: {_reason(exc)}",
                         check=f"{dataset}: {label}",
                         severity=expression.severity,
-                        datasets=(dataset,),
+                        **identity,
                     )
                 )
                 continue
             if not count:
                 passed.append(f"{dataset}: {label}")
+                identities.append(identity)
                 continue
             bad = located.sample(condition, bad)
             failures.append(
@@ -152,10 +160,19 @@ class ExpressionRule(_SelectsDatasets):
                     affected_count=count,
                     total_records=rows,
                     unit="rows",
-                    datasets=(dataset,),
+                    **identity,
                 )
             )
-        return failures, passed
+        return failures, passed, identities
+
+
+def _expression_identity(dataset: str, expression: Any) -> dict[str, Any]:
+    """Keep the configured contract with its result; labels need not be unique."""
+    return {
+        "check_id": "row.expression",
+        "datasets": (dataset,),
+        "parameters": expression.model_dump(mode="python"),
+    }
 
 
 class ViolatingRows:
@@ -260,8 +277,29 @@ class SqlAssertionRule(Rule):
                 )
             )
         return outcome(
-            failures,
+            [
+                replace(
+                    finding,
+                    check_id="sql.assertion",
+                    parameters=next(
+                        assertion.model_dump(mode="python")
+                        for assertion in ctx.assertions
+                        if assertion.name == finding.check
+                    ),
+                )
+                for finding in failures
+            ],
             passed,
             f"{plural(len(passed), 'SQL assertion')} hold.",
             "No SQL assertions are configured.",
+            check_id="sql.assertion.summary",
+            checks=tuple(
+                {
+                    "check_id": "sql.assertion",
+                    "scope": "run",
+                    "parameters": assertion.model_dump(mode="python"),
+                }
+                for assertion in ctx.assertions
+                if assertion.name in passed
+            ),
         )

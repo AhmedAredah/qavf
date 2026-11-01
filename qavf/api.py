@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from qavf.engine.runner import QARunner
-from qavf.inputs.normalize import Configuration, prepare
-from qavf.inputs.resources import ResourceLimits
-from qavf.profiles import ProfileName, apply_profile
-from qavf.reports.models import QAReport
-from qavf.settings import SchemaSpec
+if TYPE_CHECKING:
+    from qavf.inputs.normalize import Configuration
+    from qavf.inputs.resources import ResourceLimits
+    from qavf.profiles import ProfileName
+    from qavf.reports.models import QAReport
+    from qavf.settings import SchemaSpec
 
 
 def validate(
@@ -20,6 +20,7 @@ def validate(
     config: Configuration = None,
     resources: ResourceLimits | None = None,
     profile: ProfileName | None = None,
+    backend: str = "auto",
 ) -> QAReport:
     """Validate explicit contracts and return a report without writing files.
 
@@ -30,7 +31,30 @@ def validate(
     Lazy frames, deferred loaders and caller-owned handles keep their ownership.
     ``profile`` explicitly combines declared validity checks with configured
     regression or change analysis; it never infers acceptance limits.
+
+    ``backend="auto"`` preserves the full engine when Polars is installed and
+    otherwise uses the DuckDB/Arrow core. ``"duckdb"`` explicitly selects that
+    core; ``"polars"`` requires the optional extra. Unsupported configured core
+    capabilities raise an actionable optional-dependency error before execution.
     """
+    from qavf.optional import has_polars
+
+    if backend not in ("auto", "duckdb", "polars"):
+        raise ValueError("backend must be 'auto', 'duckdb', or 'polars'")
+    if backend == "polars":
+        from qavf.optional import require_polars
+
+        require_polars("backend='polars'")
+    if backend == "duckdb" or not has_polars():
+        from qavf.core.runner import validate_core
+
+        return validate_core(
+            data, schema=schema, config=config, resources=resources, profile=profile
+        )
+    from qavf.engine.runner import QARunner
+    from qavf.inputs.normalize import prepare
+    from qavf.profiles import apply_profile
+
     if profile is None:
         settings, frames = prepare(data, schema=schema, config=config, resources=resources)
     else:

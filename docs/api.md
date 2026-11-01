@@ -279,6 +279,11 @@ contract and keeps every explicitly configured check. It does not learn limits
 from the same data being assessed. Conflicting disabled checks or category
 filters are configuration errors.
 
+Columns can declare valid `na_values` tokens separately from missing values.
+`schema.na_groups` adds all-or-none N/A consistency across column groups; the
+validity profile then enables INP-009. See [applicability](applicability.md) for
+population, nullability, normalization, and evidence semantics.
+
 `profile="regression"` also requires enabled `REG-001` with `baselines`;
 `profile="change"` requires enabled `CMP-001` with `comparisons`. Both include
 the declared input checks. Expanded checks appear in the effective configuration

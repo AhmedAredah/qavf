@@ -122,6 +122,12 @@ class Finding:
     limit); shown next to the rule id in reports."""
     severity: Severity | None = None
     """Overrides the rule's severity for this finding (per-check severities)."""
+    check_id: str | None = field(default=None, kw_only=True)
+    """Stable machine-readable check kind, independent of its display label."""
+    columns: tuple[str, ...] = field(default=(), kw_only=True)
+    parameters: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    checks: tuple[Mapping[str, Any], ...] = field(default=(), kw_only=True)
+    """Structured identities of checks combined into this finding (e.g. passes)."""
 
     def __post_init__(self) -> None:
         """Reject ambiguous plugin outcomes before the engine interprets them.
@@ -134,6 +140,10 @@ class Finding:
             not isinstance(self.row_column, str) or not self.row_column
         ):
             raise TypeError("Finding.row_column must be a nonempty string or None")
+        if self.check_id is not None and (not isinstance(self.check_id, str) or not self.check_id):
+            raise TypeError("Finding.check_id must be a nonempty string or None")
+        if not all(isinstance(column, str) and column for column in self.columns):
+            raise TypeError("Finding.columns must contain nonempty column names")
         for name in ("passed", "skipped", "assessed", "affected_count_exact"):
             if not isinstance(getattr(self, name), bool):
                 raise TypeError(f"Finding.{name} must be a boolean")

@@ -17,7 +17,9 @@ if TYPE_CHECKING:
     from qavf.regression.models import ComparisonResult
 
 
-def validate_isolated(settings: QAVFSettings, frames: Mapping[str, Any] | None) -> QAReport:
+def validate_isolated(
+    settings: QAVFSettings, frames: Mapping[str, Any] | None, *, backend: str = "polars"
+) -> QAReport:
     from qavf.execution.supervisor import execute
 
     inputs = isolated_inputs(frames or {}, settings)
@@ -25,7 +27,7 @@ def validate_isolated(settings: QAVFSettings, frames: Mapping[str, Any] | None) 
         raise ValueError("pass file inputs to validate() or configure them under datasets")
     if not set(inputs) <= settings.datasets.keys():
         raise ValueError("isolated Query input names must be configured datasets")
-    data, _ = execute(settings, request_bytes(settings, inputs))
+    data, _ = execute(settings, request_bytes(settings, inputs, {"backend": backend}))
     try:
         return QAReport.model_validate_json(data)
     except (ValueError, TypeError) as exc:

@@ -690,10 +690,12 @@ def report_views(
     report: QAReport, limits: HtmlLimits | None = None, *, budget: ChartBudget | None = None
 ) -> list[ComparisonView]:
     """The comparison sections of a report: one per comparison of its ``CMP-001`` results."""
+    found = [r for r in report.results if r.rule_id == "CMP-001" and r.check]
+    if not found:
+        return []
     from qavf.compare.results import DatasetComparison
 
     budget = budget if budget is not None else ChartBudget(limits or HtmlLimits())
-    found = [r for r in report.results if r.rule_id == "CMP-001" and r.check]
     views: list[ComparisonView] = []
     covered: list[str] = []
     for result in found:

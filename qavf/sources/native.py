@@ -6,10 +6,12 @@ import logging
 import threading
 import uuid
 from collections.abc import Iterable, Mapping
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import duckdb
-import polars as pl
+
+if TYPE_CHECKING:
+    import polars as pl
 
 from qavf.redaction import redact_text
 from qavf.sources.base import ConnectionBudget, SourceEnvironment, SourceError, SourceNotFoundError
@@ -185,52 +187,62 @@ def connect(
             con.execute(f"SET temp_directory = {sql_literal(str(location))}")
         if spill_bytes is not None:
             con.execute(f"SET max_temp_directory_size = {sql_literal(str(spill_bytes) + 'B')}")
-        for name, secret in env.secrets.items():
-            try:
-                for statement in create_secret_statements(name, secret):
-                    con.execute(statement)
-            except duckdb.Error as exc:
-                # The statement carries credentials: report only the redacted
-                # native error, never the SQL that failed.
-                error = redacted_error(exc)
-                if secret.provider == "credential_chain" and secret.chain is None:
-                    # Newer DuckDB validates the chain on creation. Without
-                    # credentials, only reads that need this secret can fail;
-                    # unrelated local datasets on the connection still load.
-                    # An explicitly selected chain must fail instead of silently
-                    # falling back to a different account-discovery policy.
-                    logger.warning(
-                        "storage secret %r found no usable credentials: %s",
-                        redact_text(name),
-                        error,
-                    )
-                    continue
-                raise SourceError(
-                    f"could not create storage secret {redact_text(name)!r}: {error}"
-                ) from None
-        for name in dict.fromkeys(attach):
-            spec = env.connections.get(name)
-            if spec is None:
-                raise SourceError(f"unknown connection {name!r}; define it under 'connections'")
-            if spec.file_based and spec.read_only and not env.resolve(str(spec.path)).exists():
-                raise SourceNotFoundError(
-                    f"database file of connection {name!r} not found: {env.resolve(str(spec.path))}"
-                )
-            try:
-                con.execute(spec.attach_sql(name, env))
-            except duckdb.Error as exc:
-                # Classify the native exception before adding context: wrapping
-                # it first would erase HTTP status/type information used by the
-                # shared retry policy.
-                error = redacted_error(exc)
-                raise SourceError(
-                    f"could not attach connection {redact_text(name)!r}: {error}",
-                    retryable=error.retryable,
-                ) from None
+        configure_sources(con, env, attach)
+        if env.text_functions:
+            from qavf.text_policies import register_sql_functions
+
+            register_sql_functions(con)
         return con
     except BaseException:
         con.close()
         raise
+
+
+def configure_sources(con, env: SourceEnvironment, attach: Iterable[str] = ()) -> None:
+    """Configure credentials and named attachments on an already owned handle."""
+    validate_secret_scopes(env.secrets)
+    for name, secret in env.secrets.items():
+        try:
+            for statement in create_secret_statements(name, secret):
+                con.execute(statement)
+        except duckdb.Error as exc:
+            # The statement carries credentials: report only the redacted
+            # native error, never the SQL that failed.
+            error = redacted_error(exc)
+            if secret.provider == "credential_chain" and secret.chain is None:
+                # Newer DuckDB validates the chain on creation. Without
+                # credentials, only reads that need this secret can fail;
+                # unrelated local datasets on the connection still load.
+                # An explicitly selected chain must fail instead of silently
+                # falling back to a different account-discovery policy.
+                logger.warning(
+                    "storage secret %r found no usable credentials: %s",
+                    redact_text(name),
+                    error,
+                )
+                continue
+            raise SourceError(
+                f"could not create storage secret {redact_text(name)!r}: {error}"
+            ) from None
+    for name in dict.fromkeys(attach):
+        spec = env.connections.get(name)
+        if spec is None:
+            raise SourceError(f"unknown connection {name!r}; define it under 'connections'")
+        if spec.file_based and spec.read_only and not env.resolve(str(spec.path)).exists():
+            raise SourceNotFoundError(
+                f"database file of connection {name!r} not found: {env.resolve(str(spec.path))}"
+            )
+        try:
+            con.execute(spec.attach_sql(name, env))
+        except duckdb.Error as exc:
+            # Classify the native exception before adding context: wrapping
+            # it first would erase HTTP status/type information used by the
+            # shared retry policy.
+            error = redacted_error(exc)
+            raise SourceError(
+                f"could not attach connection {redact_text(name)!r}: {error}",
+                retryable=error.retryable,
+            ) from None
 
 
 def fetch(

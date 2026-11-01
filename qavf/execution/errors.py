@@ -1,6 +1,6 @@
 """Explicit failures of the supervised execution contract."""
 
-from qavf.engine.resources import ResourceLimitError
+from qavf.resource_errors import ResourceLimitError
 
 
 class ExecutionLimitError(ResourceLimitError):
