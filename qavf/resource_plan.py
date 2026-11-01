@@ -52,6 +52,41 @@ def _windows_available_memory() -> int | None:
     return None
 
 
+def _macos_physical_memory() -> int | None:
+    """Physical memory on macOS, or ``None`` when it cannot be read.
+
+    macOS reports no "available" figure; DuckDB's own default memory limit is
+    likewise derived from physical memory.
+    """
+    if sys.platform == "win32":
+        return None
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
+def _proc_available_memory() -> int | None:
+    """``MemAvailable`` from Linux ``/proc/meminfo``, or ``None``."""
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _sysconf_available_memory() -> int | None:
+    """Free physical pages reported by ``sysconf``, or ``None`` where unsupported."""
+    if sys.platform == "win32":
+        return None
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
 def _available_memory() -> int | None:
     """Conservative host/container allowance, without importing psutil.
 
@@ -59,23 +94,16 @@ def _available_memory() -> int | None:
     imposed, rather than derived from a guess.
     """
     candidates: list[int] = []
-    if sys.platform == "win32" and (windows := _windows_available_memory()) is not None:
-        candidates.append(windows)
-    try:
-        available = next(
-            (
-                int(line.split()[1]) * 1024
-                for line in Path("/proc/meminfo").read_text().splitlines()
-                if line.startswith("MemAvailable:")
-            ),
-            None,
-        )
-        if available is None and sys.platform != "win32":
-            available = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
-        if available is not None:
-            candidates.append(available)
-    except (ValueError, OSError, AttributeError):
-        pass
+    if sys.platform == "win32":
+        host = _windows_available_memory()
+    elif sys.platform == "darwin":
+        host = _macos_physical_memory()
+    else:
+        host = _proc_available_memory()
+        if host is None:
+            host = _sysconf_available_memory()
+    if host is not None:
+        candidates.append(host)
     for maximum, current in (
         ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
         (

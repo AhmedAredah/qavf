@@ -6,6 +6,24 @@ import importlib.util
 import platform
 from typing import Any
 
+# Tests of one host's own memory API: skipped, as intended, everywhere else.
+# Maps (node, skip reason) to the hosts on which the skip is not accepted.
+_HOST_ONLY_TESTS: dict[tuple[str, str], set[str]] = {
+    (
+        "tests/test_resource_planning.py::test_windows_reports_available_memory",
+        "Windows memory API",
+    ): {"Windows"},
+    (
+        "tests/test_resource_planning.py::"
+        "test_cgroup_reclaimable_cache_is_not_treated_as_live_allocations",
+        "Linux /proc and cgroup files",
+    ): {"Linux"},
+    (
+        "tests/test_resource_planning.py::test_macos_reports_physical_memory",
+        "macOS physical memory",
+    ): {"Darwin"},
+}
+
 
 def accepted_skip(nodeid: str, reason: str, env: dict[str, Any] | None = None) -> bool:
     """Extensions and live services are deliberately absent from this allowlist."""
@@ -24,6 +42,8 @@ def accepted_skip(nodeid: str, reason: str, env: dict[str, Any] | None = None) -
         and system in {"Linux", "Darwin"}
     ):
         return True
+    if (nodeid, reason) in _HOST_ONLY_TESTS:
+        return system not in _HOST_ONLY_TESTS[nodeid, reason]
     if nodeid.startswith("tests/test_isolated_supervisor.py::test_") and (
         reason,
         system,

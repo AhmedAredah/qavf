@@ -434,3 +434,18 @@ def test_windows_benchmark_skip_requires_real_nonwindows_host():
     assert not accepted_skip(node, reason, {"system": "Windows"})
     assert not accepted_skip(node, "job creation unavailable", {"system": "Linux"})
     assert not accepted_skip(node + "_other", reason, {"system": "Linux"})
+
+
+def test_host_memory_api_skips_are_accepted_only_off_their_host():
+    windows = "tests/test_resource_planning.py::test_windows_reports_available_memory"
+    linux = (
+        "tests/test_resource_planning.py::"
+        "test_cgroup_reclaimable_cache_is_not_treated_as_live_allocations"
+    )
+    for system in ("Linux", "Darwin"):
+        assert accepted_skip(windows, "Windows memory API", {"system": system})
+    assert not accepted_skip(windows, "Windows memory API", {"system": "Windows"})
+    for system in ("Windows", "Darwin"):
+        assert accepted_skip(linux, "Linux /proc and cgroup files", {"system": system})
+    assert not accepted_skip(linux, "Linux /proc and cgroup files", {"system": "Linux"})
+    assert not accepted_skip(windows, "another reason", {"system": "Linux"})

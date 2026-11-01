@@ -202,3 +202,26 @@ def test_unknown_memory_imposes_no_automatic_cap(tmp_path, monkeypatch):
 def test_windows_reports_available_memory():
     available = _available_memory()
     assert available is not None and available > 0
+
+
+def _eight_gib() -> int:
+    return 8 * 1024**3
+
+
+def test_macos_budget_uses_physical_memory(monkeypatch):
+    monkeypatch.setattr("qavf.resource_plan.sys.platform", "darwin")
+    monkeypatch.setattr("qavf.resource_plan._macos_physical_memory", _eight_gib)
+    monkeypatch.setattr("qavf.resource_plan.Path.read_text", _missing_file)
+    assert _available_memory() == _eight_gib()
+
+
+def _missing_file(*_args, **_kwargs) -> str:
+    raise FileNotFoundError
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS physical memory")
+def test_macos_reports_physical_memory():
+    from qavf.resource_plan import _macos_physical_memory
+
+    memory = _macos_physical_memory()
+    assert memory is not None and memory > 0

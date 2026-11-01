@@ -4,6 +4,7 @@ import duckdb
 import pytest
 
 from qavf import Query, validate
+from qavf.duckdb_results import polars_frame
 from qavf.sources import SourceEnvironment, SourceRegistry
 
 from .contracts import assert_exact_contract, assert_unavailable, configuration, corpus
@@ -26,7 +27,7 @@ def test_s3_authenticated_query_preserves_values_and_verdicts(s3, clean):
         connection.execute("SET http_timeout=5")
         connection.execute("SET http_retries=0")
         connection.execute(s3.secret_sql)
-        actual = connection.execute("SELECT * FROM read_parquet(?)", [s3.uri(clean)]).pl()
+        actual = polars_frame(connection.execute("SELECT * FROM read_parquet(?)", [s3.uri(clean)]))
         assert actual.sort("ordinal").to_dicts() == corpus(clean).to_dicts()
         query = Query("SELECT * FROM read_parquet($path)", connection, {"path": s3.uri(clean)})
         assert_exact_contract(validate(query, config=configuration()), clean=clean)

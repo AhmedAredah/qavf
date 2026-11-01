@@ -19,7 +19,8 @@ All notable changes to this project are documented here. The format follows
 - Supports DuckDB 2.0 as well as 1.3.1 and later. QAVF 0.6.0 failed to read any
   dataset when installed with DuckDB 2.0.
 - Automatic resource planning uses input size, key widths and available memory and
-  disk; explicit limits still win.
+  disk on Linux, macOS and Windows; explicit limits still win, and no automatic
+  memory cap is set where memory cannot be read.
 
 ### Added
 
