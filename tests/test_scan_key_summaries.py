@@ -1,14 +1,21 @@
 """Related key summaries share work without collecting complete key tables."""
 
+from functools import partial
 from unittest.mock import patch
 
 import duckdb
 import polars as pl
 import pytest
 
+from qavf.duckdb_results import polars_frame
 from qavf.engine.context import DataContext
 from qavf.rules._execution import KeyRelation
 from qavf.rules._key_summary import KeySelection
+
+
+def _native_frame(native, sql, **_):
+    """Run ``sql`` on ``native`` as a stand-in for ``DataContext.sql``."""
+    return polars_frame(native.execute(sql))
 
 
 @pytest.mark.parametrize("key", ["__QAVF_SUMMARY_PADDING", "__QAVF_KEY_ROWS"])
@@ -24,7 +31,7 @@ def test_native_private_identifiers_do_not_shadow_case_variants(key):
             frame.schema,
             sql='SELECT * FROM "__QAVF_KEY_ROWS"',
         )
-        with patch.object(ctx, "sql", side_effect=lambda sql, **_: native.execute(sql).pl()):
+        with patch.object(ctx, "sql", side_effect=partial(_native_frame, native)):
             result = relation.summarize(2)
     assert (result.keys, result.rows, result.sample.height) == (3, 6, 2)
     assert result.sample.schema == frame.schema
@@ -62,7 +69,7 @@ def test_related_summaries_keep_exact_counts_and_bounded_samples(backend, values
 
         def sql(query, **_):
             calls.append(query)
-            return native.execute(query).pl()
+            return polars_frame(native.execute(query))
 
         def collect(_names, plan):
             calls.append(plan)
@@ -102,7 +109,7 @@ def test_native_batched_summaries_evaluate_grouped_input_once():
             {"key": pl.Int64(), "rows": pl.UInt64()},
             sql="SELECT observed(range) AS key, 2::UBIGINT AS rows FROM range(10)",
         )
-        with patch.object(ctx, "sql", side_effect=lambda sql, **_: native.execute(sql).pl()):
+        with patch.object(ctx, "sql", side_effect=partial(_native_frame, native)):
             result = relation.summarize_many(
                 {
                     "all": KeySelection(),
@@ -136,7 +143,7 @@ def test_summary_batch_bounds_query_width(backend):
 
         def sql(query, **_):
             calls.append(1)
-            return native.execute(query).pl()
+            return polars_frame(native.execute(query))
 
         def collect(_names, plan):
             calls.append(1)

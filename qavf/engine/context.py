@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 import polars as pl
 
+from qavf.duckdb_results import arrow_table, bind_relation, first_row, polars_frame
 from qavf.engine.capabilities import ReaderCapabilities
 from qavf.engine.catalog import DatasetCatalog
 from qavf.engine.cleanup import attempt_cleanup, raise_cleanup_errors
@@ -111,6 +112,31 @@ class _NativeStatement:
     def __call__(self) -> Callable[[SqlReadSession], Any]:
         """Return a fresh consumer for one native read attempt."""
         return operator.methodcaller(self._reader, self._statement)
+
+
+def _transaction_usable(con: Any) -> bool:
+    """Whether a snapshot transaction survived a failed member read."""
+    try:
+        con.execute("SELECT 1").fetchall()
+    except duckdb.Error:
+        return False
+    return True
+
+
+_PLANNING_ERRORS = (duckdb.BinderException, duckdb.CatalogException, duckdb.ParserException)
+
+
+def _failed_before_execution(exc: BaseException) -> bool:
+    """Whether a read failed while planning (binding, catalog lookup, parsing),
+    so no member data was produced or consumed."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, (*_PLANNING_ERRORS, SourceNotFoundError)):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class DataContext:
@@ -906,7 +932,7 @@ class DataContext:
                 relation = bind_scan(con, self._catalog.sources[name], plan)
                 budget = getattr(self._catalog.sources[name].params, "row_budget", None)
                 if budget is not None:
-                    count_row = relation.limit(budget + 1).aggregate("count(*)").fetchone()
+                    count_row = first_row(relation.limit(budget + 1).aggregate("count(*)"))
                     if count_row is not None and count_row[0] > budget:
                         raise SourceError(
                             f"dataset {name!r} has more than {budget:,} rows (row_budget)"
@@ -922,7 +948,7 @@ class DataContext:
                     relation = relation.project(projection)
                 if normalize_missing and prepared.width:
                     relation = relation.project(self.sql_missing_projection(name, prepared.schema))
-                relation.create_view(name, replace=True)
+                bind_relation(con, relation, name)
                 self._sql_connections.remember(name)
                 with self._lock:
                     self._catalog.record_native(
@@ -1081,9 +1107,11 @@ class DataContext:
     ) -> pl.DataFrame:
         """Execute SQL, retaining native source scans until result collection."""
         with self._sql_lease(query, datasets, normalize_missing=normalize_missing) as con:
-            result = con.execute(
-                resolve_sql_paths(query, self.env.base_dir, known_tables=self.declared())
-            ).pl()
+            result = polars_frame(
+                con.execute(
+                    resolve_sql_paths(query, self.env.base_dir, known_tables=self.declared())
+                )
+            )
         self._check_materialization("SQL result", result)
         self._check_cancelled()
         return result
@@ -1103,10 +1131,7 @@ class DataContext:
                 sample, count = BoundedSample(limit).read(con, resolved, self._check_cancelled)
             else:
                 result = con.execute(sample_statement(resolved, limit, ordered=True))
-                # Newer DuckDB deprecates fetch_arrow_table; older releases
-                # lack to_arrow_table.
-                fetch = getattr(result, "to_arrow_table", None) or result.fetch_arrow_table
-                sample, count = sample_result(fetch())
+                sample, count = sample_result(arrow_table(result))
         self._check_cancelled()
         self._check_materialization("SQL evidence sample", sample)
         return sample, count
@@ -1676,50 +1701,64 @@ class DataContext:
         for name in members:
             merge_connection_binding(bindings, connection, self._catalog.sources[name].env)
             merge_secret_bindings(secrets, self._catalog.sources[name].env)
-        staged: dict[str, pl.DataFrame] = {}
         failures: dict[str, SourceError] = {}
-        staged_bytes = 0
+        pending = list(members)
         with self._sql_connections.temporary([connection], bindings, secrets) as con:
-            started_at = datetime.now(UTC)
-            try:
-                con.execute("BEGIN TRANSACTION")
-                for name in members:
-                    self._check_cancelled()
-                    try:
-                        source = self._catalog.sources[name]
-                        frame = collect_result(source.read(con), source.params.row_budget)
-                    except Exception as exc:
-                        error = exc if isinstance(exc, SourceError) else redacted_error(exc)
-                        if isinstance(error, SourceIntegrityError) or error.retryable:
-                            raise error from None
-                        # A permanent binder/catalog failure may leave the transaction
-                        # healthy; an aborted execution cannot publish other members.
-                        con.execute("SELECT 1")
-                        failures[name] = redacted_error(
-                            error,
-                            SourceNotFoundError
-                            if isinstance(error, SourceNotFoundError)
-                            else SourceError,
-                        )
-                        continue
-                    budget = self._catalog.sources[name].params.row_budget
-                    if budget is not None and frame.height > budget:
-                        raise SourceError(
-                            f"dataset {name!r} has more than {budget:,} rows (row_budget)"
-                        )
-                    staged_bytes += retained_size(frame)
-                    target = self._resources.memory_bytes
-                    if target is not None and staged_bytes > target:
-                        raise ResourceLimitError(
-                            f"snapshot {connection!r} exceeds memory_budget_bytes={target}"
-                        )
-                    staged[name] = self._catalog.prepare(name, frame)
-                con.execute("COMMIT")
-                return staged, failures, started_at
-            except BaseException:
+            # A permanent member failure that aborts the transaction (DuckDB 2.0
+            # aborts on binder errors) restarts the read without that member, so
+            # every published member still comes from one transaction.
+            while True:
+                staged: dict[str, pl.DataFrame] = {}
+                staged_bytes = 0
+                aborted = False
+                started_at = datetime.now(UTC)
+                try:
+                    con.execute("BEGIN TRANSACTION")
+                    for name in pending:
+                        self._check_cancelled()
+                        try:
+                            source = self._catalog.sources[name]
+                            frame = collect_result(source.read(con), source.params.row_budget)
+                        except Exception as exc:
+                            error = exc if isinstance(exc, SourceError) else redacted_error(exc)
+                            if isinstance(error, SourceIntegrityError) or error.retryable:
+                                raise error from None
+                            failures[name] = redacted_error(
+                                error,
+                                SourceNotFoundError
+                                if isinstance(error, SourceNotFoundError)
+                                else SourceError,
+                            )
+                            if not _transaction_usable(con):
+                                # DuckDB 2.0 aborts on binder errors too; only a
+                                # failure before execution may restart without it.
+                                if not _failed_before_execution(exc):
+                                    raise failures.pop(name) from None
+                                aborted = True
+                                break
+                            continue
+                        budget = self._catalog.sources[name].params.row_budget
+                        if budget is not None and frame.height > budget:
+                            raise SourceError(
+                                f"dataset {name!r} has more than {budget:,} rows (row_budget)"
+                            )
+                        staged_bytes += retained_size(frame)
+                        target = self._resources.memory_bytes
+                        if target is not None and staged_bytes > target:
+                            raise ResourceLimitError(
+                                f"snapshot {connection!r} exceeds memory_budget_bytes={target}"
+                            )
+                        staged[name] = self._catalog.prepare(name, frame)
+                    if not aborted:
+                        con.execute("COMMIT")
+                        return staged, failures, started_at
+                except BaseException:
+                    with contextlib.suppress(duckdb.Error):
+                        con.rollback()
+                    raise
                 with contextlib.suppress(duckdb.Error):
                     con.rollback()
-                raise
+                pending = [name for name in pending if name not in failures]
 
     def _cached(self, name: str) -> pl.DataFrame | None:
         """The loaded frame (as a clone), ``None`` if not loaded; raises for a recorded failure."""

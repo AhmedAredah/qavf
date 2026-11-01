@@ -22,6 +22,7 @@ from qavf.core.admission import (
     eager_columns,
     eager_rows,
 )
+from qavf.duckdb_results import arrow_table, settle
 from qavf.inputs.descriptors import BatchSource, File, Loader, Query
 from qavf.optional import unsupported
 from qavf.sources.base import SourceError, SourceIntegrityError, SourceNotFoundError
@@ -250,12 +251,14 @@ class InputReader:
                     if self.projections.get(name) is not None:
                         fields = ", ".join(qi(source) for source, _ in projected.selected)
                         relation = relation.project(fields or "1 AS __qavf_empty_projection")
-                    eager = relation.fetch_arrow_table()
+                    eager = arrow_table(relation)
                     self._check_budget(name, eager.num_rows, budget)
+                    settle(con)
                     con.register(table + "_arrow", eager)
                     owned.append(("registered", table + "_arrow"))
                     sql = f"SELECT * FROM {qi(table + '_arrow')}"
                 else:
+                    settle(con)
                     rel = con.sql(query, params=parameters)
                     SourceNames.validate(rel.columns)
                     rel.create_view(table + "_query")
@@ -278,6 +281,7 @@ class InputReader:
                     metadata["temporal_normalization"] = temporal
                     self._check_budget(name, eager_rows(value), budget)
                 try:
+                    settle(con)
                     con.register(table + "_arrow", value)
                 except (duckdb.Error, TypeError) as exc:
                     raise TypeError(
@@ -325,6 +329,7 @@ class InputReader:
         legacy_schema = not isinstance(value.schema, pa.Schema)
         empty = pa.Table.from_batches([], schema=native_schema)
         registration = table + "_batch"
+        settle(self.connection)
         self.connection.register(registration, empty)
         owned.append(("registered", registration))
         desc = self.connection.execute(f"DESCRIBE {qi(registration)}").fetchall()
@@ -364,6 +369,7 @@ class InputReader:
                     self._check_budget(name, rows + frame.num_rows, budget)
                     if temporal:
                         frame = frame.cast(native_schema, safe=True)
+                    settle(self.connection)
                     self.connection.register(registration, frame)
                     self.connection.execute(
                         f"INSERT INTO {qi(table)} SELECT row_number() OVER () - 1 + {rows} "
@@ -376,6 +382,7 @@ class InputReader:
                 raise
         if failure is not None:
             raise failure
+        settle(self.connection)
         self.connection.unregister(registration)
         owned.remove(("registered", registration))
         metadata["source"] = "BatchSource"
@@ -530,6 +537,7 @@ class InputReader:
         for kind, name in reversed(owned):
             try:
                 if kind == "registered":
+                    settle(self.connection)
                     self.connection.unregister(name)
                 else:
                     self.connection.execute(f"DROP {kind} IF EXISTS {qi(name)}")

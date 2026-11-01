@@ -42,6 +42,7 @@ import duckdb
 import polars as pl
 from pydantic import Field
 
+from qavf.duckdb_results import settle
 from qavf.engine.registry import RuleParams
 from qavf.rules.helpers import fresh_internal, plural
 from qavf.sources.sql import quote_identifier
@@ -157,6 +158,7 @@ def _located(
     except duckdb.Error as exc:
         raise ValueError(f"points cannot be placed: {str(exc).splitlines()[0]}") from None
     finally:
+        settle(con)
         con.unregister(points)
 
 

@@ -10,6 +10,7 @@ from uuid import uuid4
 import polars as pl
 import pyarrow as pa
 
+from qavf.duckdb_results import settle
 from qavf.engine.sql import BoundedSample, check_sql_columns
 from qavf.missingness import normalize_frame
 from qavf.sources.base import SourceError
@@ -81,6 +82,7 @@ def sample_observed(
                 )
                 readers.callback(reader.close)
                 alias = "__qavf_observation_" + uuid4().hex
+                settle(con)
                 con.register(alias, reader)
                 ctx._sql_connections.remember(alias)
                 # A query may scan its input more than once (self-subqueries,

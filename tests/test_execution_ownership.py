@@ -467,7 +467,7 @@ def test_cancelled_owned_file_relation_checks_deferred_consumers(tmp_path, opera
             relation = bind_scan(connection, source, source.scan())
             # Capture terminal methods before cancellation, after lazy transforms.
             if operation == "budget_count":
-                consume = relation.limit(5).aggregate("count(*)").fetchone
+                consume = relation.limit(5).aggregate("count(*)").fetchall
             elif operation == "schema":
                 consume = relation.limit(0).pl
             elif operation == "create_view":

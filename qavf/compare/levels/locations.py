@@ -37,6 +37,7 @@ from qavf.compare.levels import (
     register_level,
 )
 from qavf.compare.results import CheckResult, LevelResult, LocationsResult
+from qavf.duckdb_results import settle
 from qavf.engine.registry import RuleParams
 from qavf.keys import FLOAT_EXACT_LIMIT, key_casts
 from qavf.rules.helpers import fresh_internal, plural
@@ -268,6 +269,7 @@ class LocationsLevel(ComparisonLevel):
                     f"ST_Equals({a}, {b}) AS equal FROM qavf_pairs ORDER BY pid",
                 )
             finally:
+                settle(con)
                 con.unregister("qavf_pairs")
         measured = measured.with_columns(
             # A non-null WKB can still be empty or have no finite centroid.

@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 import duckdb
 import polars as pl
 
+from qavf.duckdb_results import polars_frame
 from qavf.settings import SourcePolicy
 from qavf.sources.base import DataSource, ScanPlan, SourceEnvironment, SourceError, SourceParams
 from qavf.sources.frames import admitted_frame
@@ -80,7 +81,7 @@ class _QueryInput(DataSource[SourceParams]):
             sql, parameters = normalize_sql_paths(
                 self.query.sql, self.env.base_dir, self.query.parameters
             )
-            frame = con.execute(budgeted(sql, self.params.row_budget), parameters).pl()
+            frame = polars_frame(con.execute(budgeted(sql, self.params.row_budget), parameters))
             return check_budget(frame, self.params.row_budget, self.describe())
 
     def load(self) -> pl.DataFrame:

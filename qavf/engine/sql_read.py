@@ -13,8 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import duckdb
 import polars as pl
 
+from qavf.duckdb_results import bind_relation, first_row, polars_frame, record_batch_reader
 from qavf.engine.connections import (
     Connection,
     SqlConnections,
@@ -106,7 +108,7 @@ class SqlReadSession:
 
     def frame(self, query: str) -> pl.DataFrame:
         """Collect a small metadata/reduction query within the materialization target."""
-        result = self._connection.execute(self._statement(query)).pl()
+        result = polars_frame(self._connection.execute(self._statement(query)))
         self._policy.check_materialization("SQL read result", result)
         self._policy.check_cancelled()
         return result
@@ -117,20 +119,22 @@ class SqlReadSession:
             raise ValueError("batch_rows must be a positive integer")
         statement = self._statement(query)
         query_result = self._connection.execute(statement)
-        reader = (
-            query_result.to_arrow_reader(batch_rows)
-            if hasattr(query_result, "to_arrow_reader")
-            else query_result.fetch_record_batch(batch_rows)
-        )
+        reader = record_batch_reader(query_result, batch_rows)
         self._readers[id(reader)] = reader
         exhausted = False
         try:
-            for batch in reader:
+            try:
+                for batch in reader:
+                    self._policy.check_cancelled()
+                    frame = pl.from_arrow(batch)
+                    assert isinstance(frame, pl.DataFrame)
+                    self._policy.check_materialization("SQL result batch", frame)
+                    yield frame
+            except (OSError, duckdb.Error):
+                # A cancelled rule interrupts the connection; DuckDB 2.0 reports
+                # that from the reader. Report the cancellation, not the interrupt.
                 self._policy.check_cancelled()
-                frame = pl.from_arrow(batch)
-                assert isinstance(frame, pl.DataFrame)
-                self._policy.check_materialization("SQL result batch", frame)
-                yield frame
+                raise
             exhausted = True
             self._policy.check_cancelled()
         finally:
@@ -213,7 +217,7 @@ def consume_native[T](
                 relation = bind_scan(connection, bindings_sources[name], plan)
                 budget = bindings_sources[name].params.row_budget
                 if budget is not None:
-                    row = relation.limit(budget + 1).aggregate("count(*)").fetchone()
+                    row = first_row(relation.limit(budget + 1).aggregate("count(*)"))
                     if row is not None and row[0] > budget:
                         raise SourceError(
                             f"dataset {name!r} has more than {budget:,} rows (row_budget)"
@@ -228,7 +232,7 @@ def consume_native[T](
                             for old, new in zip(empty.columns, prepared.columns, strict=True)
                         )
                     )
-                relation.create_view(name, replace=True)
+                bind_relation(connection, relation, name)
                 observations[name] = (dict(prepared.schema), time.perf_counter() - binding_started)
             session = SqlReadSession(services.policy, connection, bindings_sources)
             try:

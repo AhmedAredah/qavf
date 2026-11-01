@@ -16,8 +16,8 @@ All notable changes to this project are documented here. The format follows
   and comparison rules and custom plugins need `pip install 'qavf[polars]'` (also
   included in `stats`, `spatial` and `all`); without it they report a capability
   error instead of running. Choose a backend with `backend=` or `--backend`.
-- DuckDB 2.0 is not yet supported: it removed APIs QAVF uses, so installs are
-  limited to DuckDB 1.3.1 up to 2.0.
+- Supports DuckDB 2.0 as well as 1.3.1 and later. QAVF 0.6.0 failed to read any
+  dataset when installed with DuckDB 2.0.
 - Automatic resource planning uses input size, key widths and available memory and
   disk; explicit limits still win.
 

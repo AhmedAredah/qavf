@@ -34,6 +34,7 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from qavf._adjacency import CompactAdjacency, checked_subset, normalized_weights
+from qavf.duckdb_results import settle
 from qavf.engine.registry import RuleParams
 from qavf.keys import cast_key
 from qavf.missingness import missing_count
@@ -157,6 +158,7 @@ def _selected_zones(con: Any, table: str, keep: np.ndarray | None):
             f"FROM {quoted} z JOIN {quote_identifier(name)} m ON z.zone_order=m.original)"
         )
     finally:
+        settle(con)
         con.unregister(name)
 
 

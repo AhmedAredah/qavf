@@ -27,6 +27,7 @@ from uuid import uuid4
 import polars as pl
 from pydantic import Field, model_validator
 
+from qavf.duckdb_results import settle
 from qavf.engine.registry import RuleParams
 from qavf.rules.helpers import fresh_internal
 from qavf.spatial.assign import Assigned, AssignmentLimits, coordinate_keys
@@ -151,6 +152,7 @@ def _transformed(con: Any, points: pl.DataFrame, source: str, target: str) -> pl
             "isfinite(py)) ORDER BY pid",
         )
     finally:
+        settle(con)
         con.unregister(name)
 
 

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import duckdb
 
+from qavf.duckdb_results import polars_frame, settle
+
 if TYPE_CHECKING:
     import polars as pl
 
@@ -243,6 +245,9 @@ def configure_sources(con, env: SourceEnvironment, attach: Iterable[str] = ()) -
                 f"could not attach connection {redact_text(name)!r}: {error}",
                 retryable=error.retryable,
             ) from None
+    # Secret creation and attachment return result rows; DuckDB 2.0 requires
+    # them finished before the connection registers anything.
+    settle(con)
 
 
 def fetch(
@@ -253,7 +258,7 @@ def fetch(
     keep_open: bool = False,
 ) -> pl.DataFrame:
     try:
-        result = con.execute(sql, dict(params or {})).pl()
+        result = polars_frame(con.execute(sql, dict(params or {})))
         if result is None:
             raise SourceError("the SQL statement returned no result set")
         return result

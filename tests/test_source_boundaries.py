@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 
 from qavf.cli import _parse_dataset, main
+from qavf.duckdb_results import first_row
 from qavf.engine.runner import build_registry
 from qavf.profiling import ProfileResult
 from qavf.scaffold import profile_frame, render_config
@@ -169,7 +170,7 @@ def test_native_file_scan_does_not_load_the_frame(tmp_path):
     assert plan is not None and not plan.parameters
     with connect(source.env) as con:
         relation = con.sql(plan.sql, params=dict(plan.parameters))
-        assert relation.aggregate("sum(x)").fetchone() == (3,)
+        assert first_row(relation.aggregate("sum(x)")) == (3,)
 
 
 @pytest.mark.parametrize("dtype", [pl.Categorical, pl.Enum(["abc", "def"])])

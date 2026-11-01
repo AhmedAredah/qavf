@@ -12,6 +12,7 @@ from typing import Any
 import duckdb
 import polars as pl
 
+from qavf.duckdb_results import settle
 from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding
@@ -236,6 +237,7 @@ def reduce_columns(
         batches = [batch if batch[0][1].independent else preflight(batch) for batch in batches]
     elif any(not batch[0][1].independent for batch in batches):
         with duckdb.connect(config={"threads": 1, "memory_limit": "16MB"}) as connection:
+            settle(connection)
             connection.register(inputs.dataset, pl.DataFrame(schema=inputs.actual).to_arrow())
             batches = [
                 batch if batch[0][1].independent else preflight(batch, connection)

@@ -350,7 +350,7 @@ class FileSource(DataSource[FileParams]):
         # A separate expression preserves the caller's projection order.
         select = (
             ", ".join(
-                f"COLUMNS(__qavf_exact_column -> __qavf_exact_column = {sql_literal(c)})"
+                f"COLUMNS(lambda __qavf_exact_column: __qavf_exact_column = {sql_literal(c)})"
                 for c in params.columns
             )
             if params.columns

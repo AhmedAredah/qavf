@@ -27,6 +27,7 @@ import duckdb
 import numpy as np
 import polars as pl
 
+from qavf.duckdb_results import settle
 from qavf.io import write_table
 
 logger = logging.getLogger(__name__)
@@ -226,6 +227,7 @@ def write_demo_project(
     database.unlink(missing_ok=True)
     with duckdb.connect(str(database)) as con:
         sites = data["sites"]
+        settle(con)
         con.register("sites_frame", sites)
         con.execute("CREATE TABLE sites AS SELECT * FROM sites_frame")
     write_table(accepted["counts"].sort("site_id", "year"), root / "baseline" / "counts.csv")

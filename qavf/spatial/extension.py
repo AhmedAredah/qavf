@@ -25,6 +25,7 @@ import duckdb
 import polars as pl
 import pyarrow as pa
 
+from qavf.duckdb_results import polars_frame, settle
 from qavf.redaction import redact_text
 
 if TYPE_CHECKING:
@@ -35,6 +36,19 @@ class SpatialUnavailable(RuntimeError):
     """DuckDB's spatial extension cannot be loaded; geometry checks are not assessed."""
 
 
+def _legacy_axis_order(con: Any) -> None:
+    """Keep DuckDB 1.x axis handling, which spheroid measurements rely on.
+
+    qavf swaps longitude/latitude before spheroid functions, as DuckDB 1.x
+    requires. DuckDB 2.0 refuses those functions until ``geometry_always_xy`` is
+    set, and 2.1 changes its default to true; set false where it exists.
+    """
+    if con.execute(
+        "SELECT count(*) FROM duckdb_settings() WHERE name = 'geometry_always_xy'"
+    ).fetchone()[0]:
+        con.execute("SET geometry_always_xy = false")
+
+
 def load_spatial(con: Any) -> None:
     """Load the spatial extension into ``con``, installing it once if needed.
 
@@ -43,12 +57,14 @@ def load_spatial(con: Any) -> None:
     """
     try:
         con.execute("LOAD spatial")
+        _legacy_axis_order(con)
         return
     except duckdb.Error as first:
         reason = str(first)
     try:
         con.execute("INSTALL spatial")
         con.execute("LOAD spatial")
+        _legacy_axis_order(con)
     except duckdb.Error as exc:
         raise SpatialUnavailable(
             "DuckDB's spatial extension could not be loaded "
@@ -83,9 +99,10 @@ def spatial_connection(ctx: DataContext | None = None) -> Iterator[Any]:
 def register(con: Any, name: str, frame: pl.DataFrame) -> None:
     """Bind ``frame`` as a relation; columns are exported to Arrow one by one first."""
     table = pa.Table.from_arrays([column.to_arrow() for column in frame], names=frame.columns)
+    settle(con)
     con.register(name, table)
 
 
 def fetch(con: Any, sql: str, parameters: list[Any] | None = None) -> pl.DataFrame:
     """Run ``sql`` and return its result as a Polars frame."""
-    return con.execute(sql, parameters or []).pl()
+    return polars_frame(con.execute(sql, parameters or []))

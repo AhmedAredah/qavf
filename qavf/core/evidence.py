@@ -119,7 +119,7 @@ class EvidenceProjection:
             item = f"__qavf_evidence_item_{depth}"
             child = cls.build(item, dict(dtype.children)["child"], depth + 1)
             return cls(
-                f"list_transform({expression}, {item} -> {child.sql})",
+                f"list_transform({expression}, lambda {item}: {child.sql})",
                 functools.partial(_decode_list, child),
             )
         if kind == "struct":
@@ -156,7 +156,7 @@ class EvidenceProjection:
                 "bignum",
             }
             entries = (
-                f"list_transform(map_entries({expression}), {item} -> "
+                f"list_transform(map_entries({expression}), lambda {item}: "
                 f"struct_pack(key := {key.sql}, value := {value.sql}))"
             )
             return cls(
@@ -191,7 +191,9 @@ class SqlEvidenceReader:
         if kind in {"list", "array"}:
             item = f"__qavf_size_item_{depth}"
             child = cls._minimum_bytes(item, dict(dtype.children)["child"], depth + 1)
-            return f"coalesce(list_sum(list_transform({expression}, {item} -> {child} + 1)), 0)"
+            return (
+                f"coalesce(list_sum(list_transform({expression}, lambda {item}: {child} + 1)), 0)"
+            )
         if kind == "struct":
             return (
                 "("
@@ -207,7 +209,7 @@ class SqlEvidenceReader:
             key = cls._minimum_bytes(f"{item}.key", children["key"], depth + 1)
             value = cls._minimum_bytes(f"{item}.value", children["value"], depth + 1)
             return (
-                f"coalesce(list_sum(list_transform(map_entries({expression}), {item} -> "
+                f"coalesce(list_sum(list_transform(map_entries({expression}), lambda {item}: "
                 f"{key} + {value} + 1)), 0)"
             )
         return "1"

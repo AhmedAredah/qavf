@@ -16,6 +16,7 @@ from functools import lru_cache
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from qavf.duckdb_results import settle
 from qavf.number_grammar import COMPARISON_WHITESPACE, trim_text
 
 _REGISTERED: weakref.WeakSet = weakref.WeakSet()
@@ -207,5 +208,6 @@ def register_sql_functions(connection) -> None:
         ("__qavf_datetime_text", datetime_text, [str, str, str, str, str, str]),
     )
     for name, function, parameters in functions:
+        settle(connection)
         connection.create_function(name, function, parameters, str, null_handling="special")
     _REGISTERED.add(connection)

@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 from typing import TYPE_CHECKING
 
+from qavf.duckdb_results import settle
 from qavf.engine.sql_read import SqlReadSession
 from qavf.regression._plan import ComparisonPlan
 from qavf.regression._streaming import compare_native, native_supported
@@ -31,6 +32,7 @@ def compare_observations(inputs: LevelInputs, plan: ComparisonPlan) -> Compariso
             inputs.ctx.native_read_services().connections.temporary((), {}, {})
         )
         for side, binding in bindings.items():
+            settle(connection)
             connection.register(side, binding)
         session = SqlReadSession(inputs.ctx.native_read_services().policy, connection, {})
         try:

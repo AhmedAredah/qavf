@@ -9,6 +9,7 @@ import duckdb
 import polars as pl
 import pytest
 
+from qavf.duckdb_results import polars_frame
 from qavf.engine.context import DataContext, DatasetNotAvailableError
 from qavf.engine.resources import ResourceLimitError
 from qavf.engine.session import KeyedLocks
@@ -120,7 +121,7 @@ def test_sql_lexical_dependencies_preserve_physical_dataset(query):
     with duckdb.connect(config={"threads": 1}) as native:
         native.register("items", frame.to_arrow())
         try:
-            expected = native.execute(query).pl()
+            expected = polars_frame(native.execute(query))
         except duckdb.Error:
             expected = None
     assert sql_table_names(query) == {"items"}

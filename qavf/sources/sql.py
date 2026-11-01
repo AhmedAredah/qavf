@@ -246,14 +246,31 @@ def _query_table_path(value: Any, base_dir: Path) -> Any:
     return value
 
 
+def _function_arguments(function: Mapping[str, Any]) -> list[Any]:
+    """A parsed function's argument expressions: ``children`` on DuckDB 1.x,
+    ``arguments[].expression`` on 2.x."""
+    if "arguments" in function:
+        return [argument.get("expression", {}) for argument in function["arguments"]]
+    return list(function.get("children", ()))
+
+
+def _constant_text(node: Mapping[str, Any]) -> str | None:
+    """The text of a non-null string constant, in either parse-tree layout."""
+    literal = node.get("literal")
+    if isinstance(literal, Mapping):
+        return str(literal["text"]) if literal.get("kind") == "STRING" else None
+    value = node.get("value", {})
+    if value.get("type", {}).get("id") == "VARCHAR" and not value.get("is_null"):
+        return str(value["value"])
+    return None
+
+
 def _literal_paths(node: Mapping[str, Any]) -> str | list[str]:
     """Accept a complete constant argument; reject expressions before rewriting."""
-    if node.get("class") == "CONSTANT":
-        value = node.get("value", {})
-        if value.get("type", {}).get("id") == "VARCHAR" and not value.get("is_null"):
-            return str(value["value"])
+    if node.get("class") == "CONSTANT" and (text := _constant_text(node)) is not None:
+        return text
     if node.get("class") == "FUNCTION" and node.get("function_name") == "list_value":
-        values = [_literal_paths(child) for child in node.get("children", ())]
+        values = [_literal_paths(child) for child in _function_arguments(node)]
         if values and all(isinstance(value, str) for value in values):
             return values  # type: ignore[return-value]
     raise SourceError(
@@ -353,7 +370,7 @@ def normalize_sql_paths(
                 function = node.get("function", {})
                 name = function.get("function_name", "").lower()
                 if name in (*_FILE_FUNCTIONS, "query_table"):
-                    arguments = function.get("children", ())
+                    arguments = _function_arguments(function)
                     if arguments:
                         locations[node.get("query_location", -1)] = (arguments[0], name)
             elif node.get("type") == "BASE_TABLE":

@@ -18,6 +18,7 @@ from typing import Any
 
 import polars as pl
 
+from qavf.duckdb_results import settle
 from qavf.sources.sql import quote_identifier
 from qavf.spatial.extension import fetch
 from qavf.spatial.grid import Grid, label_positions
@@ -73,6 +74,7 @@ def layer_rings(
         )
         if vertices > max_vertices:
             raise OutlineLimitExceeded(vertices, max_vertices)
+    settle(con)
     query = con.sql(
         f"SELECT zone_order, ST_AsGeoJSON({geometry}) AS shape FROM {name} ORDER BY zone_order",
         params=[tolerance],

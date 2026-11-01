@@ -1,5 +1,6 @@
 """Key joins retain complete grouped relations in the backend until reduction."""
 
+from functools import partial
 from unittest.mock import patch
 
 import duckdb
@@ -7,9 +8,15 @@ import polars as pl
 import pytest
 
 from qavf import Query, Status, validate
+from qavf.duckdb_results import polars_frame
 from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation, Observations
 from qavf.rules._execution import KeyRelation, align_key_relations
+
+
+def _native_frame(native, sql, **_):
+    """Run ``sql`` on ``native`` as a stand-in for ``DataContext.sql``."""
+    return polars_frame(native.execute(sql))
 
 
 def _inputs(kind):
@@ -236,7 +243,7 @@ def test_native_key_summary_evaluates_real_relation_once():
             {"key": pl.Int64(), "rows": pl.UInt64()},
             sql="SELECT observed(range) AS key, 2::UBIGINT AS rows FROM range(10)",
         )
-        with patch.object(ctx, "sql", side_effect=lambda sql, **_: native.execute(sql).pl()):
+        with patch.object(ctx, "sql", side_effect=partial(_native_frame, native)):
             summary = relation.summarize(3)
     assert sorted(calls) == list(range(10))
     assert summary.keys == 10 and summary.rows == 20

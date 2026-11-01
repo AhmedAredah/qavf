@@ -13,6 +13,7 @@ import polars as pl
 import pytest
 from pydantic import ValidationError
 
+from qavf.duckdb_results import polars_frame
 from qavf.text_types import TextType, polars_value, sql_value
 
 TEXTS = [
@@ -121,7 +122,7 @@ def test_both_engines_accept_exactly_the_same_text(spec: TextType) -> None:
     sql_v, sql_bad = sql_value('"t"', spec)
     with duckdb.connect() as con:
         con.register("f", frame.to_arrow())
-        native = con.execute(f"SELECT {sql_v} AS v, {sql_bad} AS bad FROM f").pl()
+        native = polars_frame(con.execute(f"SELECT {sql_v} AS v, {sql_bad} AS bad FROM f"))
     differences = [
         (text, a, b)
         for text, a, b, x, y in zip(

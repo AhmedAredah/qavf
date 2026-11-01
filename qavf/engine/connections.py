@@ -18,6 +18,7 @@ import duckdb
 import polars as pl
 import pyarrow as pa
 
+from qavf.duckdb_results import settle
 from qavf.engine.cleanup import attempt_cleanup, raise_cleanup_errors
 from qavf.engine.resources import retained_size
 from qavf.engine.session import RunSession
@@ -176,6 +177,7 @@ class SqlConnections:
             if con is not None:
                 for name in discarded:
                     with contextlib.suppress(duckdb.Error):
+                        settle(con)
                         con.unregister(name)
                     with contextlib.suppress(duckdb.Error):
                         drop_temporary_relation(con, name, kind="VIEW")
@@ -186,6 +188,7 @@ class SqlConnections:
     def register_frame(self, con: Connection, name: str, frame: pl.DataFrame) -> None:
         """Export Arrow columns before DuckDB binding, avoiding parallel export deadlocks."""
         table = pa.Table.from_arrays([column.to_arrow() for column in frame], names=frame.columns)
+        settle(con)
         con.register(name, table)
         self.remember(name)
         with self._lock:

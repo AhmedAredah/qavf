@@ -177,6 +177,11 @@ def test_layers_load_from_geoparquet_geojson_shapefile_and_wkt_datasets(tmp_path
     parquet = S.geoparquet(tmp_path / "z.parquet", zones)
     gj = S.geojson(tmp_path / "z.geojson", zones)
     with spatial_connection() as con:
+        # DuckDB 2.0 requires an explicit axis order for a GDAL write; 1.x has no setting.
+        if con.execute(
+            "SELECT count(*) FROM duckdb_settings() WHERE name = 'geometry_always_xy'"
+        ).fetchone()[0]:
+            con.execute("SET geometry_always_xy = true")
         con.execute(
             f"COPY (SELECT zone, geom FROM ST_Read('{gj.as_posix()}')) TO "
             f"'{(tmp_path / 'z.shp').as_posix()}' WITH (FORMAT GDAL, DRIVER 'ESRI Shapefile')"

@@ -29,6 +29,7 @@ import duckdb
 import polars as pl
 from pydantic import model_validator
 
+from qavf.duckdb_results import settle
 from qavf.engine.registry import RuleParams
 from qavf.missingness import missing_count
 from qavf.rules.helpers import plural
@@ -259,6 +260,7 @@ def load_zones(
     except duckdb.Error as exc:
         raise ValueError(f"zone layer {label!r} has malformed geometry: {exc}") from None
     finally:
+        settle(con)
         con.unregister(source)
     name = quote_identifier(table)
     notes: list[str] = []
