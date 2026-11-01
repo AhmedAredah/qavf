@@ -12,12 +12,10 @@ Caller-owned borrowed database connections remain open. A `Loader` result with
 a known row count is rejected before interchange conversion if it exceeds its
 row budget; unknown-size streams cannot provide that early guarantee.
 
-This release requires **DuckDB 1.3.0 or newer**. DuckDB 1.2.0's CSV inference
-turns timezone-marked timestamps into naive UTC values, losing their timezone
-metadata even with ICU loaded. Version 1.3.0 preserves aware timestamps while
-keeping genuinely unzoned inputs naive. Upgrade the dependency when replacing
-an existing installation; the minimum-version timestamp regression verifies
-that QAVF reports zoned CSV timestamps in UTC.
+QAVF requires **DuckDB 1.3.1 or newer**. DuckDB 1.2's CSV inference turns
+timezone-marked timestamps into naive UTC values, losing their time zone, and
+DuckDB 1.3.0 exports small decimals as Arrow `decimal64`, which the supported
+PyArrow and Polars versions cannot read.
 
 ## Owned batch sources
 

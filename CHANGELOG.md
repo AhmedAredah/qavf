@@ -37,7 +37,9 @@ All notable changes to this project are documented here. The format follows
 ### Changed
 
 - Licensed under the Apache License 2.0 (previously MIT).
-- DuckDB 1.3.0 or newer is required: 1.2 loses time zones when reading CSV files.
+- DuckDB 1.3.1 or newer is required: 1.2 loses time zones when reading CSV files, and
+  1.3.0 exports decimals in an Arrow format that the supported PyArrow and Polars
+  versions cannot read.
 - Zoned timestamps load and compare in UTC on every machine.
 - A value that is not of its declared type counts as missing for every check other
   than INP-002.
