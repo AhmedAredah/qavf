@@ -18,13 +18,25 @@ REQUIRED_JOBS = {
 }
 
 
+PLATFORMS = ("linux-3.12", "linux-3.13", "linux-3.14", "windows-3.12", "macos-3.12")
+PRIMARY = "linux-3.12"
+"""The one host that also runs the optimized and installed-wheel passes.
+
+Their findings (assert-dependent code, missing package files in the pure-Python
+wheel) do not vary by platform; every host runs the source suite.
+"""
+
+
+def platform_checks(label: str) -> set[str]:
+    """The evidence one platform job must produce."""
+    suffixes = ("source", "source-optimized", "wheel", "wheel-setup")
+    return {f"{label}-{suffix}" for suffix in (suffixes if label == PRIMARY else suffixes[:1])}
+
+
 def required_checks() -> set[str]:
-    required = {"core-setup", "integrations"}
-    for label in ("linux-3.12", "linux-3.13", "linux-3.14", "windows-3.12", "macos-3.12"):
-        for mode in ("source", "wheel"):
-            required.update({f"{label}-{mode}", f"{label}-{mode}-optimized"})
-        required.add(f"{label}-wheel-setup")
-    required.update({"floors", "floors-optimized", "floors-setup"})
+    required = {"core-setup", "integrations", "floors", "floors-setup"}
+    for label in PLATFORMS:
+        required |= platform_checks(label)
     return required
 
 

@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .gate import evidence_errors
+from .gate import PRIMARY, evidence_errors, platform_checks
 from .provenance import SOURCE_INPUTS, repository_identity, write_json
 
 
@@ -36,13 +36,18 @@ def command_plan(root: Path, output: Path, label: str) -> list[tuple[str, list[s
         "--output",
         str(output / f"{label}-source.json"),
     ]
-    if label == "linux-3.12":
+    if label == PRIMARY:
         normal.append("--coverage")
-    return [
+    plan = [
         ("build", ["uv", "build", "--clear"]),
         ("payload", [python, str(root / "scripts" / "verify_dist.py")]),
         ("extensions", [python, release, "extensions"]),
         ("source", normal),
+    ]
+    if label != PRIMARY:
+        return plan
+    return [
+        *plan,
         (
             "source-optimized",
             [
@@ -132,10 +137,7 @@ def verify_platform(root: Path, output: Path) -> int:
                     records.append(record)
             except (OSError, ValueError):
                 continue
-        expected = {
-            f"{label}-{suffix}"
-            for suffix in ("source", "source-optimized", "wheel", "wheel-optimized", "wheel-setup")
-        }
+        expected = platform_checks(label)
         errors = evidence_errors(records, identity, expected)
         if repository_identity(root) != identity:
             errors.append("source changed during verification")

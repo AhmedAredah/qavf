@@ -16,8 +16,11 @@ def platform_checks(monkeypatch):
 
 
 @pytest.mark.parametrize("label", ["linux-3.12", "windows-3.12", "macos-3.12"])
-def test_every_host_runs_full_source_and_wheel_modes(platform_checks, tmp_path, label):
+def test_every_host_runs_the_source_suite_and_one_host_the_rest(platform_checks, tmp_path, label):
     plan = dict(platform_checks.command_plan(tmp_path, tmp_path / "evidence", label))
+    if label != "linux-3.12":
+        assert set(plan) == {"build", "payload", "extensions", "source"}
+        return
     assert "--optimized" in plan["source-optimized"]
     # Inspect arguments, not substrings of caller-owned absolute paths.
     expected = [

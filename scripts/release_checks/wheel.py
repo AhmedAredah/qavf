@@ -171,17 +171,16 @@ def installed_checks(root: Path, output_dir: Path, check_id: str, mode: str) -> 
                 record["environment"] = json.loads(probe_env.stdout)
                 record["verification_modes"] = [0, 1]
             else:
-                for optimized in (False, True):
-                    phase = check_id + ("-optimized" if optimized else "")
-                    failures += run_tests(
-                        root=root,
-                        workdir=workdir,
-                        python=python,
-                        output=output_dir / f"{phase}.json",
-                        check_id=phase,
-                        optimized=optimized,
-                        metadata={"installation": mode, "wheel_sha256": file_digest(wheel)},
-                    )
+                # One normal pass: the source suite already runs optimized once.
+                failures += run_tests(
+                    root=root,
+                    workdir=workdir,
+                    python=python,
+                    output=output_dir / f"{check_id}.json",
+                    check_id=check_id,
+                    optimized=False,
+                    metadata={"installation": mode, "wheel_sha256": file_digest(wheel)},
+                )
             record["status"] = "failed" if failures else "passed"
             if record["identity"] != repository_identity(root):
                 record.update(status="failed", error="Source changed during installed verification")

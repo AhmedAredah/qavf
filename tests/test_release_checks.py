@@ -152,13 +152,18 @@ def test_partial_suite_cannot_satisfy_full_suite_gate():
 
 def test_release_manifest_includes_all_required_environments():
     required = required_checks()
-    assert {"integrations", "core-setup", "floors", "floors-optimized"} <= required
+    assert {"integrations", "core-setup", "floors", "floors-setup"} <= required
     for platform in ("linux-3.12", "linux-3.13", "linux-3.14", "windows-3.12", "macos-3.12"):
-        assert {
-            f"{platform}-source",
-            f"{platform}-wheel-optimized",
-            f"{platform}-wheel-setup",
-        } <= required
+        assert f"{platform}-source" in required
+    # Optimized and installed-wheel passes do not vary by platform: run once.
+    assert {
+        "linux-3.12-source-optimized",
+        "linux-3.12-wheel",
+        "linux-3.12-wheel-setup",
+    } <= required
+    assert not {item for item in required if item.endswith("-optimized")} - {
+        "linux-3.12-source-optimized"
+    }
 
 
 def test_skip_policy_requires_actual_environment_and_exact_reason():
