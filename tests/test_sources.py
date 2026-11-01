@@ -54,11 +54,23 @@ def test_file_formats_round_trip(tmp_path, registry, suffix: str) -> None:
     assert loaded["value"].null_count() == 1
 
 
+def _load_excel(con) -> None:
+    """Load the excel extension, installing it only when it is missing.
+
+    DuckDB 2.0 refuses to reinstall an extension from a different repository
+    than the one it came from (CI installs from the explicit HTTPS URL).
+    """
+    try:
+        con.execute("LOAD excel")
+    except duckdb.IOException:
+        con.execute("INSTALL excel; LOAD excel")
+
+
 def test_excel_files(tmp_path, registry) -> None:
     target = tmp_path / "book.xlsx"
     with duckdb.connect() as con:
         try:
-            con.execute("INSTALL excel; LOAD excel")
+            _load_excel(con)
         except (duckdb.IOException, duckdb.HTTPException) as exc:  # pragma: no cover
             # Only a failed extension download is an environment limitation; a missing
             # function or format below is a real failure (DuckDB older than 1.2).

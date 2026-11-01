@@ -70,10 +70,22 @@ def test_nanosecond_evidence_is_readable() -> None:
 # =========================================================================
 # Excel blank rows do not hide later rows
 # =========================================================================
+def _load_excel(con) -> None:
+    """Load the excel extension, installing it only when it is missing.
+
+    DuckDB 2.0 refuses to reinstall an extension from a different repository
+    than the one it came from (CI installs from the explicit HTTPS URL).
+    """
+    try:
+        con.execute("LOAD excel")
+    except duckdb.IOException:
+        con.execute("INSTALL excel; LOAD excel")
+
+
 def _write_xlsx(path, frame: pl.DataFrame) -> None:
     try:
         with duckdb.connect() as con:
-            con.execute("INSTALL excel; LOAD excel")
+            _load_excel(con)
             con.register("f", frame)
             con.execute(f"COPY f TO '{path.as_posix()}' (FORMAT xlsx, HEADER true)")
     except duckdb.Error as exc:  # pragma: no cover - needs DuckDB >= 1.2 with the excel extension
