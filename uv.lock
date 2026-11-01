@@ -1668,6 +1668,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 
 [package.optional-dependencies]
@@ -1729,6 +1730,7 @@ requires-dist = [
     { name = "scipy", marker = "extra == 'all'", specifier = ">=1.11.3" },
     { name = "scipy", marker = "extra == 'spatial'", specifier = ">=1.11.3" },
     { name = "scipy", marker = "extra == 'stats'", specifier = ">=1.11.3" },
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
 ]
 provides-extras = ["all", "pandas", "polars", "spatial", "stats"]
 

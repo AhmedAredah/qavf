@@ -44,6 +44,8 @@ dependencies = [
     "pyarrow>=16",
     "pydantic>=2.7",
     "pyyaml>=6.0.1",
+    # zoneinfo has no time-zone database on Windows without it.
+    "tzdata; sys_platform == 'win32'",
 ]
 
 [project.urls]
