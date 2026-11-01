@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import ClassVar
+from functools import partial
+from typing import Any, ClassVar
 
 import polars as pl
 
@@ -15,6 +16,28 @@ from qavf.settings import SchemaSpec
 from qavf.sources.sql import quote_identifier, sql_literal
 
 from ._datasets import CATEGORY, DatasetSelection, _schemas, _SelectsDatasets
+
+
+def _select_projections(projections: list[Any], frame: pl.LazyFrame) -> pl.LazyFrame:
+    """Reduce a frame to the given aggregate projections."""
+    return frame.select(projections)
+
+
+def _classify_rows(
+    shown: list[str],
+    row: str,
+    label: str,
+    problem: str,
+    policy: AllOrNoneApplicability,
+    actual: Any,
+    frame: pl.LazyFrame,
+) -> pl.LazyFrame:
+    """Number rows and label those that are only partly not applicable."""
+    return (
+        frame.select(shown)
+        .with_row_index(row)
+        .with_columns(pl.when(policy.polars(actual)).then(pl.lit(label)).alias(problem))
+    )
 
 
 class ApplicabilityRule(_SelectsDatasets):
@@ -84,7 +107,7 @@ class ApplicabilityRule(_SelectsDatasets):
                 policy.polars(name, actual[name]).sum().alias(f"n{i}")
                 for i, (name, policy) in enumerate(zip(present_columns, policies, strict=True))
             ]
-            result = ctx.reduce(dataset, lambda frame: frame.select(projections))
+            result = ctx.reduce(dataset, partial(_select_projections, projections))
         rows = int(result["rows"][0])
         return [
             Finding.ok(
@@ -146,14 +169,7 @@ class ApplicabilityRule(_SelectsDatasets):
                 sql=classification,
             )
         else:
-
-            def classify(frame: pl.LazyFrame) -> pl.LazyFrame:
-                return (
-                    frame.select(shown)
-                    .with_row_index(row)
-                    .with_columns(pl.when(policy.polars(actual)).then(pl.lit(label)).alias(problem))
-                )
-
+            classify = partial(_classify_rows, shown, row, label, problem, policy, actual)
             summary = summarize_rows(
                 ctx,
                 dataset,

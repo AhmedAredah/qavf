@@ -183,15 +183,25 @@ def temporal_literal(value: Any, spec) -> Any:
     return result
 
 
+def _unicode_lower(value):
+    """Lower-case a SQL text value, preserving NULL."""
+    return value.lower() if value is not None else None
+
+
+def _unicode_normalize(value, method):
+    """Apply one normalization method to a SQL text value, preserving NULL."""
+    return normalize_scalar(value, [method]) if value is not None else None
+
+
 def register_sql_functions(connection) -> None:
     """Register shared scalar policies once on a connection, without importing Polars."""
     if connection in _REGISTERED:
         return
     functions = (
-        ("__qavf_unicode_lower", lambda value: value.lower() if value is not None else None, [str]),
+        ("__qavf_unicode_lower", _unicode_lower, [str]),
         (
             "__qavf_unicode_normalize",
-            lambda value, method: normalize_scalar(value, [method]) if value is not None else None,
+            _unicode_normalize,
             [str, str],
         ),
         ("__qavf_datetime_text", datetime_text, [str, str, str, str, str, str]),

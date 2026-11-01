@@ -9,9 +9,21 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
+from functools import partial
 from typing import Any, Literal
 
 from qavf.number_grammar import trim_text, whitespace_chars
+
+
+def _sql_text(value: str) -> str:
+    """Quote a SQL string literal without importing DuckDB, readers or Polars."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _comparable_token(policy: NotApplicablePolicy, case: bool, value: str) -> str:
+    """Normalize a token as a check compares it, folding case when requested."""
+    normalized_value = policy.normalize(value)
+    return normalized_value.lower() if case else normalized_value
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,17 +56,13 @@ class NotApplicablePolicy:
         if not self.tokens:
             return "FALSE"
 
-        # Keep this policy importable without DuckDB, source readers or Polars.
-        def literal(value: str) -> str:
-            return "'" + value.replace("'", "''") + "'"
-
         value = f"CAST(({expression}) AS VARCHAR)"
         if self.trim_whitespace == "ascii":
             value = f"trim({value}, ' ')"
         elif self.trim_whitespace == "unicode":
             chars = whitespace_chars("unicode")
-            value = f"trim({value}, {literal(chars)})"
-        tokens = ", ".join(literal(token) for token in self.normalized_tokens)
+            value = f"trim({value}, {_sql_text(chars)})"
+        tokens = ", ".join(_sql_text(token) for token in self.normalized_tokens)
         text_type = (
             f"(typeof({expression}) = 'VARCHAR' OR starts_with(typeof({expression}), 'ENUM('))"
         )
@@ -122,11 +130,7 @@ class NotApplicablePolicy:
                     continue
                 raise ValueError(f"na_values token {token!r} overlaps a valid {spec.dtype} value")
         for check in spec.all_checks():
-
-            def normalized(value: str, case: bool = "case" in check.normalize) -> str:
-                normalized_value = self.normalize(value)
-                return normalized_value.lower() if case else normalized_value
-
+            normalized = partial(_comparable_token, self, "case" in check.normalize)
             reserved = {normalized(value) for value in self.tokens}
             for name in ("isin", "notin"):
                 if any(

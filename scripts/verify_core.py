@@ -12,6 +12,7 @@ import subprocess
 import sys
 from contextlib import contextmanager
 from decimal import Decimal
+from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -101,18 +102,20 @@ def check_optional_capability_error() -> None:
         raise RuntimeError("an unsupported configured rule was silently skipped")
 
 
+@contextmanager
+def _recorded_batches(events):
+    """Two Arrow batches whose opening and closing are recorded in events."""
+    events.append("open")
+    try:
+        yield iter([pa.table({"v": [1]}), pa.table({"v": [2]})])
+    finally:
+        events.append("close")
+
+
 def check_shared_services() -> None:
     """Managed Arrow sources and acceptance contracts work without dataframe extras."""
-    events = []
-
-    @contextmanager
-    def batches():
-        events.append("open")
-        try:
-            yield iter([pa.table({"v": [1]}), pa.table({"v": [2]})])
-        finally:
-            events.append("close")
-
+    events: list[str] = []
+    batches = partial(_recorded_batches, events)
     report = validate(
         BatchSource(batches, pa.schema([("v", pa.int64())])),
         schema={"primary_key": ["v"]},

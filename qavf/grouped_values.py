@@ -16,6 +16,23 @@ if TYPE_CHECKING:
     from qavf.settings import GroupedValueSpec
 
 
+def _fresh_alias(taken: set[str], base: str) -> str:
+    """Prefix a base name until it avoids every taken name, then reserve it."""
+    name = base
+    while name.casefold() in taken:
+        name = "qavf_" + name
+    taken.add(name.casefold())
+    return name
+
+
+def _relation_alias(source_sql: str, name: str) -> str:
+    """Quoted relation name that does not occur in the source query."""
+    candidate = "__qavf_grouped_" + name
+    while candidate.casefold() in source_sql.casefold():
+        candidate += "_"
+    return qi(candidate)
+
+
 @dataclass(frozen=True)
 class GroupedValuePlan:
     """Exact aggregate counts plus a relation of violating group/domain pairs."""
@@ -46,24 +63,9 @@ class GroupedValuePlan:
         """
         fields = [*spec.group_by, spec.column]
         taken = {name.casefold() for name in fields}
-
-        def alias(base: str) -> str:
-            name = base
-            while name.casefold() in taken:
-                name = "qavf_" + name
-            taken.add(name.casefold())
-            return name
-
-        count, reason = alias("occurrences"), alias("reason")
-
-        def relation_alias(name: str) -> str:
-            candidate = "__qavf_grouped_" + name
-            while candidate.casefold() in source_sql.casefold():
-                candidate += "_"
-            return qi(candidate)
-
+        count, reason = _fresh_alias(taken, "occurrences"), _fresh_alias(taken, "reason")
         source_name, group_name, domain_name, counts_name = (
-            relation_alias(name) for name in ("source", "groups", "domain", "counts")
+            _relation_alias(source_sql, name) for name in ("source", "groups", "domain", "counts")
         )
         groups = ", ".join(qi(c) for c in spec.group_by)
         column = qi(spec.column)

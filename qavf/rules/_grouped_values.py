@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+import polars as pl
+
 from qavf.core.policy import NativeValueDomain, native_literal
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
@@ -12,6 +16,28 @@ from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import fresh_internal, plural
 from qavf.settings import ColumnCheck, GroupedValueSpec
 from qavf.sources.sql import quote_identifier as qi
+
+
+def _domain_literals(
+    values: CanonicalKeyValues,
+    types: dict[str, pl.DataType],
+    column: str,
+    configured: Any,
+) -> list[str]:
+    """Typed SQL literals for a configured domain, rejecting lossy members."""
+    column_spec = values.contracts.get(column)
+    if column_spec is not None:
+        configured = column_spec._resolved_check(
+            ColumnCheck(
+                isin=configured,
+                convert_options=column_spec.dtype in ("int", "float", "decimal"),
+            )
+        ).isin
+    dtype = _native_key_type(types[column])
+    admitted, foreign = NativeValueDomain(dtype).members(configured)
+    if foreign or len(admitted) != len(configured):
+        raise ValueError(f"Grouped-value domain for {column!r} is not losslessly representable")
+    return [f"CAST({native_literal(value)} AS {dtype})" for value in admitted]
 
 
 def grouped_values(ctx: DataContext, dataset: str, spec: GroupedValueSpec) -> Finding:
@@ -40,28 +66,10 @@ def grouped_values(ctx: DataContext, dataset: str, spec: GroupedValueSpec) -> Fi
         canonical, types = CanonicalKeyValues(ctx, dataset, actual if spec.where else columns).sql(
             source_sql=raw, preserve=(group_na, value_na)
         )
-
-        def literals(column, configured):
-            column_spec = values.contracts.get(column)
-            if column_spec is not None:
-                configured = column_spec._resolved_check(
-                    ColumnCheck(
-                        isin=configured,
-                        convert_options=column_spec.dtype in ("int", "float", "decimal"),
-                    )
-                ).isin
-            dtype = _native_key_type(types[column])
-            admitted, foreign = NativeValueDomain(dtype).members(configured)
-            if foreign or len(admitted) != len(configured):
-                raise ValueError(
-                    f"Grouped-value domain for {column!r} is not losslessly representable"
-                )
-            return [f"CAST({native_literal(value)} AS {dtype})" for value in admitted]
-
-        domain = literals(spec.column, spec.allowed_values)
+        domain = _domain_literals(values, types, spec.column, spec.allowed_values)
         expected = [
             [
-                "NULL" if value is None else literals(column, [value])[0]
+                "NULL" if value is None else _domain_literals(values, types, column, [value])[0]
                 for column, value in zip(spec.group_by, group, strict=True)
             ]
             for group in spec.expected_groups or []

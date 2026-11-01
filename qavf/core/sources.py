@@ -56,6 +56,7 @@ def evidence_row_name(columns: Sequence[str]) -> str:
     preferred = "_row" if "_row" not in {c.casefold() for c in columns} else "qavf__row"
     return SourceNames.fresh(preferred, columns)
 
+
 class InputReader:
     """Own QAVF snapshots; borrowed frames and connections remain caller-owned."""
 

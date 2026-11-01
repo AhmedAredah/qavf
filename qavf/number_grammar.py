@@ -53,6 +53,11 @@ def exact_decimal(value: int | float | Decimal, precision: int, scale: int) -> D
     return Decimal((int(integer < 0), tuple(map(int, str(abs(integer)))), -scale))
 
 
+def _sql_text(value):
+    """Quote a SQL string literal."""
+    return "'" + value.replace("'", "''") + "'"
+
+
 class NumberGrammar(BaseModel):
     """Optional numeric spellings. Defaults retain QAVF 0.6 lexical rules.
 
@@ -133,11 +138,8 @@ class NumberGrammar(BaseModel):
         )
 
     def sql_canonical(self, expression: str) -> str:
-        def quote(value):
-            return "'" + value.replace("'", "''") + "'"
-
         for old, new in self.replacements():
-            expression = f"replace({expression}, {quote(old)}, {quote(new)})"
+            expression = f"replace({expression}, {_sql_text(old)}, {_sql_text(new)})"
         return expression
 
     def polars_canonical(self, expression):

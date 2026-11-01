@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 import operator
 from fractions import Fraction
@@ -22,6 +23,21 @@ from qavf.core.policy import (
 from qavf.engine.severity import Status
 from qavf.sources.sql import quote_identifier as qi
 from qavf.sources.sql import sql_literal as lit
+
+
+def _unclaimed_name(role, columns):
+    """Prefix a generated column name until it collides with no data column."""
+    while role.casefold() in {column.casefold() for column in columns}:
+        role = "qavf_" + role
+    return role
+
+
+def _sample_records(out, evidence_columns, summary_table, field):
+    """Fetch the sampled key records stored in one summary-table list field."""
+    return out.records(
+        f"SELECT {evidence_columns} FROM "
+        f"(SELECT unnest({qi(field)}) AS key FROM {qi(summary_table)}) sample_keys"
+    )
 
 
 class DatasetChecks:
@@ -489,15 +505,11 @@ class DatasetChecks:
             )
             return
 
-        def unclaimed(role):
-            while role.casefold() in {column.casefold() for column in columns}:
-                role = "qavf_" + role
-            return role
-
         if whole_rows:
-            row_name, problem = unclaimed("_row"), unclaimed("violates")
+            row_name = _unclaimed_name("_row", columns)
+            problem = _unclaimed_name("violates", columns)
             selected = ", ".join(qi(column) for column in columns)
-            duplicated = unclaimed("__qavf_duplicated")
+            duplicated = _unclaimed_name("__qavf_duplicated", columns)
             rows = (
                 f"SELECT {selected}, {qi(data.row_column)} AS {qi(row_name)}, "
                 f"count(*) OVER (PARTITION BY {selected}) > 1 AS {qi(duplicated)} "
@@ -531,7 +543,8 @@ class DatasetChecks:
             )
             return
 
-        frequency, positions = unclaimed("occurrences"), unclaimed("rows")
+        frequency = _unclaimed_name("occurrences", columns)
+        positions = _unclaimed_name("rows", columns)
         row = qi(data.row_column)
         keys = ", ".join(qi(c) for c in columns)
         order = ", ".join(f"{qi(c)} NULLS FIRST" for c in columns)
@@ -593,15 +606,16 @@ class DatasetChecks:
                 ", ".join(f"key.{qi(c)} AS {qi(c)}" for c in columns)
                 + f", key.{qi(frequency)} AS {qi(frequency)}"
             )
-
-            def sample_records(field):
-                return out.records(
-                    f"SELECT {evidence_columns} FROM "
-                    f"(SELECT unnest({qi(field)}) AS key FROM {qi(summary_table)}) sample_keys"
-                )
-
-            records = sample_records("sample") if duplicate_count else []
-            null_records = sample_records("null_sample") if nulls == "forbid" and null_count else []
+            records = (
+                _sample_records(out, evidence_columns, summary_table, "sample")
+                if duplicate_count
+                else []
+            )
+            null_records = (
+                _sample_records(out, evidence_columns, summary_table, "null_sample")
+                if nulls == "forbid" and null_count
+                else []
+            )
             metrics = {
                 "duplicated_keys": duplicate_count,
                 "rows_involved": involved,
@@ -706,64 +720,67 @@ class DatasetChecks:
         row = qi(self.data.row_column)
         return f"{row} IN (SELECT {row} FROM {qi(self.typed)} WHERE ({where}) IS TRUE)"
 
+    def _grouped_literals(self, column, values):
+        """Render a grouped-value domain as exact typed literals, or reject it."""
+        from qavf.settings import ColumnCheck
+
+        data = self.data
+        dtype = self.values[column].dtype if column in self.values else data.types[column]
+        if column in self.schema.columns:
+            values = (
+                self.schema.columns[column]
+                ._resolved_check(
+                    ColumnCheck(
+                        isin=values,
+                        convert_options=self.schema.columns[column].dtype
+                        in ("int", "float", "decimal"),
+                    )
+                )
+                .isin
+            )
+        admitted, foreign = NativeValueDomain(dtype).members(values)
+        if foreign or len(admitted) != len(values):
+            raise ValueError(f"Grouped-value domain for {column!r} is not losslessly representable")
+        return [f"CAST({native_literal(v)} AS {dtype})" for v in admitted]
+
+    def _applicable_rows(self, columns):
+        """SQL predicate admitting only rows where none of the columns is N/A."""
+        data = self.data
+        row = qi(data.row_column)
+        predicates = [
+            self.values[c].na
+            for c in columns
+            if c in self.values and self.schema.columns[c].na_values
+        ]
+        if not predicates:
+            return "TRUE"
+        na = " OR ".join(predicates)
+        return f"{row} NOT IN (SELECT {row} FROM {qi(data.table)} WHERE {na})"
+
     def grouped_values(self, spec):
         from qavf.grouped_values import GroupedValuePlan
-        from qavf.settings import ColumnCheck
 
         data, out = self.data, self.out
         columns = [*spec.group_by, spec.column]
         if any(c not in data.columns for c in columns):
             raise ValueError("Grouped-value column is missing")
-
-        def literals(column, values):
-            dtype = self.values[column].dtype if column in self.values else data.types[column]
-            if column in self.schema.columns:
-                values = (
-                    self.schema.columns[column]
-                    ._resolved_check(
-                        ColumnCheck(
-                            isin=values,
-                            convert_options=self.schema.columns[column].dtype
-                            in ("int", "float", "decimal"),
-                        )
-                    )
-                    .isin
-                )
-            admitted, foreign = NativeValueDomain(dtype).members(values)
-            if foreign or len(admitted) != len(values):
-                raise ValueError(
-                    f"Grouped-value domain for {column!r} is not losslessly representable"
-                )
-            return [f"CAST({native_literal(v)} AS {dtype})" for v in admitted]
-
-        domain = literals(spec.column, spec.allowed_values)
+        domain = self._grouped_literals(spec.column, spec.allowed_values)
         expected = [
             [
-                "NULL" if value is None else literals(column, [value])[0]
+                "NULL" if value is None else self._grouped_literals(column, [value])[0]
                 for column, value in zip(spec.group_by, group, strict=True)
             ]
             for group in spec.expected_groups or []
         ]
-        row = qi(data.row_column)
-
-        def applicable(columns):
-            predicates = [
-                self.values[c].na
-                for c in columns
-                if c in self.values and self.schema.columns[c].na_values
-            ]
-            if not predicates:
-                return "TRUE"
-            na = " OR ".join(predicates)
-            return f"{row} NOT IN (SELECT {row} FROM {qi(data.table)} WHERE {na})"
-
         plan = GroupedValuePlan.build(
             spec,
             f"SELECT * FROM {qi(self.typed)}",
             domain,
             expected,
-            eligible_sql=applicable(spec.group_by),
-            value_present_sql=f"{qi(spec.column)} IS NOT NULL AND ({applicable([spec.column])})",
+            eligible_sql=self._applicable_rows(spec.group_by),
+            value_present_sql=(
+                f"{qi(spec.column)} IS NOT NULL AND ({self._applicable_rows([spec.column])})"
+            ),
         )
         count = self.con.execute(
             f"SELECT count(*) FROM ({plan.violations_sql}) violations"
@@ -883,38 +900,47 @@ class DatasetChecks:
             except Exception as exc:
                 self.error("INP-005", "foreign_key", fk.columns, exc, fk.model_dump(), fk.severity)
 
+    def _relation(self, side, fields):
+        """Select one side's applicable key rows and count its N/A exemptions."""
+        predicates = [
+            side.values[c].na
+            for c in fields
+            if c in side.values and side.schema.columns[c].na_values
+        ]
+        if not predicates:
+            return f"SELECT * FROM {qi(side.typed)}", 0
+        na = " OR ".join(predicates)
+        row = qi(side.data.row_column)
+        exempt = (
+            self.con.execute(f"SELECT count(*) FROM {qi(side.data.table)} WHERE {na}").fetchone()[0]
+            if na != "FALSE"
+            else 0
+        )
+        sql = (
+            f"SELECT * FROM {qi(side.typed)} WHERE {row} NOT IN "
+            f"(SELECT {row} FROM {qi(side.data.table)} WHERE {na})"
+        )
+        return sql, exempt
+
+    def _exact_float_keys(self, child_sql, column, left, parent_sql, target, right):
+        """Prove both key columns hold only integers exactly representable as DOUBLE."""
+        for sql, field, dtype in ((child_sql, column, left), (parent_sql, target, right)):
+            value = qi(field)
+            invalid = f"{value} < -9007199254740992 OR {value} > 9007199254740992"
+            if dtype in FLOATS:
+                invalid += f" OR NOT isfinite({value}) OR {value} != trunc({value})"
+            if self.con.execute(f"SELECT count(*) FROM ({sql}) keys WHERE {invalid}").fetchone()[0]:
+                return False
+        return True
+
     def foreign_key(self, fk, parent):
         columns, targets = fk.columns, fk.target_columns
         if any(c not in self.data.columns for c in columns) or any(
             c not in parent.data.columns for c in targets
         ):
             raise ValueError("Foreign-key column is missing")
-
-        def relation(side, fields):
-            predicates = [
-                side.values[c].na
-                for c in fields
-                if c in side.values and side.schema.columns[c].na_values
-            ]
-            if not predicates:
-                return f"SELECT * FROM {qi(side.typed)}", 0
-            na = " OR ".join(predicates)
-            row = qi(side.data.row_column)
-            exempt = (
-                self.con.execute(
-                    f"SELECT count(*) FROM {qi(side.data.table)} WHERE {na}"
-                ).fetchone()[0]
-                if na != "FALSE"
-                else 0
-            )
-            sql = (
-                f"SELECT * FROM {qi(side.typed)} WHERE {row} NOT IN "
-                f"(SELECT {row} FROM {qi(side.data.table)} WHERE {na})"
-            )
-            return sql, exempt
-
-        child_sql, child_na = relation(self, columns)
-        parent_sql, parent_na = relation(parent, targets)
+        child_sql, child_na = self._relation(self, columns)
+        parent_sql, parent_na = self._relation(parent, targets)
         comparisons = []
         for column, target in zip(columns, targets, strict=True):
             left = self.values[column].dtype if column in self.values else self.data.types[column]
@@ -923,19 +949,9 @@ class DatasetChecks:
                 if target in parent.values
                 else parent.data.types[target]
             )
-
-            def exact_float(column=column, left=left, target=target, right=right):
-                for sql, field, dtype in ((child_sql, column, left), (parent_sql, target, right)):
-                    value = qi(field)
-                    invalid = f"{value} < -9007199254740992 OR {value} > 9007199254740992"
-                    if dtype in FLOATS:
-                        invalid += f" OR NOT isfinite({value}) OR {value} != trunc({value})"
-                    if self.con.execute(
-                        f"SELECT count(*) FROM ({sql}) keys WHERE {invalid}"
-                    ).fetchone()[0]:
-                        return False
-                return True
-
+            exact_float = functools.partial(
+                self._exact_float_keys, child_sql, column, left, parent_sql, target, right
+            )
             a, b = key_casts(column, left, right, exact_float)
             lhs, rhs = f"child.{qi(column)}", f"parent.{qi(target)}"
             if a:

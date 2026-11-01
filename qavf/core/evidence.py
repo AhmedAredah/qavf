@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -21,6 +22,45 @@ class EvidenceRecords(list):
 
 def _identity(value):
     return value
+
+
+def _decode_temporal(parser, value):
+    """Parse temporal text into a Python value when it is representable."""
+    if value is None or parser is None:
+        return value
+    try:
+        return parser(value)
+    except ValueError:
+        # Infinity and years outside Python's range stay exact text.
+        return value
+
+
+def _decode_list(child, values):
+    """Decode each element of a list evidence value."""
+    return None if values is None else [child.decode(v) for v in values]
+
+
+def _decode_struct(children, value):
+    """Decode each field of a struct evidence value."""
+    return (
+        None
+        if value is None
+        else {name: child.decode(value[name]) for name, child in children.items()}
+    )
+
+
+def _decode_map(mapping_key, key, value, entries):
+    """Decode a map evidence value as a dict, or parallel arrays for non-JSON keys."""
+    if entries is None:
+        return None
+    # Non-JSON scalar keys need the parallel-array representation;
+    # rebuilding a Python dict would reject structs or lose types.
+    if not mapping_key:
+        return {
+            "key": [key.decode(entry["key"]) for entry in entries],
+            "value": [value.decode(entry["value"]) for entry in entries],
+        }
+    return {key.decode(k): value.decode(v) for k, v in entries.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,23 +114,13 @@ class EvidenceProjection:
                 if kind in {"time", "time with time zone"}
                 else None
             )
-
-            def decode_temporal(value):
-                if value is None or parser is None:
-                    return value
-                try:
-                    return parser(value)
-                except ValueError:
-                    # Infinity and years outside Python's range stay exact text.
-                    return value
-
-            return cls(temporal, decode_temporal)
+            return cls(temporal, functools.partial(_decode_temporal, parser))
         if kind in {"list", "array"}:
             item = f"__qavf_evidence_item_{depth}"
             child = cls.build(item, dict(dtype.children)["child"], depth + 1)
             return cls(
                 f"list_transform({expression}, {item} -> {child.sql})",
-                lambda values: None if values is None else [child.decode(v) for v in values],
+                functools.partial(_decode_list, child),
             )
         if kind == "struct":
             children = {
@@ -100,11 +130,7 @@ class EvidenceProjection:
             fields = ", ".join(f"{qi(name)} := {child.sql}" for name, child in children.items())
             return cls(
                 f"CASE WHEN {expression} IS NULL THEN NULL ELSE struct_pack({fields}) END",
-                lambda value: (
-                    None
-                    if value is None
-                    else {name: child.decode(value[name]) for name, child in children.items()}
-                ),
+                functools.partial(_decode_struct, children),
             )
         if kind == "map":
             item = f"__qavf_evidence_entry_{depth}"
@@ -129,24 +155,14 @@ class EvidenceProjection:
                 "double",
                 "bignum",
             }
-
-            def decode_map(entries):
-                if entries is None:
-                    return None
-                # Non-JSON scalar keys need the parallel-array representation;
-                # rebuilding a Python dict would reject structs or lose types.
-                if not mapping_key:
-                    return {
-                        "key": [key.decode(entry["key"]) for entry in entries],
-                        "value": [value.decode(entry["value"]) for entry in entries],
-                    }
-                return {key.decode(k): value.decode(v) for k, v in entries.items()}
-
             entries = (
                 f"list_transform(map_entries({expression}), {item} -> "
                 f"struct_pack(key := {key.sql}, value := {value.sql}))"
             )
-            return cls(f"map_from_entries({entries})" if mapping_key else entries, decode_map)
+            return cls(
+                f"map_from_entries({entries})" if mapping_key else entries,
+                functools.partial(_decode_map, mapping_key, key, value),
+            )
         return cls(expression)
 
 

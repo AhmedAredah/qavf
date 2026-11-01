@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import tempfile
 from datetime import UTC, datetime
 from time import perf_counter
@@ -231,9 +232,7 @@ class NativeRunner:
                     (("INP-009",), executor.applicability),
                 ):
                     self._stage(out, name, ids, method)
-            self._stage(
-                out, name, ("INP-005",), lambda executor=executor: executor.foreign_keys(checks)
-            )
+            self._stage(out, name, ("INP-005",), functools.partial(executor.foreign_keys, checks))
             self._stage(out, name, ("INP-006",), executor.expressions)
         return checks
 
@@ -242,48 +241,48 @@ class NativeRunner:
             return
         for assertion in self.settings.assertions:
             snapshot = "__qavf_assertion_" + uuid4().hex
+            self._stage(
+                out, "*", ("INP-007",), functools.partial(self._assertion, out, assertion, snapshot)
+            )
 
-            def execute(assertion=assertion, snapshot=snapshot):
-                try:
-                    sql = resolve_sql_paths(
-                        validate_query(assertion.sql),
-                        self.settings.base_dir,
-                        known_tables=self.settings.datasets,
-                    )
-                    out.connection.execute(f"CREATE TEMP TABLE {qi(snapshot)} AS {sql}")
-                    count = out.connection.execute(
-                        f"SELECT count(*) FROM {qi(snapshot)}"
-                    ).fetchone()[0]
-                    records = (
-                        out.records(
-                            f"SELECT * FROM {qi(snapshot)} "
-                            f"LIMIT {self.settings.engine.max_affected_records}"
-                        )
-                        if count
-                        else []
-                    )
-                    out.add(
-                        "INP-007",
-                        "assertion",
-                        "*",
-                        count=count,
-                        records=records,
-                        parameters={"name": assertion.name, "sql": assertion.sql},
-                        severity=assertion.severity,
-                    )
-                except Exception as exc:
-                    out.add(
-                        "INP-007",
-                        "assertion",
-                        "*",
-                        status=Status.ERROR,
-                        message=redact_text(str(exc)),
-                        parameters={"name": assertion.name, "sql": assertion.sql},
-                    )
-                finally:
-                    out.connection.execute(f"DROP TABLE IF EXISTS {qi(snapshot)}")
-
-            self._stage(out, "*", ("INP-007",), execute)
+    def _assertion(self, out, assertion, snapshot):
+        """Run one SQL assertion into a temporary snapshot and record its result."""
+        try:
+            sql = resolve_sql_paths(
+                validate_query(assertion.sql),
+                self.settings.base_dir,
+                known_tables=self.settings.datasets,
+            )
+            out.connection.execute(f"CREATE TEMP TABLE {qi(snapshot)} AS {sql}")
+            count = out.connection.execute(f"SELECT count(*) FROM {qi(snapshot)}").fetchone()[0]
+            records = (
+                out.records(
+                    f"SELECT * FROM {qi(snapshot)} "
+                    f"LIMIT {self.settings.engine.max_affected_records}"
+                )
+                if count
+                else []
+            )
+            out.add(
+                "INP-007",
+                "assertion",
+                "*",
+                count=count,
+                records=records,
+                parameters={"name": assertion.name, "sql": assertion.sql},
+                severity=assertion.severity,
+            )
+        except Exception as exc:
+            out.add(
+                "INP-007",
+                "assertion",
+                "*",
+                status=Status.ERROR,
+                message=redact_text(str(exc)),
+                parameters={"name": assertion.name, "sql": assertion.sql},
+            )
+        finally:
+            out.connection.execute(f"DROP TABLE IF EXISTS {qi(snapshot)}")
 
     def run(self):
         from qavf.audit_codec import canonical_digest

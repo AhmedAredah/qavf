@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Literal
 
 import polars as pl
@@ -331,6 +332,16 @@ def observed_keys(
     )
 
 
+def _na_key_count(values: CanonicalKeyValues, source: pl.LazyFrame) -> pl.LazyFrame:
+    """Sum the rows whose key declares an N/A component."""
+    return source.select(values.na_expr().sum())
+
+
+def _collect_dataset(ctx: DataContext, dataset: str, selected: pl.LazyFrame) -> pl.DataFrame:
+    """Collect a plan under the dataset's own execution context."""
+    return ctx.collect(dataset, selected)
+
+
 def key_na_rows(
     ctx: DataContext,
     dataset: str,
@@ -356,13 +367,10 @@ def key_na_rows(
                 normalize_missing=False,
             ).item()
         )
-
-    def reduction(source):
-        return source.select(values.na_expr().sum())
-
+    reduction = partial(_na_key_count, values)
     if plan is None:
         return int(ctx.reduce(dataset, reduction).item())
-    collect = collector or (lambda selected: ctx.collect(dataset, selected))
+    collect = collector or partial(_collect_dataset, ctx, dataset)
     return int(collect(reduction(plan)).item())
 
 

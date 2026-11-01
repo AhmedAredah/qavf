@@ -8,6 +8,7 @@ invalid values become null and are handled by the caller's null contract.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from functools import partial
 
 import polars as pl
 
@@ -19,6 +20,20 @@ from qavf.rules.helpers import missing_expr
 from qavf.settings import ColumnSpec
 from qavf.sources.sql import quote_identifier, sql_literal
 from qavf.text_types import sql_value
+
+
+def _collect_dataset(ctx: DataContext, dataset: str, selected: pl.LazyFrame) -> pl.DataFrame:
+    """Collect a plan under the dataset's own execution context."""
+    return ctx.collect(dataset, selected)
+
+
+def _collect_reduced(
+    collect: Callable[[pl.LazyFrame], pl.DataFrame],
+    plan: pl.LazyFrame,
+    reduce: Callable[[pl.LazyFrame], pl.LazyFrame],
+) -> pl.DataFrame:
+    """Collect one reduction of a fixed plan."""
+    return collect(reduce(plan))
 
 
 class CanonicalKeyValues:
@@ -70,8 +85,10 @@ class CanonicalKeyValues:
         ]
         converted = {conversion.column for conversion in conversions}
         if conversions:
-            collect = collector or (lambda selected: self.ctx.collect(self.dataset, selected))
-            conversion = ConvertedPlan.resolved(conversions, lambda reduce: collect(reduce(plan)))
+            collect = collector or partial(_collect_dataset, self.ctx, self.dataset)
+            conversion = ConvertedPlan.resolved(
+                conversions, partial(_collect_reduced, collect, plan)
+            )
             plan = conversion(plan)
         empty = pl.DataFrame(schema=plan.collect_schema())
         return plan.with_columns(

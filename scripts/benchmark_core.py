@@ -10,6 +10,7 @@ so no private data, Polars, pandas, or generated CSV files are required.
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib.metadata
 import json
 import os
@@ -18,11 +19,86 @@ import statistics
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 from peak_rss import peak_rss_kib
 
 MODES = ("startup", "narrow", "wide", "row_budget", "retention", "evidence")
+
+
+class _Patched:
+    """A callable class attribute that binds like the method it replaces."""
+
+    def __get__(self, instance, owner=None):
+        return self if instance is None else types.MethodType(self, instance)
+
+
+class _ObservedLoad(_Patched):
+    """Time each input load and record native memory and relations afterwards."""
+
+    def __init__(self, original, observations):
+        self.original, self.observations = original, observations
+
+    def __call__(self, reader, *values, **options):
+        load_started = time.perf_counter()
+        try:
+            return self.original(reader, *values, **options)
+        finally:
+            memory = reader.connection.execute(
+                "SELECT sum(memory_usage_bytes) FROM duckdb_memory()"
+            ).fetchone()[0]
+            self.observations.append(
+                {
+                    "seconds": time.perf_counter() - load_started,
+                    "native_memory_bytes": memory,
+                    "relations": reader.connection.execute("SHOW TABLES").fetchall(),
+                }
+            )
+
+
+class _ObservedRecords(_Patched):
+    """Record how many evidence records and text bytes reach the collector."""
+
+    def __init__(self, original, captured):
+        self.original, self.captured = original, captured
+
+    def __call__(self, collector, query):
+        records = self.original(collector, query)
+        self.captured.append(
+            {
+                "records": len(records),
+                "text_bytes_before_collector_budget": sum(
+                    len(value.encode("utf-8"))
+                    for record in records
+                    for value in record.values()
+                    if isinstance(value, str)
+                ),
+            }
+        )
+        return records
+
+
+def _run(args, validate, value, schema, config, rows):
+    """Validate once, assert the mode's expected outcome and return its timing."""
+    tick = time.perf_counter()
+    report = validate(value, schema=schema, backend="duckdb", config=config)
+    elapsed = time.perf_counter() - tick
+    errors = [result for result in report.results if result.status == "ERROR"]
+    if args.mode == "row_budget":
+        assert errors and report.verdict() == "incomplete"
+    elif args.mode == "evidence":
+        failed = [result for result in report.results if result.status == "FAIL"]
+        assert not errors and len(failed) == 1
+        assert failed[0].affected_count == 50 and failed[0].affected_count_exact
+        assert failed[0].total_records == 50 and failed[0].evidence_truncated
+        assert failed[0].affected_records == []
+    else:
+        assert report.exit_code() == 0
+        keys = [result for result in report.results if result.rule_id == "INP-004"]
+        assert len(keys) == (2 if args.mode == "retention" else 1)
+        assert all(result.affected_count == 0 and result.total_records == rows for result in keys)
+    return report, elapsed
 
 
 def worker(args):
@@ -38,39 +114,8 @@ def worker(args):
         from qavf.core.sources import InputReader
 
         original_load, original_records = InputReader.load, ResultCollector.records
-
-        def observed_load(reader, *values, **options):
-            load_started = time.perf_counter()
-            try:
-                return original_load(reader, *values, **options)
-            finally:
-                memory = reader.connection.execute(
-                    "SELECT sum(memory_usage_bytes) FROM duckdb_memory()"
-                ).fetchone()[0]
-                observations.append(
-                    {
-                        "seconds": time.perf_counter() - load_started,
-                        "native_memory_bytes": memory,
-                        "relations": reader.connection.execute("SHOW TABLES").fetchall(),
-                    }
-                )
-
-        def observed_records(collector, query):
-            records = original_records(collector, query)
-            captured.append(
-                {
-                    "records": len(records),
-                    "text_bytes_before_collector_budget": sum(
-                        len(value.encode("utf-8"))
-                        for record in records
-                        for value in record.values()
-                        if isinstance(value, str)
-                    ),
-                }
-            )
-            return records
-
-        InputReader.load, ResultCollector.records = observed_load, observed_records
+        InputReader.load = _ObservedLoad(original_load, observations)
+        ResultCollector.records = _ObservedRecords(original_records, captured)
     rows = 2400 if args.mode == "startup" else args.rows
     columns = ", ".join(f"CAST(i+{n} AS BIGINT) AS c{n}" for n in range(args.width))
     value = Query(f"SELECT {columns} FROM range({rows}) t(i)")
@@ -86,28 +131,7 @@ def worker(args):
         value = Query("SELECT i AS id, repeat('x',262144) AS payload FROM range(50) t(i)")
         schema = {"columns": {"id": {"le": -1}}, "evidence_columns": "all"}
 
-    def run():
-        tick = time.perf_counter()
-        report = validate(value, schema=schema, backend="duckdb", config=config)
-        elapsed = time.perf_counter() - tick
-        errors = [result for result in report.results if result.status == "ERROR"]
-        if args.mode == "row_budget":
-            assert errors and report.verdict() == "incomplete"
-        elif args.mode == "evidence":
-            failed = [result for result in report.results if result.status == "FAIL"]
-            assert not errors and len(failed) == 1
-            assert failed[0].affected_count == 50 and failed[0].affected_count_exact
-            assert failed[0].total_records == 50 and failed[0].evidence_truncated
-            assert failed[0].affected_records == []
-        else:
-            assert report.exit_code() == 0
-            keys = [result for result in report.results if result.rule_id == "INP-004"]
-            assert len(keys) == (2 if args.mode == "retention" else 1)
-            assert all(
-                result.affected_count == 0 and result.total_records == rows for result in keys
-            )
-        return report, elapsed
-
+    run = functools.partial(_run, args, validate, value, schema, config, rows)
     report, elapsed = run()
     end_to_end = time.perf_counter() - started
     warm = [run()[1] for _ in range(3)] if args.mode == "startup" else []
@@ -133,9 +157,7 @@ def main():
     root = Path(__file__).resolve().parents[1]
     parser.add_argument("--before", type=Path, default=root.parent / "qavf-previous")
     parser.add_argument("--after", type=Path, default=root)
-    parser.add_argument(
-        "--output", type=Path, default=root.parent / "benchmark-core.json"
-    )
+    parser.add_argument("--output", type=Path, default=root.parent / "benchmark-core.json")
     parser.add_argument("--rows", type=int, default=200_000)
     parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--repeats", type=int, default=3)

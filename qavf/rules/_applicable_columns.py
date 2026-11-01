@@ -8,6 +8,7 @@ volatile inputs coherent; only configured N/A columns enter this adapter.
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 import polars as pl
@@ -18,6 +19,26 @@ from qavf.rules._declared_types import ConvertedPlan, TextConversion, converts_t
 from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules.helpers import fresh_internal
 from qavf.settings import ColumnSpec, SchemaSpec
+
+
+def _population_counts(
+    policy: NotApplicablePolicy, column: str, dtype: Any, frame: pl.LazyFrame
+) -> pl.LazyFrame:
+    """Count all rows and the column's N/A rows in one reduction."""
+    return frame.select(pl.len().alias("rows"), policy.polars(column, dtype).sum().alias("na"))
+
+
+def _applicable_rows(
+    policy: NotApplicablePolicy,
+    column: str,
+    dtype: Any,
+    original_row: str,
+    plan: Any,
+    frame: pl.LazyFrame,
+) -> pl.LazyFrame:
+    """Number source rows, drop N/A values and apply any declared conversion."""
+    selected = frame.with_row_index(original_row).filter(~policy.polars(column, dtype))
+    return plan(selected) if plan else selected
 
 
 class ApplicableColumns:
@@ -50,11 +71,7 @@ class ApplicableColumns:
         if self.ctx.evidence_limit and self.ctx.evidence_bytes:
             needed.extend(EvidenceColumns(self.schema, tuple(actual)).of(needed))
         with self.ctx.observe(self.dataset, list(dict.fromkeys(needed))) as observed:
-            totals = observed.reduce(
-                lambda frame: frame.select(
-                    pl.len().alias("rows"), policy.polars(column, actual[column]).sum().alias("na")
-                )
-            )
+            totals = observed.reduce(partial(_population_counts, policy, column, actual[column]))
             rows, na_count = int(totals["rows"][0]), int(totals["na"][0] or 0)
             clean = spec.model_copy(update={"na_values": []})
             conversion = (
@@ -63,13 +80,9 @@ class ApplicableColumns:
                 else None
             )
             plan = ConvertedPlan.resolved([conversion], observed.reduce) if conversion else None
-
-            def applicable(frame: pl.LazyFrame) -> pl.LazyFrame:
-                selected = frame.with_row_index(original_row).filter(
-                    ~policy.polars(column, actual[column])
-                )
-                return plan(selected) if plan else selected
-
+            applicable = partial(
+                _applicable_rows, policy, column, actual[column], original_row, plan
+            )
             columns = {
                 name: ColumnSpec(
                     nullable=True,

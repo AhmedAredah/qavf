@@ -22,24 +22,46 @@ def expression_columns(expression):
         return None
     if tree.get("error"):
         return None
-    columns = set()
-    unsafe = False
+    collector = _ColumnCollector()
+    collector.visit(tree)
+    return None if collector.unsafe else frozenset(collector.columns)
 
-    def visit(node):
-        nonlocal unsafe
+
+class _ColumnCollector:
+    """Walk a serialized SQL tree, gathering column references and unsafe nodes."""
+
+    def __init__(self):
+        self.columns = set()
+        self.unsafe = False
+
+    def visit(self, node):
+        """Record one node's column references, then visit its children."""
         if isinstance(node, dict):
             if node.get("class") in {"STAR", "SUBQUERY"}:
-                unsafe = True
+                self.unsafe = True
             if node.get("class") == "COLUMN_REF":
-                columns.update(node["column_names"])
+                self.columns.update(node["column_names"])
             for value in node.values():
-                visit(value)
+                self.visit(value)
         elif isinstance(node, list):
             for value in node:
-                visit(value)
+                self.visit(value)
 
-    visit(tree)
-    return None if unsafe else frozenset(columns)
+
+def _dependency_order(names, source_dependencies, component):
+    """Order a component's datasets so query sources follow their parents."""
+    remaining, result = set(component), []
+    while remaining:
+        ready = [
+            name
+            for name in names
+            if name in remaining and not source_dependencies[name].intersection(remaining)
+        ]
+        if not ready:  # cyclic references are reported as load errors
+            ready = [name for name in names if name in remaining]
+        result.extend(ready)
+        remaining.difference_update(ready)
+    return tuple(result)
 
 
 @dataclass(frozen=True)
@@ -85,21 +107,7 @@ class NativePlan:
         source_parents = frozenset(
             parent for values in source_dependencies.values() for parent in values
         )
-
-        def ordered(component):
-            remaining, result = set(component), []
-            while remaining:
-                ready = [
-                    name
-                    for name in names
-                    if name in remaining and not source_dependencies[name].intersection(remaining)
-                ]
-                if not ready:  # cyclic references are reported as load errors
-                    ready = [name for name in names if name in remaining]
-                result.extend(ready)
-                remaining.difference_update(ready)
-            return tuple(result)
-
+        ordered = functools.partial(_dependency_order, names, source_dependencies)
         conditions = [
             condition
             for spec in settings.datasets.values()

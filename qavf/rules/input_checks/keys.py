@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from typing import Any, ClassVar, Literal, TypedDict
 
 import polars as pl
@@ -15,6 +16,7 @@ from qavf.rules._conditional_keys import ConditionalKeySource
 from qavf.rules._contracts import contract_error
 from qavf.rules._duplicate_rows import DuplicateRows
 from qavf.rules._execution import (
+    _na_key_count,
     key_relation,
     observed_keys,
 )
@@ -256,12 +258,7 @@ class DuplicateKeyRule(_SelectsDatasets):
                             ).item()
                         )
                     else:
-
-                        def na_reduction(
-                            plan: pl.LazyFrame, values: CanonicalKeyValues = key_values
-                        ) -> pl.LazyFrame:
-                            return plan.select(values.na_expr().sum())
-
+                        na_reduction = partial(_na_key_count, key_values)
                         na_rows = int(ctx.reduce(dataset, na_reduction).item())
                     if na_rows:
                         exempt_na[label] = na_rows

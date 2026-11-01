@@ -11,6 +11,7 @@ same text.
 from __future__ import annotations
 
 import re
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 if TYPE_CHECKING:
@@ -147,6 +148,18 @@ def polars_value(text: pl.Expr, spec: TextType) -> tuple[pl.Expr, pl.Expr]:
     return pl.when(missing).then(None).otherwise(parsed), missing
 
 
+def _governed_datetime_text(convert: Any, spec: TextType, value: Any) -> Any:
+    """Render one value through the governed datetime text policy of a spec."""
+    return convert(
+        value,
+        spec.datetime_unit,
+        spec.timezone or "",
+        spec.ambiguous,
+        spec.nonexistent,
+        spec.format or "",
+    )
+
+
 def _polars_parsed(text: pl.Expr, spec: TextType) -> pl.Expr:
     import polars as pl
 
@@ -154,14 +167,7 @@ def _polars_parsed(text: pl.Expr, spec: TextType) -> pl.Expr:
         from qavf.text_policies import datetime_text
 
         return text.map_elements(
-            lambda value: datetime_text(
-                value,
-                spec.datetime_unit,
-                spec.timezone or "",
-                spec.ambiguous,
-                spec.nonexistent,
-                spec.format or "",
-            ),
+            partial(_governed_datetime_text, datetime_text, spec),
             return_dtype=pl.String,
         ).str.to_datetime("%Y-%m-%d %H:%M:%S%.f", time_unit=spec.datetime_unit, strict=False)
 
