@@ -104,3 +104,17 @@ def test_a_lower_bound_reads_at_least_on_the_failure_card() -> None:
         total_records=10, unit="rows",
     )  # fmt: skip
     assert _affected(result) == "at least 5 rows of 10"
+
+
+def test_native_csv_missing_a_declared_column_still_checks_the_others(tmp_path: Path) -> None:
+    from qavf import validate
+    from qavf.engine.severity import Status
+
+    path = tmp_path / "x.csv"
+    path.write_bytes(b"a,b\n1,2\n-3,4\n")
+    schema = {"columns": {"a": {"dtype": "int", "ge": 0}, "missing": {"dtype": "int"}}}
+    report = validate(str(path), schema=schema, backend="duckdb")
+    assert all(r.status is Status.PASS for r in report.results_for("INP-001"))
+    assert any(r.status is Status.FAIL for r in report.results_for("INP-002"))
+    [limit] = [r for r in report.results_for("INP-003") if r.status is Status.FAIL]
+    assert limit.affected_count == 1

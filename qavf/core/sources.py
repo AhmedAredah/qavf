@@ -486,7 +486,9 @@ class InputReader:
             original.get(c, c) for c, cs in columns.items() if cs.dtype is not None or cs.na_values
         ]
         declared = list(dict.fromkeys([*file.text_columns, *governed]))
-        if file.text_columns or any(not cs.required for cs in columns.values()):
+        # A declared column absent from the file is reported by the schema check;
+        # typing it here would make the reader reject the whole file.
+        if declared:
             locations = [glob.escape(str(p)) for p in matched] if matched is not None else path
             present = {
                 row[0].casefold()

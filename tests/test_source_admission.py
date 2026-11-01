@@ -40,8 +40,8 @@ def test_user_rowid_never_controls_evidence_or_condition_scope():
 
 def test_internal_position_names_are_case_insensitive(source_reader):
     reader, connection = source_reader
-    loaded = reader.load("data", pa.table({"__QAVF_ROW": [100, 200]}), DatasetSpec())
-    assert loaded.row_column == "__qavf_row_"
+    loaded = reader.load("data", pa.table({"_ROW": [100, 200]}), DatasetSpec())
+    assert loaded.row_column == "qavf__row"
     assert connection.execute(f'SELECT "{loaded.row_column}" FROM "{loaded.table}"').fetchall() == [
         (0,),
         (1,),
