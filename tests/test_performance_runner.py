@@ -283,7 +283,9 @@ time.sleep(120)
     handle = kernel32.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
     if handle:
         try:
-            assert kernel32.WaitForSingleObject(handle, 0) == 0
+            # Job accounting drops a member slightly before its process object
+            # is signalled; a reaped grandchild exits within the bounded wait.
+            assert kernel32.WaitForSingleObject(handle, 10_000) == 0
         finally:
             kernel32.CloseHandle(handle)
     # A surviving grandchild would keep this file locked on Windows.
