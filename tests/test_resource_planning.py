@@ -1,7 +1,10 @@
 """Metadata-only estimates improve defaults without widening explicit caps."""
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from qavf.engine.thread_budget import connection_threads
 from qavf.resource_plan import ResourcePlan, _available_memory
@@ -56,7 +59,7 @@ def test_tiny_file_defaults_leave_room_for_native_csv_buffers(tmp_path, monkeypa
 
 def test_file_descriptor_does_not_need_optional_adapters(tmp_path):
     path = tmp_path / "data.csv"
-    path.write_text("x\n7\n")
+    path.write_bytes(b"x\n7\n")
     plan = ResourcePlan.build(configuration(), {"d": SimpleNamespace(path=path)})
     assert plan.input_bytes == len("x\n7\n")
 
@@ -128,6 +131,7 @@ def test_bound_plan_does_not_leak_into_nested_or_later_contexts():
     assert ResourcePlan.for_context(settings, frames) is not plan
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc and cgroup files")
 def test_cgroup_reclaimable_cache_is_not_treated_as_live_allocations(monkeypatch):
     original = Path.read_text
 
@@ -180,3 +184,21 @@ def test_real_csv_keeps_reader_headroom_after_worker_reduction(tmp_path, monkeyp
     ]
     assert report.metadata.resource_usage["duckdb_threads_per_connection"] == 1
     assert report.results_for("INP-004")[0].affected_count == 2000
+
+
+def _unknown_memory() -> None:
+    """A platform that reports no available memory."""
+
+
+def test_unknown_memory_imposes_no_automatic_cap(tmp_path, monkeypatch):
+    path = tmp_path / "data.csv"
+    path.write_bytes(b"x\n7\n")
+    monkeypatch.setattr("qavf.resource_plan._available_memory", _unknown_memory)
+    plan = ResourcePlan.build(configuration(), {"d": SimpleNamespace(path=path)})
+    assert plan.memory_bytes is None and plan.automatic_memory
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows memory API")
+def test_windows_reports_available_memory():
+    available = _available_memory()
+    assert available is not None and available > 0

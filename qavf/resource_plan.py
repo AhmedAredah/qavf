@@ -7,6 +7,7 @@ dataframe library is needed to plan a run.
 
 from __future__ import annotations
 
+import ctypes
 import glob
 import os
 import shutil
@@ -23,9 +24,43 @@ _MIB = 1024**2
 _BOUND_PLAN: ContextVar[Any] = ContextVar("qavf_resource_plan", default=None)
 
 
-def _available_memory() -> int:
-    """Conservative host/container allowance, without importing psutil."""
+class _MemoryStatus(ctypes.Structure):
+    """Windows ``MEMORYSTATUSEX``: physical and virtual memory of the host."""
+
+    _fields_ = [
+        ("dwLength", ctypes.c_ulong),
+        ("dwMemoryLoad", ctypes.c_ulong),
+        ("ullTotalPhys", ctypes.c_ulonglong),
+        ("ullAvailPhys", ctypes.c_ulonglong),
+        ("ullTotalPageFile", ctypes.c_ulonglong),
+        ("ullAvailPageFile", ctypes.c_ulonglong),
+        ("ullTotalVirtual", ctypes.c_ulonglong),
+        ("ullAvailVirtual", ctypes.c_ulonglong),
+        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+    ]
+
+
+def _windows_available_memory() -> int | None:
+    """Available physical memory on Windows, or ``None`` when it cannot be read."""
+    status = _MemoryStatus()
+    status.dwLength = ctypes.sizeof(_MemoryStatus)
+    try:
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
+            return int(status.ullAvailPhys)
+    except (AttributeError, OSError):
+        pass
+    return None
+
+
+def _available_memory() -> int | None:
+    """Conservative host/container allowance, without importing psutil.
+
+    ``None`` when the platform does not report it: an automatic budget is then not
+    imposed, rather than derived from a guess.
+    """
     candidates: list[int] = []
+    if sys.platform == "win32" and (windows := _windows_available_memory()) is not None:
+        candidates.append(windows)
     try:
         available = next(
             (
@@ -61,7 +96,7 @@ def _available_memory() -> int:
             candidates.append(max(_MIB, limit - used))
         except (OSError, ValueError):
             pass
-    return min(candidates) if candidates else 2 * 1024**3
+    return min(candidates) if candidates else None
 
 
 def _column_width(spec: Any) -> int:
@@ -165,8 +200,10 @@ class ResourcePlan:
             # share the other half for each worker. Provision the key estimate
             # after those partitions, rather than shrink it below its own need.
             desired = max(workers * 512 * _MIB, input_bytes * 3 + key_state * 4)
-            memory = max(_MIB, min(desired, _available_memory() // 2))
-            workers = min(workers, max(1, memory // (4 * 128 * _MIB)))
+            available = _available_memory()
+            if available is not None:
+                memory = max(_MIB, min(desired, available // 2))
+                workers = min(workers, max(1, memory // (4 * 128 * _MIB)))
         if memory is not None and key_state > 32 * _MIB:
             # Two possible handles per worker share half of the target with
             # retained data. Reserve room for the largest key operator rather
