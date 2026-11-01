@@ -39,6 +39,10 @@ CLI.
   those patterns.
 - Exact violation and duplicate totals never depend on the evidence sample size or
   evidence byte limits.
+- A foreign key between an integer and a float column is compared only when every
+  value converts exactly; otherwise it is not assessed.
+- Evidence rows carry `_row`. The `_file`, `_file_row` and `violates` columns of the
+  full backend are not added.
 
 ## Resources and timeouts
 

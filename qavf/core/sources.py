@@ -6,7 +6,7 @@ import glob
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -46,6 +46,15 @@ class LoadedDataset:
     metadata: dict = field(default_factory=dict)
     owned_relations: tuple[tuple[str, str], ...] = ()
 
+
+def evidence_row_name(columns: Sequence[str]) -> str:
+    """The row-position column, named ``_row`` as evidence documents it.
+
+    A source column already called ``_row`` keeps its name; the position is then
+    ``qavf__row``, as on the Polars backend.
+    """
+    preferred = "_row" if "_row" not in {c.casefold() for c in columns} else "qavf__row"
+    return SourceNames.fresh(preferred, columns)
 
 class InputReader:
     """Own QAVF snapshots; borrowed frames and connections remain caller-owned."""
@@ -278,7 +287,7 @@ class InputReader:
                 desc = con.execute(f"DESCRIBE {sql}").fetchall()
                 metadata["source"] = source_kind
             projection = self._projection(name, spec, desc)
-            row_column = SourceNames.fresh("__qavf_row", projection.original_columns)
+            row_column = evidence_row_name(projection.original_columns)
             columns_sql = "".join(f", {qi(a)} AS {qi(b)}" for a, b in projection.selected)
             sql = self._bounded(sql, budget)
             # A materialized position never resolves to a user column called rowid.
@@ -319,7 +328,7 @@ class InputReader:
         owned.append(("registered", registration))
         desc = self.connection.execute(f"DESCRIBE {qi(registration)}").fetchall()
         projection = self._projection(name, spec, desc)
-        row_column = SourceNames.fresh("__qavf_row", projection.original_columns)
+        row_column = evidence_row_name(projection.original_columns)
         selected = "".join(f", {qi(a)} AS {qi(b)}" for a, b in projection.selected)
         self.connection.execute(
             f"CREATE TEMP TABLE {qi(table)} AS SELECT 0::BIGINT AS {qi(row_column)}"

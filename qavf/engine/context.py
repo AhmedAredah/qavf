@@ -1103,8 +1103,8 @@ class DataContext:
                 sample, count = BoundedSample(limit).read(con, resolved, self._check_cancelled)
             else:
                 result = con.execute(sample_statement(resolved, limit, ordered=True))
-                # Newer DuckDB deprecates fetch_arrow_table; the 1.2 floor lacks
-                # to_arrow_table.
+                # Newer DuckDB deprecates fetch_arrow_table; older releases
+                # lack to_arrow_table.
                 fetch = getattr(result, "to_arrow_table", None) or result.fetch_arrow_table
                 sample, count = sample_result(fetch())
         self._check_cancelled()

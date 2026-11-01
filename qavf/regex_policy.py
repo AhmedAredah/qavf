@@ -46,6 +46,29 @@ def check_regex_syntax(pattern: str) -> None:
                     raise ValueError(f"invalid regex {pattern!r}: unmatched parenthesis")
     if escaped or groups or classes:
         raise ValueError(f"invalid regex {pattern!r}: unclosed group, class, or escape")
+    _compile_rust(pattern)
+
+
+def _compile_rust(pattern: str) -> None:
+    """Compile a nonportable pattern with Polars' Rust engine, when it is installed.
+
+    Only that engine evaluates such patterns, so it alone can reject them (a bad
+    repetition, an unknown Unicode class) while the configuration is checked.
+    Without Polars the selected backend reports them when it runs.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("polars") is None:
+        return
+    import polars as pl
+
+    try:
+        pl.Series([""], dtype=pl.String).str.contains(f"^(?:{pattern})$")
+    except Exception as exc:
+        reason = str(exc).strip().splitlines()
+        raise ValueError(
+            f"invalid regex {pattern!r}: {reason[-1] if reason else type(exc).__name__}"
+        ) from None
 
 
 def require_native_regex(pattern: str) -> None:
