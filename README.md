@@ -99,9 +99,9 @@ assertions:
 documents every option. Paths are relative to the configuration file, and any string
 may use `${ENV_VAR}` so credentials stay out of the file.
 
-See [0.7 configuration and backend compatibility](docs/upgrade_070.md) for
-nullable keys, N/A tokens, number grammar, structured check identity, and the
-capabilities of each backend.
+See [backends and installation](docs/backends.md), [key contracts](docs/key_contracts.md),
+[not-applicable values](docs/applicability.md) and [value policies](docs/value_policies.md)
+for nullable keys, N/A tokens, number grammar and what each backend supports.
 
 ## Cloud storage
 
@@ -337,5 +337,3 @@ for the release checks and [CHANGELOG.md](CHANGELOG.md) for changes.
 ## License
 
 [Apache License 2.0](LICENSE)
-
-See the [0.7.1 implementation and verification report](docs/release_071_report.md) for the additional audit fixes, capability boundaries and measured benchmarks.

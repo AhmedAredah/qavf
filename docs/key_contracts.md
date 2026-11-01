@@ -1,6 +1,6 @@
 # Key equality and duplicate evidence
 
-QAVF 0.7 compares key components using their declared logical types on every
+QAVF compares key components using their declared logical types on every
 input adapter. With `dtype: int`, `07`, `7` and `+7` identify the same key. Set
 `number_grammar: {int_decimal: true}` to also admit `7.0`; the default retains
 0.6's integer-literal grammar. Fractional values are never rounded to keys.

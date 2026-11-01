@@ -39,7 +39,7 @@ precision. Non-aligned Datetime(ns), Duration(ns) or Time identifiers are unasse
 before Python conversion can merge identities; use explicit physical integer keys
 when finer-resolution identities are required.
 
-## Numeric text grammar and option equality (0.7)
+## Numeric text grammar and option equality
 
 Declared numeric text is admitted by a shared grammar before conversion. The
 default integer grammar accepts `07`, `7`, and `+7` as the same integer, but

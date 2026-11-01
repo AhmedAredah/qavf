@@ -1,6 +1,6 @@
 """Fresh-process regression benchmark for bounded native validation.
 
-Example: python scripts/benchmark_core_071.py --before ../qavf-0.7.0 --repeats 3
+Example: python scripts/benchmark_core.py --before ../qavf-previous --repeats 3
 Each process verifies its exact key/violation population before reporting time
 and whole-process peak RSS. Resource modes instrument load-time native memory;
 startup measures uninstrumented cold and warm calls. Inputs are synthetic SQL,
@@ -131,10 +131,10 @@ def worker(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     root = Path(__file__).resolve().parents[1]
-    parser.add_argument("--before", type=Path, default=root.parent / "qavf-0.7.0")
+    parser.add_argument("--before", type=Path, default=root.parent / "qavf-previous")
     parser.add_argument("--after", type=Path, default=root)
     parser.add_argument(
-        "--output", type=Path, default=root.parent / "fix-validation/performance_071.json"
+        "--output", type=Path, default=root.parent / "benchmark-core.json"
     )
     parser.add_argument("--rows", type=int, default=200_000)
     parser.add_argument("--width", type=int, default=32)

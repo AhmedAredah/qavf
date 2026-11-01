@@ -1,7 +1,7 @@
 # Structured check identity
 
 Every `RuleResult` retains `rule_id`, the human-readable `check` label, and the
-existing status/count fields. Version 0.7 adds `check_id`, `scope`, `columns`,
+status/count fields, plus `check_id`, `scope`, `columns`,
 `parameters`, and `checks`. `CheckIdentity` carries the same contract fields plus
 its datasets and rule ID. The complete identity is the combination of operation,
 rule, scope, datasets, columns, and parameters; `check_id` alone names an operation,

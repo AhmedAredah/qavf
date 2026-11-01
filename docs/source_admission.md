@@ -50,13 +50,17 @@ from contextlib import contextmanager
 import pyarrow as pa
 from qavf import BatchSource, Dataset, validate
 
+
 @contextmanager
 def batches():
     # Open/close owned input resources within this context.
-    yield iter([
-        pa.table({"id": [1, 2], "amount": [10.0, 20.0]}),
-        pa.table({"id": [3], "amount": [30.0]}),
-    ])
+    yield iter(
+        [
+            pa.table({"id": [1, 2], "amount": [10.0, 20.0]}),
+            pa.table({"id": [3], "amount": [30.0]}),
+        ]
+    )
+
 
 source = BatchSource(batches, {"id": pa.int64(), "amount": pa.float64()})
 report = validate(

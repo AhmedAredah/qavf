@@ -148,7 +148,7 @@ def check_shared_services() -> None:
             if source == path:
                 fingerprint = report.metadata.datasets[0].fingerprint
                 require(
-                    len(fingerprint.get("sha256", "")) == 64,
+                    len((fingerprint or {}).get("sha256", "")) == 64,
                     "isolated native file lacks its content hash",
                 )
 

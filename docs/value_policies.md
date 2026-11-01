@@ -1,4 +1,4 @@
-# Exact value policies in 0.7.1
+# Exact value policies
 
 These policies apply to generic column contracts on both DuckDB and the optional
 Polars backend. They add no application-specific tokens, names, units, or keys.
@@ -50,9 +50,44 @@ regardless of list order. It applies equally to data and configured options,
 including the distinct domain used by `each_allowed_once`. It does not change
 the source values or normalize string identifiers by default.
 
-Custom boolean words now use the same Unicode lowercase semantics in both
+Custom boolean words use the same Unicode lowercase semantics in both
 backends. For example, `İ` matches the configured true word `i` followed by a
 combining dot; it does not match plain `i`.
+
+## Number spellings and allowed values
+
+```python
+schema = {
+    "columns": {
+        "code": {
+            "dtype": "int",
+            "number_grammar": {
+                "int_decimal": True,
+                "underscores": False,
+                "exponent": False,
+                "special_values": False,
+            },
+            "trim_whitespace": "ascii",
+            "isin": ["07", "+8", "9.0"],
+            "convert_options": True,
+            "each_allowed_once": True,
+        }
+    }
+}
+```
+
+`convert_options` applies the declared numeric conversion to configured options.
+It does not coerce string identifiers. Invalid option spellings or precision loss
+produce a configuration/check error. `each_allowed_once` combines allowed-domain
+membership, uniqueness and complete domain coverage. A repeated value cannot
+compensate for a missing domain member.
+
+`trim_whitespace` is `ascii` (ASCII space only), `unicode`, or `none`. Number grammar
+can control separators, exponents, special floating values and exact integral
+decimal notation. NaN/missing and `allow_infinite` policies continue to apply;
+permitting a spelling does not automatically permit it as a valid finite value.
+Existing `normalize: [case]` with `unique: true` is the built-in case-insensitive
+collision rule; add `trim` when that is part of the intended text equality.
 
 ## Explicit numeric separators
 

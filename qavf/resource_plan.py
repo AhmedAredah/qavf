@@ -10,6 +10,7 @@ from __future__ import annotations
 import glob
 import os
 import shutil
+import sys
 import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -34,11 +35,10 @@ def _available_memory() -> int:
             ),
             None,
         )
-        candidates.append(
-            available
-            if available is not None
-            else os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
-        )
+        if available is None and sys.platform != "win32":
+            available = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
+        if available is not None:
+            candidates.append(available)
     except (ValueError, OSError, AttributeError):
         pass
     for maximum, current in (

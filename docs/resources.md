@@ -73,7 +73,7 @@ A directly constructed `DataContext` defaults to two native handles; advanced us
 can explicitly change `connection_slots`. Reservations remain conservative fixed
 ceilings within the selected concurrency, not dynamically resized live connections.
 
-Starting with 0.7, an omitted memory target and an omitted `spill_max_bytes` use
+An omitted memory target and an omitted `spill_max_bytes` use
 data-aware automatic planning. The legacy `spill_max_bytes` schema default of
 1 GiB remains a baseline, rather than a cap on an automatically planned large
 key workload. An explicitly supplied value, including zero or exactly 1 GiB,

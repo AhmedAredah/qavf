@@ -1,6 +1,6 @@
 # Not-applicable values
 
-QAVF 0.7 adds opt-in N/A tokens for any declared column and source. There are no
+N/A tokens are opt-in for any declared column and source. There are no
 reserved spellings: `N/A`, `-`, and `not measured` are ordinary values unless that
 column declares them in `na_values`.
 
