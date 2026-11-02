@@ -147,7 +147,11 @@ def expand_env(value: Any, environ: Mapping[str, str] | None = None) -> Any:
 def read_config_mapping(path: str | Path) -> tuple[dict[str, Any], Path]:
     """Parse one configuration document before callers assemble inline contracts."""
     source = Path(path).resolve()
-    text = source.read_text(encoding="utf-8")
+    return parse_config_text(source.read_text(encoding="utf-8"), source), source
+
+
+def parse_config_text(text: str, source: Path) -> dict[str, Any]:
+    """Parse configuration text as the content of ``source`` (its suffix picks the format)."""
     match source.suffix.lower():
         case ".yaml" | ".yml":
             try:
@@ -172,7 +176,8 @@ def read_config_mapping(path: str | Path) -> tuple[dict[str, Any], Path]:
     if not isinstance(raw, dict):
         raise ValueError(f"{source}: top level of the configuration must be a mapping")
     raw.pop("$schema", None)
-    return expand_env(raw), source
+    result: dict[str, Any] = expand_env(raw)
+    return result
 
 
 MAX_CONFIGURATION_VALUES = 1_000_000

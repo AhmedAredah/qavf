@@ -13,6 +13,8 @@ All notable changes to this project are documented here. The format follows
   any thread while still returning its report (`metadata.cancelled`).
 - `qavf run --progress` writes progress as JSON lines on stderr; Ctrl-C now
   cancels the run and still writes its reports.
+- `settings_from_text(text, path)` validates unsaved configuration text as the file
+  it would become, and `python -m qavf` runs the command line.
 
 ## [0.6.2] - 2026-11-02
 

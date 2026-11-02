@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from qavf.reports.html import render_html, write_html
     from qavf.reports.models import QAReport, RuleResult
     from qavf.run_control import CancellationToken, RunEvent
-    from qavf.settings import QAVFSettings, load_settings
+    from qavf.settings import QAVFSettings, load_settings, settings_from_text
     from qavf.sources import DataSource, SourceParams
 
 _EXPORTS = {
@@ -89,6 +89,7 @@ _EXPORTS = {
     "profile_input": "qavf.profiling",
     "register": "qavf.engine.registry",
     "render_html": "qavf.reports.html",
+    "settings_from_text": "qavf.settings",
     "validate": "qavf.api",
     "write_html": "qavf.reports.html",
 }
@@ -137,6 +138,7 @@ __all__ = [
     "profile_input",
     "register",
     "render_html",
+    "settings_from_text",
     "validate",
     "write_html",
 ]

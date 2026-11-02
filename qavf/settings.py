@@ -36,6 +36,7 @@ from pydantic import (
 
 from qavf.configuration import ConfigurationGraph
 from qavf.configuration import expand_env as expand_env
+from qavf.configuration import parse_config_text as _parse_config_text
 from qavf.configuration import read_config_mapping as _read_config_mapping
 from qavf.engine.severity import Severity
 from qavf.number_grammar import AllowedValueDomain, NumberGrammar, Whitespace, converted_options
@@ -1403,8 +1404,24 @@ def load_settings(path: str | Path) -> QAVFSettings:
         pydantic.ValidationError: if the content violates the schema.
     """
     raw, source = _read_config_mapping(path)
+    settings = _validated(raw, source)
+    logger.info("Loaded configuration from %s", source)
+    return settings
+
+
+def settings_from_text(text: str, path: str | Path) -> QAVFSettings:
+    """Validate configuration text as if it were the content of the file at ``path``.
+
+    For editors: unsaved text is checked without writing it. ``path`` decides the
+    format by its suffix and anchors relative paths; it need not exist. Raises
+    the same errors as :func:`load_settings`.
+    """
+    source = Path(path).resolve()
+    return _validated(_parse_config_text(text, source), source)
+
+
+def _validated(raw: dict[str, Any], source: Path) -> QAVFSettings:
     ConfigurationGraph().check(raw)
     settings = QAVFSettings.model_validate(raw)
     settings.source_path = source
-    logger.info("Loaded configuration from %s", source)
     return settings
