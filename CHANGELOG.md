@@ -15,6 +15,8 @@ All notable changes to this project are documented here. The format follows
   cancels the run and still writes its reports.
 - `settings_from_text(text, path)` validates unsaved configuration text as the file
   it would become, and `python -m qavf` runs the command line.
+- The configuration JSON Schema (`qavf schema`) labels its fields for editors:
+  `ui_group`, `ui_title` and `ui_advanced` on each setting.
 
 ## [0.6.2] - 2026-11-02
 

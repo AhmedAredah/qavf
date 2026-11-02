@@ -89,4 +89,6 @@ def config_json_schema(settings: QAVFSettings) -> dict[str, Any]:
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["x-qavf-backend"] = "duckdb"
     schema["x-qavf-rule-ids"] = list(CORE_RULE_IDS)
-    return schema
+    from qavf.schema_hints import apply_ui_hints
+
+    return apply_ui_hints(schema)
