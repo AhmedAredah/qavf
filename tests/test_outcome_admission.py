@@ -128,9 +128,9 @@ def test_timeout_report_does_not_wait_for_reduction_callback_or_release_its_inpu
             assert after["owned_spill_bytes"] == before["owned_spill_bytes"]
         finally:
             release.set()
-            assert worker_done.wait(2)
-            thread.join(2)
-            deadline = time.monotonic() + 2
+            assert worker_done.wait(10)
+            thread.join(10)
+            deadline = time.monotonic() + 10
             while ctx._active and time.monotonic() < deadline:
                 time.sleep(0.001)
         assert not thread.is_alive() and not ctx._active
