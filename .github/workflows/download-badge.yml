@@ -1,0 +1,44 @@
+name: Download badge
+
+# Once a day, sum downloads from PyPI, conda-forge, ghcr.io and GitHub releases
+# and publish the README badge's JSON on the separate `badges` branch, so main
+# history and CI are untouched. Takes well under a minute.
+"on":
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: download-badge
+  cancel-in-progress: true
+
+jobs:
+  badge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count downloads
+        run: python3 scripts/download_count.py "$RUNNER_TEMP/downloads.json"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Publish to the badges branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch --depth 1 origin badges; then
+            git switch -c badges FETCH_HEAD
+          else
+            git switch --orphan badges
+          fi
+          cp "$RUNNER_TEMP/downloads.json" downloads.json
+          git add downloads.json
+          if git diff --cached --quiet; then
+            echo "Download count unchanged."
+          else
+            git commit -m "Update download count"
+            git push origin badges
+          fi

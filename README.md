@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/AhmedAredah/qavf/actions/workflows/ci.yml/badge.svg)](https://github.com/AhmedAredah/qavf/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/qavf)](https://pypi.org/project/qavf/)
+[![Downloads](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/AhmedAredah/qavf/badges/downloads.json)](https://pypistats.org/packages/qavf)
 [![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/AhmedAredah/qavf/blob/main/pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/AhmedAredah/qavf/blob/main/LICENSE)
 
