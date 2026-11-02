@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from qavf._input_types import ValidationInput
     from qavf.inputs.normalize import Configuration
     from qavf.inputs.resources import ResourceLimits
     from qavf.profiles import ProfileName
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
 
 
 def validate(
-    data: object | Mapping[str, object] | None = None,
+    data: ValidationInput = None,
     *,
     schema: SchemaSpec | Mapping[str, Any] | None = None,
     config: Configuration = None,

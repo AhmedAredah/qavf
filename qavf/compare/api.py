@@ -3,18 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from qavf.compare.results import DatasetComparison
 from qavf.compare.spec import ComparisonSpec
 from qavf.inputs.resources import ResourceLimits
 
+if TYPE_CHECKING:
+    from qavf._input_types import DatasetInput
+
 _SIDES = ("baseline", "candidate")
 
 
 def compare_datasets(
-    baseline: object,
-    candidate: object,
+    baseline: DatasetInput,
+    candidate: DatasetInput,
     *,
     keys: str | Sequence[str] = (),
     columns: Mapping[str, str] | None = None,
