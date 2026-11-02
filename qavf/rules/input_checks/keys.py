@@ -12,6 +12,16 @@ from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
+from qavf.input_rules import (
+    INPUT_RULES,
+    duplicate_rows,
+    duplicated_keys,
+    key_check,
+    key_columns_absent,
+    key_contracts_passed,
+    key_label,
+    null_keys,
+)
 from qavf.rules._conditional_keys import ConditionalKeySource
 from qavf.rules._contracts import contract_error
 from qavf.rules._duplicate_rows import DuplicateRows
@@ -26,10 +36,8 @@ from qavf.rules._key_values import CanonicalKeyValues
 from qavf.rules._row_summary import row_aliases, summarize_rows
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import (
-    absent_column_hint,
     fresh_internal,
     outcome,
-    plural,
     present,
 )
 from qavf.settings import (
@@ -56,14 +64,11 @@ class DuplicateKeyRule(_SelectsDatasets):
     """Primary keys identify rows uniquely."""
 
     rule_id: ClassVar[str] = "INP-004"
-    name: ClassVar[str] = "Unique primary keys"
-    description: ClassVar[str] = "Each dataset's primary-key columns identify its rows uniquely."
+    name: ClassVar[str] = INPUT_RULES["INP-004"].name
+    description: ClassVar[str] = INPUT_RULES["INP-004"].description
     category: ClassVar[str] = CATEGORY
-    default_severity: ClassVar[Severity] = Severity.ERROR
-    recommendation: ClassVar[str] = (
-        "Duplicate keys double-count values when tables are joined. De-duplicate at the "
-        "source, or add the missing dimension to the primary key."
-    )
+    default_severity: ClassVar[Severity] = INPUT_RULES["INP-004"].default_severity
+    recommendation: ClassVar[str] = INPUT_RULES["INP-004"].recommendation
     Params: ClassVar[type[RuleParams]] = DatasetSelection
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
@@ -175,8 +180,8 @@ class DuplicateKeyRule(_SelectsDatasets):
         return outcome(
             failures,
             passed,
-            f"{plural(len(identities), 'key contract')} passed.",
-            "No primary or unique keys are configured.",
+            key_contracts_passed(len(identities)),
+            INPUT_RULES[self.rule_id].unconfigured,
             summary_metrics={
                 **({"rows_exempt_null_unique_keys": exempt} if exempt else {}),
                 **({"exempt_na_rows": exempt_na} if exempt_na else {}),
@@ -234,7 +239,7 @@ class DuplicateKeyRule(_SelectsDatasets):
                     # ctx.scan may otherwise prefer a caller's original lazy plan.
                     selected = ctx.project(dataset, columns)
                 key_values = CanonicalKeyValues(ctx, dataset, columns)
-                label = f"{dataset} ({', '.join(columns)})"
+                label = key_label(dataset, columns)
                 scoped = ConditionalKeySource.build(ctx, dataset, columns, where) if where else None
                 na_rows = 0
                 if key_values.na_policies:
@@ -308,8 +313,7 @@ class DuplicateKeyRule(_SelectsDatasets):
                     clean = False
                     failures.append(
                         Finding.fail(
-                            f"{plural(null_count, 'row')} of {rows:,} in {label} "
-                            "have a null key value.",
+                            null_keys(null_count, rows, label),
                             check=f"{dataset}: null keys" if primary else f"{label}: null keys",
                             affected=temporal_evidence(
                                 present(nulls.sample, {frequency: "occurrences"})
@@ -346,10 +350,8 @@ class DuplicateKeyRule(_SelectsDatasets):
                 evidence = lookup.attach(dupes.sample, frequency)
                 failures.append(
                     Finding.fail(
-                        f"{plural(dupes.keys, 'duplicated key')} of {valid_keys.keys:,} "
-                        f"in {label}, "
-                        f"shared by {plural(involved, 'row')} of {rows:,}.",
-                        check=dataset if primary else f"{dataset}: unique ({', '.join(columns)})",
+                        duplicated_keys(dupes.keys, valid_keys.keys, label, involved, rows),
+                        check=key_check(dataset, columns, primary),
                         affected=temporal_evidence(
                             present(evidence, {frequency: "occurrences", positions: "rows"})
                         ),
@@ -369,7 +371,7 @@ class DuplicateKeyRule(_SelectsDatasets):
                 )
             except Exception as exc:
                 clean = False
-                label = dataset if primary else f"{dataset}: unique ({', '.join(columns)})"
+                label = key_check(dataset, columns, primary)
                 failures.append(replace(contract_error(label, exc, (dataset,)), **identity))
 
         return clean
@@ -382,11 +384,8 @@ class DuplicateKeyRule(_SelectsDatasets):
         if absent:
             failures.append(
                 Finding.fail(
-                    f"{what} of {dataset} names column(s) that do not exist: {', '.join(absent)}"
-                    f"{''.join(absent_column_hint(c, frame.columns) for c in absent)}.",
-                    check=dataset
-                    if what == "Primary key"
-                    else f"{dataset}: unique ({', '.join(columns)})",
+                    key_columns_absent(what, dataset, absent, frame.columns),
+                    check=key_check(dataset, columns, what == "Primary key"),
                     affected=[{"dataset": dataset, "missing_key_column": c} for c in absent],
                     unit="columns",
                     datasets=(dataset,),
@@ -436,8 +435,7 @@ class DuplicateKeyRule(_SelectsDatasets):
             return True
         failures.append(
             Finding.fail(
-                f"{plural(count, 'row')} of {summary.rows:,} in {dataset} "
-                f"{'is' if count == 1 else 'are'} identical to another row in every column.",
+                duplicate_rows(count, summary.rows, dataset),
                 check=f"{dataset}: duplicate rows",
                 affected=temporal_evidence(
                     present(summary.sample, {row: "_row", problem: "violates"})

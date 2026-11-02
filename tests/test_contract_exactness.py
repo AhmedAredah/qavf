@@ -16,6 +16,20 @@ def checks(report, rule):
     return [r for r in report.results if r.rule_id == rule and r.status.value != "SKIPPED"]
 
 
+def constraint(report, column="x"):
+    """A column's limits: their own result, or the column summary that passed them."""
+    results = checks(report, "INP-003")
+    own = [r for r in results if r.check_id == "column.constraints" and r.columns == [column]]
+    if own:
+        return own[0]
+    return next(
+        r
+        for r in results
+        if r.check_id == "column.summary"
+        and any(c.check_id == "column.constraints" and c.columns == [column] for c in r.checks)
+    )
+
+
 @pytest.mark.parametrize(
     "child,parent",
     [
@@ -65,7 +79,7 @@ def test_undeclared_nan_obeys_key_null_policy(nulls, expected):
 
 def test_inferred_floating_values_still_enforce_finite_policy():
     report = run(pa.table({"x": [float("inf")]}), {"columns": {"x": {}}})
-    result = next(r for r in checks(report, "INP-003") if r.name == "finite")
+    result = next(r for r in checks(report, "INP-003") if r.check_id == "column.finite")
     assert result.status.value == "FAIL" and result.affected_count == 1
 
 
@@ -89,7 +103,7 @@ def test_inferred_floating_values_still_enforce_finite_policy():
 )
 def test_exact_statistics_drive_decisions(values, dtype, stat, bound, expected):
     report = run(pa.table({"x": values}), {"columns": {"x": {"dtype": dtype, stat: bound}}})
-    result = next(r for r in checks(report, "INP-003") if r.name == stat)
+    result = constraint(report)
     assert result.status.value == expected, result.message
 
 
@@ -98,8 +112,11 @@ def test_null_fraction_compares_exact_ratio():
         pa.table({"x": [None, 1, 2]}),
         {"columns": {"x": {"nullable": True, "max_null_fraction": 0.3333333333333333}}},
     )
-    result = next(r for r in checks(report, "INP-003") if r.name == "max_null_fraction")
+    result = constraint(report)
     assert result.status.value == "FAIL"
+    assert result.metrics["column_problems"] == [
+        "missing fraction 0.3333 (null or NaN) exceeds 0.333333"
+    ]
 
 
 def test_bad_condition_does_not_suppress_later_constraints_or_columns():
@@ -194,11 +211,16 @@ def test_bad_foreign_key_does_not_suppress_later_reference():
 
 def test_bad_unit_contract_does_not_suppress_later_value_check():
     report = run(
-        pa.table({"amount": [1], "unit": [5], "x": [-1]}),
-        {"columns": {"amount": {"unit_column": "unit", "allowed_units": ["kg"]}, "x": {"ge": 0}}},
+        pa.table({"amount": [1], "unit": ["kg"], "x": [-1]}),
+        {
+            "columns": {
+                "amount": {"unit_column": "unit_code", "allowed_units": ["kg"]},
+                "x": {"ge": 0},
+            }
+        },
     )
     findings = checks(report, "INP-003")
-    assert any(r.name == "unit" and r.status.value == "ERROR" for r in findings)
+    assert any(r.check_id == "column.units" and r.status.value == "ERROR" for r in findings)
     assert any(r.columns == ["x"] and r.status.value == "FAIL" for r in findings)
 
 
@@ -208,9 +230,15 @@ def test_native_fixed_width_sum_overflow_uses_bounded_exact_fallback():
         pa.table({"x": pa.array([value, value], type=pa.decimal128(38, 0))}),
         {"columns": {"x": {"dtype": "decimal", "sum": {"ge": 2 * (10**38 - 1)}}}},
     )
-    finding = next(r for r in checks(report, "INP-003") if r.name == "sum")
+    finding = constraint(report)
     assert finding.status.value == "PASS", finding.message
-    assert finding.metrics["observed"] == 2 * (10**38 - 1)
+    report = run(
+        pa.table({"x": pa.array([value, value], type=pa.decimal128(38, 0))}),
+        {"columns": {"x": {"dtype": "decimal", "sum": {"le": 2 * (10**38 - 1) - 1}}}},
+    )
+    finding = constraint(report)
+    assert finding.status.value == "FAIL", finding.message
+    assert finding.affected_records[0]["problem"].startswith(f"sum {2 * (10**38 - 1)} outside")
 
 
 @pytest.mark.parametrize("backend", ["duckdb", "polars"])

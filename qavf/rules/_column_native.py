@@ -11,6 +11,7 @@ import polars as pl
 from qavf.aggregation import accumulator_sql
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
+from qavf.input_rules import outside_bounds
 from qavf.rules._column_batch import (
     ColumnInputs,
     ColumnReduction,
@@ -200,9 +201,7 @@ def _native_column_reduction(
             if name == "mean" and result is not None:
                 result = Fraction(result) / int(summary["mean_n"])
             if not within(result, bound):
-                problems.append(
-                    f"{name} {show(result)} outside [{show(bound.ge)}, {show(bound.le)}]"
-                )
+                problems.append(outside_bounds(name, result, bound))
         if exceeds_missing_fraction(check, int(summary.get("missing") or 0), applicable):
             return NotImplemented
         if summary.get("duplicates", 0):

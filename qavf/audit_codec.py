@@ -457,6 +457,29 @@ def evidence_json_size(value: Any) -> int:
     return sum(len(chunk) for chunk in iter_audit_json(value))
 
 
+EVIDENCE_OMITTED = (
+    " Evidence was truncated or omitted: unsupported values or engine.max_evidence_bytes."
+)
+"""Appended to a result's message when optional evidence did not fit."""
+
+
+def bounded_diagnostic(message: str, limit: int) -> str:
+    """Bound an encoded optional diagnostic; status, check and count stay the ledger."""
+    if not message or evidence_json_size(message) <= limit:
+        return message
+    suffix = " [diagnostic truncated]"
+    if evidence_json_size(suffix) > limit:
+        return ""
+    low, high = 0, len(message)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if evidence_json_size(message[:middle] + suffix) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return message[:low] + suffix
+
+
 def canonical_digest(value: Any) -> str:
     """SHA-256 over the same canonical tagged values used for audit serialization."""
     digest = hashlib.sha256()

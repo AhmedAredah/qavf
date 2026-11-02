@@ -109,7 +109,9 @@ def test_oversized_cells_never_cross_the_python_driver_boundary(value):
         records = collector.records(f"SELECT i AS id, {value} AS payload FROM range(50) t(i)")
         assert records == [] and records.truncated
         assert observed.transferred == [(None, True)]
-        collector.add("INP-003", "le", "data", ["id"], count=50, total=50, records=records)
+        collector.report(
+            "INP-003", None, Status.FAIL, "50 values", count=50, total=50, records=records
+        )
         result = collector.results[0]
         assert result.affected_count == 50 and result.affected_count_exact
         assert result.evidence_truncated and result.evidence_complete is False
@@ -124,7 +126,7 @@ def test_byte_admission_keeps_a_deterministic_prefix_and_exact_count(collector):
     )
     assert [record["i"] for record in records] == [0, 1]
     assert records.truncated
-    collector.add("INP-003", "le", "data", ["i"], count=5, records=records)
+    collector.report("INP-003", None, Status.FAIL, "5 values", count=5, records=records)
     result = collector.results[0]
     assert result.affected_count == 5 and result.affected_count_exact
     assert result.evidence_truncated and not result.evidence_complete
@@ -133,7 +135,7 @@ def test_byte_admission_keeps_a_deterministic_prefix_and_exact_count(collector):
 
 @pytest.mark.parametrize("status", [Status.ERROR, Status.SKIPPED])
 def test_unassessed_outcomes_do_not_claim_exact_zero_or_passed_message(collector, status):
-    collector.add("INP-003", "sum", "data", ["x"], status=status)
+    collector.report("INP-003", None, status, "Not assessed: data.x: sum is undefined.")
     result = collector.results[0]
     assert "passed" not in result.message.lower()
     assert not result.affected_count_exact
@@ -141,7 +143,7 @@ def test_unassessed_outcomes_do_not_claim_exact_zero_or_passed_message(collector
 
 
 def test_explicit_zero_count_failure_is_not_reported_as_complete_success(collector):
-    collector.add("INP-004", "missing key", "data", ["absent"], status=Status.FAIL)
+    collector.report("INP-004", None, Status.FAIL, "Key column is missing.")
     result = collector.results[0]
-    assert result.message == "Check failed"
+    assert result.message == "Key column is missing."
     assert not result.affected_count_exact and result.evidence_complete is False

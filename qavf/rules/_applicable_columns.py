@@ -15,6 +15,7 @@ import polars as pl
 
 from qavf.applicability import NotApplicablePolicy
 from qavf.engine.registry import Finding
+from qavf.input_rules import all_not_applicable
 from qavf.rules._declared_types import ConvertedPlan, TextConversion, converts_text, typed_spec
 from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules.helpers import fresh_internal
@@ -105,11 +106,11 @@ class ApplicableColumns:
             if rows and na_count == rows:
                 # A statistic over an all-N/A population is undefined, including
                 # sum; reporting zero would fabricate an observed numeric value.
-                from qavf.rules.input_checks._column_values import _check_name
+                from qavf.input_rules import check_label
 
                 aggregates = {"min", "max", "mean", "median", "std", "sum"}
                 aggregate_labels = {
-                    f"{self.dataset}.{column}: {_check_name(check)}"
+                    f"{self.dataset}.{column}: {check_label(check)}"
                     for check in clean.all_checks()
                     if aggregates.intersection(check.constraints())
                 }
@@ -117,10 +118,7 @@ class ApplicableColumns:
                     replace(
                         finding,
                         assessed=False,
-                        message=(
-                            f"Not assessed: {finding.check}: every value is N/A, "
-                            "so its numeric statistic is undefined."
-                        ),
+                        message=all_not_applicable(str(finding.check)),
                     )
                     if finding.check in aggregate_labels
                     else finding

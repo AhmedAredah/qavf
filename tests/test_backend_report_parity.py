@@ -1,0 +1,542 @@
+"""The native and Polars backends report the same results for the same contract.
+
+Switching ``backend`` must not change a report: the same rules, check identities,
+labels, messages, counts, evidence rows (including ``violates``, ``_file`` and
+``_file_row``) and summaries. Only timings may differ.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+
+from qavf import Dataset, Query, validate
+from qavf.input_rules import INPUT_RULES
+
+# Timings legitimately differ between engines.
+_VOLATILE = {"execution_time_s", "load_time_s"}
+# Deliberate scope: the native backend implements the input rules only. The full
+# backend also reports its other rule families (GEO, STA, TMP, ...), SKIPPED when
+# unconfigured; those results are excluded from the comparison, and the native
+# backend must never report them.
+_SHARED_RULES = frozenset(INPUT_RULES)
+# Deliberate exception: a row expression or SQL assertion that cannot be evaluated
+# quotes the SQL engine's diagnostic, which quotes the SQL each backend generated.
+# Its status, identity and error class must agree; the quoted SQL may differ.
+_ENGINE_DIAGNOSTIC = re.compile(r"(could not be evaluated: [A-Za-z ]*Error:).*", re.DOTALL)
+_DIAGNOSED = {"row.expression", "sql.assertion"}
+
+
+def _write(directory: Path, name: str, text: str) -> str:
+    path = directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return str(path)
+
+
+def _columns_scenario(directory: Path) -> dict[str, Any]:
+    orders = _write(
+        directory,
+        "orders.csv",
+        "id,amount,code,name,cust,qty,a,b\n"
+        "1,10.5,AB,alice,1,1,x,NA\n"
+        "1,-3,zz,bob,9,2.5,,y\n"
+        "3,,AB,carolinelong,2,3,NA,NA\n",
+    )
+    customers = _write(directory, "cust.csv", "cid,label\n1,a\n2,b\n")
+    return {
+        "datasets": {
+            "orders": {
+                "path": orders,
+                "schema": {
+                    "columns": {
+                        "id": {"dtype": "int"},
+                        "amount": {
+                            "dtype": "float",
+                            "ge": 0,
+                            "le": 100,
+                            "max_null_fraction": 0.1,
+                        },
+                        "code": {"dtype": "str", "isin": ["AB", "CD"], "regex": "^[A-Z]+$"},
+                        "name": {"dtype": "str", "max_length": 8, "min_length": 4},
+                        "cust": {"dtype": "int"},
+                        "qty": {"dtype": "float", "integral": True},
+                        "a": {"dtype": "str", "nullable": True, "na_values": ["NA"]},
+                        "b": {"dtype": "str", "nullable": True, "na_values": ["NA"]},
+                        "missing_col": {"dtype": "int"},
+                    },
+                    "primary_key": ["id"],
+                    "na_groups": [["a", "b"]],
+                    "min_rows": 5,
+                },
+                "foreign_keys": [
+                    {"columns": ["cust"], "ref_dataset": "cust", "ref_columns": ["cid"]}
+                ],
+                "expressions": [{"expr": "qty <= 2", "name": "small_qty"}],
+            },
+            "cust": {
+                "path": customers,
+                "schema": {"columns": {"cid": {"dtype": "int"}, "label": {"dtype": "str"}}},
+            },
+        }
+    }
+
+
+def _statistics_scenario(directory: Path) -> dict[str, Any]:
+    values = _write(
+        directory,
+        "values.csv",
+        "k,x,y,s,g\n1,1.5,10,Aa,p\n2,2.25,20,aa,p\n3,-1,30,bb,q\n4,100,30,cc,q\n5,,40, dd,r\n",
+    )
+    return {
+        "datasets": {
+            "values": {
+                "path": values,
+                "schema": {
+                    "columns": {
+                        "k": {"dtype": "int", "unique": True},
+                        "x": {
+                            "dtype": "float",
+                            "nullable": True,
+                            "gt": 0,
+                            "lt": 50,
+                            "max_decimals": 1,
+                            "min": {"ge": 0},
+                            "max": {"le": 10},
+                            "mean": {"ge": 0, "le": 5},
+                            "median": {"ge": 1},
+                            "std": {"le": 1},
+                            "sum": {"le": 50},
+                        },
+                        "y": {
+                            "dtype": "int",
+                            "unique": True,
+                            "distinct_count": {"ge": 5},
+                            "notin": [40],
+                            "checks": [
+                                {"name": "big_when_q", "where": "g = 'q'", "ge": 100},
+                                {"where": "g = 'p'", "le": 15},
+                            ],
+                        },
+                        "s": {
+                            "dtype": "str",
+                            "isin": ["aa", "bb", "cc", "dd"],
+                            "normalize": ["casefold", "trim"],
+                        },
+                        "g": {"dtype": "str"},
+                    },
+                    "primary_key": ["k"],
+                },
+            }
+        }
+    }
+
+
+def _keys_scenario(directory: Path) -> dict[str, Any]:
+    rows = _write(
+        directory,
+        "rows.csv",
+        "k1,k2,email,v\n1,a,x@y,1\n1,a,x@y,1\n1,b,,2\n2,a,,3\n2,a,z@y,3\n",
+    )
+    parents = _write(directory, "parents.csv", "p1,p2\n1,a\n1,b\n9,z\n9,z\n")
+    return {
+        "datasets": {
+            "rows": {
+                "path": rows,
+                "schema": {
+                    "columns": {
+                        "k1": {"dtype": "int"},
+                        "k2": {"dtype": "str"},
+                        "email": {"dtype": "str", "nullable": True},
+                        "v": {"dtype": "int"},
+                    },
+                    "primary_key": ["k1", "k2"],
+                    "unique_keys": [["email"], {"columns": ["v"], "nulls": "equal"}],
+                    "unique_rows": True,
+                    "duplicate_rows_per_key": "all",
+                },
+                "foreign_keys": [
+                    {
+                        "columns": ["k1", "k2"],
+                        "ref_dataset": "parents",
+                        "ref_columns": ["p1", "p2"],
+                        "cardinality": "many_to_one",
+                    }
+                ],
+            },
+            "parents": {
+                "path": parents,
+                "schema": {"columns": {"p1": {"dtype": "int"}, "p2": {"dtype": "str"}}},
+            },
+        }
+    }
+
+
+def _structure_scenario(directory: Path) -> dict[str, Any]:
+    shaped = _write(
+        directory,
+        "shaped.csv",
+        "id,when,flag,extra,amount,unit\n"
+        "1,2024-01-02,true,e,5,kg\n"
+        "x,not-a-date,maybe,e,6,lb\n"
+        "3,2024-01-04,false,e,7,\n",
+    )
+    return {
+        "datasets": {
+            "shaped": {
+                "path": shaped,
+                "schema": {
+                    "columns": {
+                        "id": {"dtype": "int"},
+                        "when": {"dtype": "date"},
+                        "flag": {"dtype": "bool"},
+                        "amount": {"dtype": "int", "unit_column": "unit", "unit": "kg"},
+                        "unit": {"dtype": "str", "nullable": True},
+                    },
+                    "strict": True,
+                    "max_rows": 2,
+                    "evidence_columns": "all",
+                },
+                "expressions": [{"expr": "amount > 5", "null_as": "fail"}],
+            },
+            "absent": {"path": str(directory / "absent.csv"), "required": False},
+            "missing": {"path": str(directory / "missing.csv")},
+        },
+        "assertions": [
+            {"name": "few_rows", "sql": "SELECT * FROM shaped WHERE amount > 6"},
+            {"name": "none", "sql": "SELECT * FROM shaped WHERE amount > 100"},
+        ],
+    }
+
+
+def _multi_file_scenario(directory: Path) -> dict[str, Any]:
+    _write(directory, "parts/a.csv", "id,v\n1,1\n2,-1\n")
+    _write(directory, "parts/b.csv", "id,v\n3,-2\n4,4\n")
+    return {
+        "datasets": {
+            "parts": {
+                "path": str(directory / "parts" / "*.csv"),
+                "schema": {"columns": {"id": {"dtype": "int"}, "v": {"dtype": "int", "ge": 0}}},
+            }
+        }
+    }
+
+
+def _passing_scenario(directory: Path) -> dict[str, Any]:
+    clean = _write(directory, "clean.csv", "id,v,w\n1,1,a\n2,2,b\n")
+    return {
+        "datasets": {
+            "clean": {
+                "path": clean,
+                "schema": {
+                    "columns": {
+                        "id": {"dtype": "int"},
+                        "v": {"dtype": "int", "ge": 0, "mean": {"le": 5}},
+                        "w": {"dtype": "str", "isin": ["a", "b"]},
+                    },
+                    "primary_key": ["id"],
+                },
+                "expressions": [{"expr": "v >= 0"}],
+            }
+        },
+        "assertions": [{"name": "empty", "sql": "SELECT * FROM clean WHERE v < 0"}],
+    }
+
+
+def _applicability_scenario(directory: Path) -> dict[str, Any]:
+    measures = _write(
+        directory,
+        "measures.csv",
+        "id,score,kind,grade,note\n1,NA,a,10,x\n2,5,a,NA,y\n3,-2,b,30,\n4,NA,b,NA,z\n5,7,,50,w\n",
+    )
+    return {
+        "datasets": {
+            "measures": {
+                "path": measures,
+                "schema": {
+                    "columns": {
+                        "id": {"dtype": "int"},
+                        "score": {
+                            "dtype": "float",
+                            "na_values": ["NA"],
+                            "ge": 0,
+                            "mean": {"le": 5},
+                        },
+                        "kind": {
+                            "dtype": "str",
+                            "nullable": True,
+                            "checks": [
+                                {"where": "id > 3", "isin": ["a"], "min_applicable_rows": 3}
+                            ],
+                        },
+                        "grade": {
+                            "dtype": "int",
+                            "na_values": ["NA"],
+                            "nullable": True,
+                            "max": {"le": 40},
+                            "unique": True,
+                        },
+                        "note": {"dtype": "str", "regex": "^[a-z]$", "max_null_fraction": 0.5},
+                        "ghost": {"dtype": "int", "required": False},
+                    },
+                    "primary_key": ["id"],
+                    "unique_keys": [{"columns": ["kind"], "where": "id < 5"}],
+                },
+            }
+        },
+        "engine": {"max_affected_records": 1},
+    }
+
+
+def _references_scenario(directory: Path) -> dict[str, Any]:
+    child = _write(directory, "child.csv", "a,b,v\n1,x,1\n1,,2\n,,3\n2,y,4\n2,y,5\n9,q,6\n")
+    parent = _write(directory, "parent.csv", "a,b\n1,x\n2,y\n")
+    return {
+        "datasets": {
+            "child": {
+                "path": child,
+                "schema": {
+                    "columns": {
+                        "a": {"dtype": "int", "nullable": True},
+                        "b": {"dtype": "str", "nullable": True},
+                        "v": {"dtype": "int", "sum": {"le": 0}, "std": {"le": 0.1}},
+                    }
+                },
+                "foreign_keys": [
+                    {
+                        "columns": ["a", "b"],
+                        "ref_dataset": "parent",
+                        "ref_columns": ["a", "b"],
+                        "match": "full",
+                        "cardinality": "one_to_one",
+                    },
+                    {"columns": ["a"], "ref_dataset": "gone", "ref_columns": ["a"]},
+                ],
+                "expressions": [{"expr": "nope > 1", "name": "broken"}, {"expr": "v < 6"}],
+            },
+            "parent": {
+                "path": parent,
+                "schema": {
+                    "columns": {"a": {"dtype": "int"}, "b": {"dtype": "str"}, "z": {"dtype": "int"}}
+                },
+            },
+            "gone": {
+                "path": str(directory / "gone.csv"),
+                "schema": {"columns": {"a": {"dtype": "int"}}, "primary_key": ["a"]},
+                "expressions": [{"expr": "a > 0"}],
+            },
+        },
+        "assertions": [
+            {"name": "broken", "sql": "SELECT * FROM nowhere"},
+            {"name": "rows", "sql": "SELECT a FROM child WHERE v > 4"},
+        ],
+    }
+
+
+def _undefined_scenario(directory: Path) -> dict[str, Any]:
+    empty = _write(directory, "empty.csv", "x,y,u,unit\n,1,1,kg\n,2,2,g\n")
+    return {
+        "datasets": {
+            "empty": {
+                "path": empty,
+                "schema": {
+                    "columns": {
+                        "x": {
+                            "dtype": "float",
+                            "nullable": True,
+                            "mean": {"ge": 0},
+                            "min": {"ge": 0},
+                        },
+                        "y": {"dtype": "int", "median": {"ge": 2}, "distinct_count": {"le": 1}},
+                        "u": {"dtype": "int", "unit_column": "units", "unit": "kg"},
+                        "unit": {"dtype": "str", "isin": ["kg"]},
+                    },
+                    "unique_rows": True,
+                    "primary_key": ["absent_key"],
+                },
+            }
+        }
+    }
+
+
+def _grouped_scenario(directory: Path) -> dict[str, Any]:
+    groups = _write(
+        directory,
+        "groups.csv",
+        "grp,code,active,k\na,07,true,1\na,8,false,1\nb,7,true,\nb,7,true,\nb,9,false,2\n",
+    )
+    return {
+        "datasets": {
+            "groups": {
+                "path": groups,
+                "schema": {
+                    "columns": {
+                        "code": {"dtype": "int"},
+                        "active": {"dtype": "bool"},
+                        "k": {"dtype": "int", "nullable": True},
+                    },
+                    "grouped_values": [
+                        {"column": "code", "group_by": ["grp"], "allowed_values": [7, 8]},
+                        {
+                            "column": "code",
+                            "group_by": ["grp"],
+                            "allowed_values": [7, 8, 9],
+                            "name": "loose",
+                        },
+                    ],
+                    "unique_keys": [
+                        {"columns": ["grp", "code"], "where": "active", "name": "active identity"},
+                        {"columns": ["k"], "nulls": "forbid"},
+                    ],
+                    "primary_key": ["grp", "code"],
+                    "duplicate_rows_per_key": 1,
+                },
+            }
+        }
+    }
+
+
+def _parquet_scenario(directory: Path) -> dict[str, Any]:
+    (directory / "parts").mkdir()
+    pq.write_table(pa.table({"id": [1, 2], "v": [1, -1]}), directory / "parts" / "a.parquet")
+    pq.write_table(pa.table({"id": [3, 4], "v": [-2, 4]}), directory / "parts" / "b.parquet")
+    return {
+        "datasets": {
+            "parts": {
+                "path": str(directory / "parts" / "*.parquet"),
+                "schema": {"columns": {"v": {"ge": 0}}, "unique_rows": True},
+            }
+        }
+    }
+
+
+SCENARIOS = {
+    "columns": _columns_scenario,
+    "statistics": _statistics_scenario,
+    "keys": _keys_scenario,
+    "structure": _structure_scenario,
+    "multi_file": _multi_file_scenario,
+    "passing": _passing_scenario,
+    "applicability": _applicability_scenario,
+    "references": _references_scenario,
+    "undefined": _undefined_scenario,
+    "grouped": _grouped_scenario,
+    "parquet": _parquet_scenario,
+}
+
+_FRAME = {
+    "id": [1, 2, 3, 4],
+    "x": [None, None, 1.5, float("inf")],
+    "g": ["a", "b", "a", None],
+    "u": [1, 2, 3, 4],
+    "unit": ["kg", "g", "kg", "kg"],
+    "k": ["NA", "1", "2", "2"],
+}
+_FRAME_SCHEMA = {
+    "columns": {
+        "id": {"dtype": "int"},
+        "x": {
+            "dtype": "float",
+            "nullable": True,
+            "median": {"ge": 0},
+            "checks": [
+                {"where": "g = 'b'", "ge": 0, "min_applicable_rows": 2, "name": "few"},
+                {"where": "g = 'zz'", "mean": {"le": 1}},
+            ],
+        },
+        "g": {"dtype": "str", "nullable": True, "na_values": ["b"], "isin": ["a"]},
+        "u": {"dtype": "int", "unit_column": "unit", "allowed_units": ["kg"]},
+        "k": {"dtype": "int", "na_values": ["NA"], "unique": True, "sum": {"le": 1}},
+    },
+    "primary_key": ["id"],
+    "unique_keys": [["g"]],
+    "na_groups": [["k", "g"]],
+}
+
+
+def _arrow_input() -> Dataset:
+    return Dataset(pa.table(_FRAME), schema=_FRAME_SCHEMA)
+
+
+def _pandas_input() -> Dataset:
+    return Dataset(pa.table(_FRAME).to_pandas(), schema=_FRAME_SCHEMA)
+
+
+def _query_input() -> Dataset:
+    return Dataset(
+        Query("SELECT * FROM (VALUES (1, -1.5), (2, NULL), (2, 3.0)) t(id, x)"),
+        schema={
+            "columns": {"x": {"dtype": "float", "ge": 0, "median": {"ge": 0}}},
+            "primary_key": ["id"],
+        },
+    )
+
+
+INPUTS = {"arrow": _arrow_input, "pandas": _pandas_input, "query": _query_input}
+
+
+def _normalized(report: Any) -> list[dict[str, Any]]:
+    """Input-rule results as JSON values without timings, in a backend-independent order."""
+    rows = []
+    for result in report.results:
+        if result.rule_id not in _SHARED_RULES:
+            continue
+        row = json.loads(result.model_dump_json())
+        for field in _VOLATILE:
+            row.pop(field, None)
+        if row["status"] == "ERROR" and row["check_id"] in _DIAGNOSED:
+            row["message"] = _ENGINE_DIAGNOSTIC.sub(r"\1", row["message"])
+        rows.append(row)
+    return sorted(rows, key=_order)
+
+
+def _order(row: dict[str, Any]) -> str:
+    return json.dumps(
+        [row["rule_id"], row.get("check_id"), row.get("check"), row.get("datasets")],
+        default=str,
+    )
+
+
+def _differences(native: list[dict[str, Any]], full: list[dict[str, Any]]) -> list[str]:
+    """Readable per-field differences, so a failure points at what diverged."""
+    native_keys = [_order(row) for row in native]
+    full_keys = [_order(row) for row in full]
+    problems = [f"only native: {key}" for key in native_keys if key not in full_keys]
+    problems += [f"only polars: {key}" for key in full_keys if key not in native_keys]
+    for key, row in zip(native_keys, native, strict=True):
+        if key not in full_keys:
+            continue
+        other = full[full_keys.index(key)]
+        for field in sorted(set(row) | set(other)):
+            if row.get(field) != other.get(field):
+                problems.append(
+                    f"{key} {field}: native={row.get(field)!r} polars={other.get(field)!r}"
+                )
+    return problems
+
+
+@pytest.mark.parametrize("scenario", sorted(SCENARIOS))
+def test_backends_report_identical_results(tmp_path, scenario):
+    config = SCENARIOS[scenario](tmp_path)
+    native_report = validate(config=config, backend="duckdb")
+    assert {result.rule_id for result in native_report.results} <= _SHARED_RULES
+    native = _normalized(native_report)
+    full = _normalized(validate(config=config, backend="polars"))
+    problems = _differences(native, full)
+    assert not problems, "\n".join(problems)
+
+
+@pytest.mark.parametrize("kind", sorted(INPUTS))
+def test_backends_report_identical_results_for_supplied_inputs(kind):
+    native_report = validate(INPUTS[kind](), backend="duckdb")
+    assert {result.rule_id for result in native_report.results} <= _SHARED_RULES
+    problems = _differences(
+        _normalized(native_report), _normalized(validate(INPUTS[kind](), backend="polars"))
+    )
+    assert not problems, "\n".join(problems)

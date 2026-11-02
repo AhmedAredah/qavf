@@ -21,6 +21,16 @@ a capability error with installation guidance; it is never treated as passed. Se
 [backend capabilities](backend_capabilities.md) for the full matrix and the core
 CLI.
 
+Both backends report identical results for the input rules (INP-001 to INP-009):
+the same results, check identities, messages, counts, evidence rows (with
+`violates`, and `_file`/`_file_row` for multi-file inputs) and passing-check
+summaries. Switching backends changes only timings. The full backend also reports
+its other rule families, which the native backend does not run. Two deliberate
+differences remain: a regular expression outside the shared subset below is an
+`ERROR` on the native backend, and a row expression or SQL assertion that cannot
+be evaluated quotes the SQL engine's diagnostic, which quotes the SQL that backend
+generated.
+
 ## Native execution guarantees
 
 - Each contract is independent. A bad condition, expression, key or reference
@@ -29,9 +39,9 @@ CLI.
   is never guessed.
 - Sums, means, medians and missing fractions are decided exactly: integers and
   decimals with DuckDB's exact reducer (with a bounded fallback on overflow), and
-  floats with an exact accumulator. Non-integral exact values appear in metrics as
-  rational strings (`"1/3"`). An empty population for min, max, sum, mean, median
-  or standard deviation is not assessed.
+  floats with an exact accumulator. Non-integral exact values are shown as
+  fractions (`mean 411/16 outside [0, 5]`). An empty population for min, max, sum,
+  mean, median or standard deviation is not assessed.
 - Floating columns reject infinity unless `allow_infinite: true`, also when the
   type is inferred. A missing key column is a structural failure.
 - Regular expressions outside the subset that Rust and RE2 interpret identically
@@ -41,8 +51,6 @@ CLI.
   evidence byte limits.
 - A foreign key between an integer and a float column is compared only when every
   value converts exactly; otherwise it is not assessed.
-- Evidence rows carry `_row`. The `_file`, `_file_row` and `violates` columns of the
-  full backend are not added.
 
 ## Resources and timeouts
 

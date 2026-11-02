@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import bisect
 import functools
+import itertools
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -13,11 +16,16 @@ from qavf.sources.sql import quote_identifier as qi
 
 
 class EvidenceRecords(list):
-    """A compatible record list that remembers omitted database evidence."""
+    """A compatible record list that remembers omitted database evidence.
 
-    def __init__(self, records=(), *, truncated=False):
+    ``truncated`` is set when more records exist than were kept; ``omitted`` only
+    when a record was left out because of the evidence byte budget.
+    """
+
+    def __init__(self, records=(), *, truncated=False, omitted=False):
         super().__init__(records)
         self.truncated = truncated
+        self.omitted = omitted
 
 
 def _identity(value):
@@ -218,6 +226,7 @@ class SqlEvidenceReader:
         records = EvidenceRecords()
         if not self.max_records or self.max_bytes < 2:
             records.truncated = True
+            records.omitted = self.max_bytes < 2
             return records
         relation = self.connection.sql(query)
         names, types = relation.columns, relation.types
@@ -250,12 +259,81 @@ class SqlEvidenceReader:
             payload, oversized = row
             if oversized or len(records) >= self.max_records:
                 records.truncated = True
+                records.omitted = bool(oversized)
                 break
             decoded = {name: item.decode(payload[name]) for name, item in projected.items()}
             size = evidence_json_size(decoded) + bool(records)
             if used + size > self.max_bytes:
-                records.truncated = True
+                records.truncated = records.omitted = True
                 break
             records.append(decoded)
             used += size
         return records
+
+
+class FileRows:
+    """The file, and the row within it, of evidence rows from a multi-file dataset.
+
+    Evidence names a row by its 0-based position in the dataset as read. Rows per
+    file are counted once, only when such evidence exists; a count that does not
+    add up leaves evidence unlocated, never misplaced.
+    """
+
+    def __init__(self, connection, files, counting_sql, row_column):
+        self.connection = connection
+        self.files = list(files)
+        self.counting_sql = counting_sql
+        self.row_column = row_column
+        self._starts = None
+
+    def starts(self):
+        """Each file's first row position, plus the total; ``()`` when unknown."""
+        if self._starts is None:
+            self._starts = self._count()
+        return self._starts
+
+    def _count(self):
+        try:
+            counted = self.connection.execute(self.counting_sql).fetchall()
+        except Exception:
+            return ()
+        by_path = {os.path.normcase(os.path.abspath(str(name))): int(n) for name, n in counted}
+        rows = [by_path.get(os.path.normcase(os.path.abspath(path)), 0) for path in self.files]
+        if sum(rows) != sum(by_path.values()):
+            return ()
+        return tuple(itertools.accumulate(rows, initial=0))
+
+    def locate(self, position):
+        starts = self.starts()
+        index = bisect.bisect_right(starts, position) - 1
+        if not starts or not 0 <= index < len(self.files):
+            return None, None
+        return self.files[index], position - starts[index]
+
+    def annotate(self, records, row_column):
+        """``records`` with ``_file`` and ``_file_row``; unchanged when unlocatable."""
+        if not records or not all(row_column in record for record in records):
+            return records
+        if not self.starts():
+            return records
+        located = []
+        for record in records:
+            file, row = self.locate(int(record[row_column]))
+            located.append(annotated(record, _file=file, _file_row=row))
+        return located
+
+
+def annotated(record, **fields):
+    """An evidence record: ``fields`` first, then the data, never overwriting it.
+
+    An annotation whose name the record already uses is prefixed with ``qavf_``.
+    """
+    taken = set(record)
+    result = {}
+    for name, value in fields.items():
+        while name in taken:
+            name = f"qavf_{name}"
+        taken.add(name)
+        result[name] = value
+    result.update(record)
+    return result

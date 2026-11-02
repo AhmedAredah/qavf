@@ -9,6 +9,13 @@ from typing import Any
 import polars as pl
 
 from qavf.engine.registry import Finding
+from qavf.input_rules import (
+    column_fails,
+    column_values_violate,
+    statistic_minimum,
+    statistic_undefined,
+    too_few_applicable,
+)
 from qavf.settings import COLUMN_CONSTRAINTS, ROW_CONSTRAINTS, ColumnCheck, ColumnSpec, SchemaSpec
 from qavf.value_policy import is_text
 
@@ -20,11 +27,9 @@ def require_statistic_population(statistics: Iterable[str], usable: int) -> None
     Empty distinct cardinality remains a defined count of zero.
     """
     for name in sorted(statistics):
-        minimum = 2 if name == "std" else 0 if name == "distinct_count" else 1
+        minimum = statistic_minimum(name)
         if usable < minimum:
-            raise ValueError(
-                f"{name} is undefined: {usable} usable value(s), at least {minimum} required"
-            )
+            raise ValueError(statistic_undefined(name, usable, minimum))
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,10 +122,7 @@ class ColumnOutcome:
 
     def applicability_problem(self, rows: int) -> str | None:
         if self.check and rows < self.check.min_applicable_rows:
-            return (
-                f"only {rows} row(s) match 'where: {self.check.where}', "
-                f"fewer than min_applicable_rows {self.check.min_applicable_rows}"
-            )
+            return too_few_applicable(rows, self.check.where, self.check.min_applicable_rows)
         return None
 
     def require_applicable(self, rows: int) -> None:
@@ -136,7 +138,7 @@ class ColumnOutcome:
         severity = self.check.severity if self.check else None
         if not count:
             return Finding.fail(
-                f"{identity} fails '{self.label}': {'; '.join(problems)}.",
+                column_fails(identity, self.label, problems),
                 check=f"{identity}: {self.label}",
                 severity=severity,
                 affected=[
@@ -146,9 +148,7 @@ class ColumnOutcome:
                 datasets=(self.dataset,),
             )
         return Finding.fail(
-            f"{count:,} value{'s' if count != 1 else ''} of {applicable:,} "
-            f"in {identity} {'violates' if count == 1 else 'violate'} '{self.label}'."
-            + (f" Column-level: {'; '.join(problems)}." if problems else ""),
+            column_values_violate(count, applicable, identity, self.label, problems),
             check=f"{identity}: {self.label}",
             severity=severity,
             affected=sample,

@@ -266,6 +266,8 @@ class ColumnValue:
     missing: str
     na: str
     dtype: str
+    converted: str = ""
+    """The value as read: converted to the declared type, before missing markers."""
 
     @classmethod
     def compile(cls, column, dtype, spec, decimal_scale=None):
@@ -386,6 +388,7 @@ class ColumnValue:
             f"({is_missing}) AND NOT ({na})",
             na,
             physical,
+            value,
         )
 
 

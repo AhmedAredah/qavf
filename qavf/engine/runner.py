@@ -24,7 +24,8 @@ import polars as pl
 from pydantic_core import to_json
 
 from qavf._version import __version__
-from qavf.audit_codec import canonical_digest
+from qavf.audit_codec import EVIDENCE_OMITTED, canonical_digest
+from qavf.audit_codec import bounded_diagnostic as _bounded_diagnostic
 from qavf.engine.compilation import (
     ConfigurationError as ConfigurationError,
 )
@@ -51,6 +52,7 @@ from qavf.engine.resources import ResourceLimitError, retained_size
 from qavf.engine.row_locator import RowLocator
 from qavf.engine.session import Invocation
 from qavf.engine.severity import Severity, Status
+from qavf.input_rules import required_not_assessed
 from qavf.redaction import exception_details, redact, redact_text
 from qavf.reports.models import (
     QAReport,
@@ -59,6 +61,7 @@ from qavf.reports.models import (
     RunMetadata,
     check_identity,
     evidence_json_size,
+    exact_count,
     normalize_evidence,
 )
 from qavf.settings import QAVFSettings
@@ -426,7 +429,8 @@ class QARunner:
                     check=f"required: {entry}",
                     status=Status.ERROR,
                     severity=max(rule_cls.default_severity, Severity.ERROR),
-                    message=f"Not assessed: required check {entry!r} was not assessed: {reason}.",
+                    message=required_not_assessed(entry, reason),
+                    affected_count_exact=False,
                     recommendation=rule_cls.recommendation,
                 )
             )
@@ -449,6 +453,7 @@ class QARunner:
                         f"Not configured: this rule requires parameter(s) "
                         f"{', '.join(fields)} under rules.{rule_id}.params."
                     ),
+                    affected_count_exact=False,
                     recommendation=rule_cls.recommendation,
                 )
             )
@@ -927,10 +932,7 @@ class QARunner:
             evidence_json_size(metrics) if metrics else 0
         )
         if len(bounded_records) != len(records) or metrics_dropped or sample_truncated:
-            message += (
-                " Evidence was truncated or omitted: unsupported values or "
-                "engine.max_evidence_bytes."
-            )
+            message += EVIDENCE_OMITTED
         message = _bounded_diagnostic(redact_text(message), max(0, byte_limit - used))
         if coverage is not None:
             metrics["passed_checks"] = _jsonable(coverage)
@@ -942,6 +944,8 @@ class QARunner:
             complete, evidence_truncated = False, True
         if metrics_dropped:
             evidence_truncated = True
+        if status is Status.FAIL and not count:
+            complete = False
         return RuleResult(
             rule_id=rule.rule_id,
             name=rule.name,
@@ -964,7 +968,9 @@ class QARunner:
             message=redact_text(message),
             affected_records=bounded_records,
             affected_count=count,
-            affected_count_exact=finding.affected_count_exact if finding else True,
+            affected_count_exact=exact_count(
+                status, count, finding.affected_count_exact if finding else True
+            ),
             evidence_complete=complete,
             evidence_truncated=evidence_truncated,
             total_records=finding.total_records if finding else None,
@@ -1131,20 +1137,3 @@ def _coverage_labels(value: Any) -> list[str]:
     if any(not isinstance(label, str) or not label.strip() for label in value):
         raise TypeError("Finding.metrics.passed_checks must contain only nonempty strings")
     return list(value)
-
-
-def _bounded_diagnostic(message: str, limit: int) -> str:
-    """Bound encoded optional diagnostics; status/check/count remain the outcome ledger."""
-    if not message or evidence_json_size(message) <= limit:
-        return message
-    suffix = " [diagnostic truncated]"
-    if evidence_json_size(suffix) > limit:
-        return ""
-    low, high = 0, len(message)
-    while low < high:
-        middle = (low + high + 1) // 2
-        if evidence_json_size(message[:middle] + suffix) <= limit:
-            low = middle
-        else:
-            high = middle - 1
-    return message[:low] + suffix

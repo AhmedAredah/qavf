@@ -11,6 +11,16 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
+from qavf.input_rules import (
+    INPUT_RULES,
+    blocked_reference,
+    foreign_keys_resolved,
+    orphaned_keys,
+    partly_null_keys,
+    reference_columns_absent,
+    reference_label,
+    repeated_reference_keys,
+)
 from qavf.rules._execution import (
     KeyBackend,
     KeyRelation,
@@ -25,7 +35,6 @@ from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import (
     fresh_internal,
     outcome,
-    plural,
     present,
 )
 from qavf.settings import (
@@ -46,17 +55,11 @@ class ReferentialIntegrityRule(_SelectsDatasets):
     """Foreign-key values exist in the dataset they reference."""
 
     rule_id: ClassVar[str] = "INP-005"
-    name: ClassVar[str] = "Referential integrity"
-    description: ClassVar[str] = (
-        "Every configured foreign-key value exists in the referenced dataset. Keys are "
-        "compared exactly; key types that cannot be compared exactly are reported."
-    )
+    name: ClassVar[str] = INPUT_RULES["INP-005"].name
+    description: ClassVar[str] = INPUT_RULES["INP-005"].description
     category: ClassVar[str] = CATEGORY
-    default_severity: ClassVar[Severity] = Severity.ERROR
-    recommendation: ClassVar[str] = (
-        "Orphaned keys are silently dropped by inner joins. Add the missing reference rows or "
-        "correct the keys in the child dataset."
-    )
+    default_severity: ClassVar[Severity] = INPUT_RULES["INP-005"].default_severity
+    recommendation: ClassVar[str] = INPUT_RULES["INP-005"].recommendation
     Params: ClassVar[type[RuleParams]] = DatasetSelection
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements:
@@ -83,7 +86,7 @@ class ReferentialIntegrityRule(_SelectsDatasets):
             if selection is not None and dataset not in selection:
                 continue
             for fk in spec.foreign_keys:
-                label = f"{dataset}({', '.join(fk.columns)}) -> {fk.ref_dataset}"
+                label = reference_label(dataset, fk.columns, fk.ref_dataset)
                 first_failure = len(failures)
                 identity: dict[str, Any] = {
                     "check_id": "key.reference",
@@ -106,8 +109,7 @@ class ReferentialIntegrityRule(_SelectsDatasets):
                     ):
                         failures.append(
                             Finding.unassessed(
-                                f"Not assessed: foreign key {label} refers to columns that do not "
-                                f"exist.",
+                                reference_columns_absent(label),
                                 check=label,
                                 severity=fk.severity,
                             )
@@ -188,8 +190,8 @@ class ReferentialIntegrityRule(_SelectsDatasets):
         return outcome(
             failures,
             passed,
-            f"{plural(len(passed), 'foreign key')} fully resolved.",
-            "No foreign keys are configured.",
+            foreign_keys_resolved(len(passed)),
+            INPUT_RULES[self.rule_id].unconfigured,
             check_id="key.reference.summary",
             checks=tuple(identities),
             # Exempt rows follow the declared match policy, including on failure.
@@ -319,7 +321,7 @@ class ReferentialIntegrityRule(_SelectsDatasets):
     @staticmethod
     def _blocked(ctx: DataContext, label: str, fk: ForeignKeySpec, missing: str) -> Finding:
         return Finding.unassessed(
-            f"Not assessed: foreign key {label}: {ctx.unavailable_reason(missing)}.",
+            blocked_reference(label, ctx.unavailable_reason(missing)),
             check=label,
             severity=fk.severity,
         )
@@ -335,8 +337,7 @@ def _partial_finding(
 ) -> Finding:
     """Use the same MATCH FULL row count and bounded evidence for every backend."""
     return Finding.fail(
-        f"{plural(partial.rows, 'row')} of {label} have a partly null key "
-        "(match: full allows only all-null keys).",
+        partly_null_keys(partial.rows, label),
         check=f"{label}: partly null keys",
         severity=fk.severity,
         affected=temporal_evidence(present(partial.sample, {frequency: "occurrences"})),
@@ -359,9 +360,7 @@ def _cardinality_finding(
 ) -> Finding:
     """Report duplicate-key impact consistently for grouped and eager execution."""
     return Finding.fail(
-        f"{plural(duplicates.keys, 'key')} of {name}({', '.join(columns)}) occur "
-        f"more than once, but {label} is {fk.cardinality.replace('_', '-')}: a "
-        "join would multiply rows.",
+        repeated_reference_keys(duplicates.keys, name, columns, label, fk.cardinality),
         check=f"{label}: {side} keys not unique",
         severity=fk.severity,
         affected=temporal_evidence(present(duplicates.sample, {frequency: "occurrences"})),
@@ -382,8 +381,7 @@ def _orphan_finding(
 ) -> Finding:
     """Keep distinct-key totals separate from affected row totals across backends."""
     return Finding.fail(
-        f"{plural(orphans.keys, 'orphaned key')} of {total_keys:,} in "
-        f"{label}, used by {plural(orphans.rows, 'row')}.",
+        orphaned_keys(orphans.keys, total_keys, label, orphans.rows),
         check=label,
         severity=fk.severity,
         affected=temporal_evidence(present(orphans.sample, {frequency: "rows"})),

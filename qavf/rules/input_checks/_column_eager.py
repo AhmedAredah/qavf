@@ -9,6 +9,14 @@ import polars as pl
 
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
+from qavf.input_rules import (
+    check_label,
+    check_not_assessed,
+    column_values_violate,
+    missing_fraction_problem,
+    outside_bounds,
+    unit_column_absent,
+)
 from qavf.redaction import exception_details, redact_text
 from qavf.rules._column_batch import exceeds_missing_fraction
 from qavf.rules._column_contract import ColumnOutcome, ColumnPlan
@@ -20,7 +28,6 @@ from qavf.rules._predicates import (
 )
 from qavf.rules.helpers import (
     missing_expr,
-    plural,
 )
 from qavf.settings import (
     ROW_CONSTRAINTS,
@@ -113,18 +120,15 @@ def evaluate_eager(
         is_float = column in float_columns
         series = prepared[column]
         missing = series.null_count()
-        nans = int(frame[column].is_nan().sum()) if is_float else 0
         missing_mask = series.is_null()  # null, NaN, configured sentinels and blanks
 
         if not spec.nullable:
             if missing:
-                detail = f" ({nans} NaN)" if nans else ""
                 fail(
                     column,
                     "not null",
                     None,
-                    f"{plural(missing, 'missing value')}{detail} in non-nullable "
-                    f"{dataset}.{column}.",
+                    column_values_violate(missing, rows, f"{dataset}.{column}", "not null"),
                     affected=values._rows(
                         frame, missing_mask, "missing", ctx.evidence_limit, evidence.of([column])
                     ),
@@ -141,8 +145,7 @@ def evaluate_eager(
                     column,
                     "finite",
                     None,
-                    f"{plural(infinite, 'infinite value')} in {dataset}.{column} "
-                    f"(set allow_infinite: true if they are legitimate).",
+                    column_values_violate(infinite, rows, f"{dataset}.{column}", "finite"),
                     affected=values._rows(
                         frame,
                         pl.col(column).is_infinite(),
@@ -184,7 +187,7 @@ def evaluate_eager(
                     )
 
         for check in spec.all_checks():
-            label = values._check_name(check)
+            label = check_label(check)
             constraints = check.constraints()
             problems: list[str] = []
             # ``problems`` are violations found in the data; ``unusable`` explains why
@@ -216,14 +219,13 @@ def evaluate_eager(
             # Missing rows are evidence when values must be present or are too often absent.
             missing_rows = check.not_null
             try:
-                if check.max_null_fraction is not None:
-                    fraction = scope_missing / scope_rows if scope_rows else 0.0
-                    if exceeds_missing_fraction(check, scope_missing, scope_rows):
-                        missing_rows = True
-                        problems.append(
-                            f"missing fraction {fraction:.4g} (null or NaN) exceeds "
-                            f"{check.max_null_fraction:g}"
-                        )
+                if check.max_null_fraction is not None and exceeds_missing_fraction(
+                    check, scope_missing, scope_rows
+                ):
+                    missing_rows = True
+                    problems.append(
+                        missing_fraction_problem(scope_missing, scope_rows, check.max_null_fraction)
+                    )
                 for statistic in (
                     "min",
                     "max",
@@ -246,10 +248,7 @@ def evaluate_eager(
                         unusable.append(f"{statistic} is undefined: insufficient usable values")
                         continue
                     if not values._within(value, bounds):
-                        problems.append(
-                            f"{statistic} {values._show(value)} outside "
-                            f"[{values._show_bound(bounds.ge)}, {values._show_bound(bounds.le)}]"
-                        )
+                        problems.append(outside_bounds(statistic, value, bounds))
             except Exception as exc:
                 # Isolated to this check: sibling checks are still evaluated.
                 logger.warning(
@@ -290,7 +289,7 @@ def evaluate_eager(
                     column,
                     label,
                     check,
-                    f"Not assessed: '{label}' on {dataset}.{column}: {'; '.join(unusable)}.{found}",
+                    check_not_assessed(label, dataset, column, "; ".join(unusable)) + found,
                 )
                 continue
             if applicable is not None:
@@ -353,7 +352,7 @@ def _units(
     if unit_column not in frame.columns:
         failures.append(
             Finding.unassessed(
-                f"Not assessed: unit column {unit_column!r} of {dataset}.{column} does not exist.",
+                unit_column_absent(unit_column, dataset, column),
                 check=check,
                 datasets=(dataset,),
             )
@@ -368,9 +367,7 @@ def _units(
         return
     failures.append(
         Finding.fail(
-            f"{plural(count, 'row')} of {rows:,} in {dataset}.{column} "
-            f"{'is' if count == 1 else 'are'} not in {', '.join(allowed)} "
-            f"(per {unit_column}).",
+            column_values_violate(count, rows, f"{dataset}.{column}", "units"),
             check=check,
             affected=values._rows(frame, mask, "unit", ctx.evidence_limit, shown),
             affected_count=count,

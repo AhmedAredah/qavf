@@ -16,6 +16,7 @@ from typing import Any
 import polars as pl
 
 from qavf.applicability import NotApplicablePolicy
+from qavf.input_rules import described as described
 from qavf.settings import ColumnSpec
 from qavf.text_types import polars_stripped, polars_value
 from qavf.value_policy import is_text
@@ -35,11 +36,6 @@ def converts_text(spec: ColumnSpec, actual: pl.DataType) -> bool:
             and (spec.timezone is not None or spec.datetime_unit != "us")
         )
     )
-
-
-def described(dtype: str) -> str:
-    """``an int``, ``a date``: the declared type as a noun phrase."""
-    return f"{'an' if dtype == 'int' else 'a'} {dtype}"
 
 
 def typed_spec(spec: ColumnSpec) -> ColumnSpec:

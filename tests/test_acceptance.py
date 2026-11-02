@@ -217,7 +217,9 @@ def test_nan_counts_as_missing(registry) -> None:
     frames, datasets = _column([1.0, math.nan], ge=0, le=10)
     failed = _failed_checks(frames, datasets, registry)
     assert set(failed) == {"t.x: not null"}
-    assert "NaN" in failed["t.x: not null"].message
+    # The NaN is the missing value: counted and shown as the violating row.
+    assert failed["t.x: not null"].affected_count == 1
+    assert failed["t.x: not null"].affected_records[0]["_row"] == 1
 
     frames, datasets = _column([1.0, math.nan], nullable=True, max_null_fraction=0)
     assert set(_failed_checks(frames, datasets, registry)) == {"t.x: max_null_fraction 0"}

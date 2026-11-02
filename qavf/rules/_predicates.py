@@ -15,6 +15,8 @@ from typing import Any
 
 import polars as pl
 
+from qavf.input_rules import format_value as format_value
+from qavf.input_rules import row_limit_label
 from qavf.value_policy import _SHORT_LIST as _SHORT_LIST
 from qavf.value_policy import TextNormalization, temporal_ticks
 from qavf.value_policy import _fits as _fits
@@ -58,16 +60,6 @@ def compatibility_error(name: str, value: Any, dtype: pl.DataType) -> str | None
     return None
 
 
-def format_value(value: Any, limit: int = 6) -> str:
-    """Compact rendering of a limit value for labels."""
-    if isinstance(value, list):
-        shown = ", ".join(format_value(v) for v in value[:limit])
-        return f"[{shown}{', …' if len(value) > limit else ''}]"
-    if isinstance(value, float):
-        return f"{value:g}"
-    return str(value)
-
-
 def _temporal_compare(operator: str, value: Any, dtype: pl.DataType) -> RowTest:
     requested = temporal_ticks(value, dtype)
     lower = operator in ("ge", "gt")
@@ -104,7 +96,7 @@ def row_tests(
         raise ValueError(f"normalize applies to text columns, not {dtype}")
     tests: dict[str, tuple[str, RowTest]] = {}
     for name, raw in constraints.items():
-        label = f"{name} {format_value(raw)}"
+        label = row_limit_label(name, raw)
         if name in ("ge", "le", "gt", "lt"):
             bound = raw
             if dtype.is_integer() and isinstance(raw, int | float | Decimal):
@@ -142,7 +134,7 @@ def row_tests(
         elif name in ("min_length", "max_length"):
             tests[name] = (label, _length(raw, at_least=name == "min_length"))
         elif name == "integral":
-            tests[name] = ("integral", _decimals(0, dtype))
+            tests[name] = (label, _decimals(0, dtype))
         elif name == "max_decimals":
             tests[name] = (label, _decimals(raw, dtype))
     return tests

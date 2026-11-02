@@ -29,7 +29,10 @@ def test_native_regex_declines_non_equivalent_unicode_and_runs_next_check():
     errors = [r for r in report.results if r.status is Status.ERROR]
     assert len(errors) == 1
     assert "shared Rust/RE2 subset" in errors[0].message
-    assert any(r.status is Status.PASS and "length" in r.check for r in report.results)
+    assert any(
+        r.status is Status.PASS and "data.x: length" in r.metrics.get("passed_checks", ())
+        for r in report.results
+    )
     full = validate(
         pa.table({"x": ["é"]}), schema={"columns": {"x": {"regex": r"\w+"}}}, backend="polars"
     )
@@ -134,8 +137,9 @@ def test_native_require_marks_disabled_and_missing_contracts_incomplete():
         backend="duckdb",
     )
     assert report.acceptance.verdict == "incomplete"
-    result = next(r for r in report.results if r.check_id == "acceptance.required")
+    result = next(r for r in report.results if r.check == "required: INP-004")
     assert result.status is Status.ERROR and not result.affected_count_exact
+    assert "excluded: disabled in the configuration" in result.message
 
 
 def test_cooperative_native_deadline_discards_partial_assessment(monkeypatch):

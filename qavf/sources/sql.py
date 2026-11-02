@@ -509,3 +509,74 @@ def validate_query(sql: str, *, connection: Any | None = None) -> str:
     if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
         raise SourceError("a source must contain exactly one SELECT query")
     return sql
+
+
+_DIRECT_PIVOT = re.compile(
+    r'^\s*PIVOT(?:_WIDER)?\s+((?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z_0-9]*)'
+    r'(?:\s*\.\s*(?:"(?:[^"]|"")*"|[A-Za-z_][A-Za-z_0-9]*))*)\s+ON\b',
+    re.I,
+)
+
+
+class _BaseTables:
+    """Collect the unqualified base relations of a serialized DuckDB syntax tree."""
+
+    def __init__(self) -> None:
+        self.names: set[str] = set()
+
+    def visit(self, value: Any, scope: frozenset[str] = frozenset()) -> None:
+        if isinstance(value, list):
+            for item in value:
+                self.visit(item, scope)
+        elif isinstance(value, dict):
+            self._node(value, scope)
+
+    def _node(self, value: dict[str, Any], scope: frozenset[str]) -> None:
+        entries = value.get("cte_map", {}).get("map", [])
+        local = scope | frozenset(str(entry["key"]).lower() for entry in entries)
+        if value.get("type") == "BASE_TABLE":
+            name = value["table_name"]
+            schema = value.get("schema_name", "").lower()
+            if (
+                schema in ("", "main")
+                and not value.get("catalog_name")
+                # Explicit main qualification bypasses CTE shadowing.
+                and (schema == "main" or name.lower() not in local)
+            ):
+                self.names.add(name)
+        for key, child in value.items():
+            if key != "cte_map":
+                recursive = value.get("type") == "RECURSIVE_CTE_NODE" and key == "right"
+                visible = (
+                    local | frozenset((str(value["cte_name"]).lower(),)) if recursive else local
+                )
+                self.visit(child, visible)
+        # Nonrecursive CTE bodies can reference a base table with their own name.
+        preceding = scope
+        for entry in entries:
+            self.visit(entry["value"], preceding)
+            preceding = preceding | frozenset((str(entry["key"]).lower(),))
+
+
+@functools.lru_cache(maxsize=256)
+def sql_table_names(query: str) -> set[str]:
+    """Extract unqualified base relations from DuckDB's syntax tree.
+
+    Parsing does not bind dummy tables, so JOIN USING and natural joins need no
+    guessed schema. Namespace fields and CTE scope are preserved explicitly.
+    """
+    with duckdb.connect(config={"threads": 1, "memory_limit": "16MB"}) as parser:
+        parse_query = query
+        # Dynamic PIVOT expands to an enum declaration plus a SELECT in DuckDB;
+        # its direct relation still has ordinary namespace binding.
+        direct_pivot = _DIRECT_PIVOT.match(query)
+        if direct_pivot is not None:
+            parse_query = "SELECT * FROM " + direct_pivot.group(1)
+        row = parser.execute("SELECT json_serialize_sql(?)", [parse_query]).fetchone()
+        assert row is not None
+        parsed = json.loads(row[0])
+    if parsed.get("error"):
+        raise duckdb.ParserException(parsed.get("error_message", "invalid SQL"))
+    tables = _BaseTables()
+    tables.visit(parsed)
+    return tables.names

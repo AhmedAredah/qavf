@@ -15,11 +15,20 @@ from qavf.engine.observation_sql import sample_observed
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
+from qavf.input_rules import (
+    INPUT_RULES,
+    assertion_not_evaluated,
+    assertion_rows,
+    assertions_hold,
+    expression_input_unavailable,
+    expression_not_evaluated,
+    expression_violations,
+    expressions_hold,
+)
 from qavf.redaction import exception_details, redact_text
 from qavf.rules.helpers import (
     fresh_internal,
     outcome,
-    plural,
     present,
 )
 from qavf.settings import (
@@ -41,18 +50,11 @@ class ExpressionRule(_SelectsDatasets):
     """Row-level SQL expressions hold for every row."""
 
     rule_id: ClassVar[str] = "INP-006"
-    name: ClassVar[str] = "Row expressions"
-    description: ClassVar[str] = (
-        "Every row satisfies the dataset's configured SQL expressions, e.g. "
-        "'pm25 <= pm10' or 'end_date >= start_date'."
-    )
+    name: ClassVar[str] = INPUT_RULES["INP-006"].name
+    description: ClassVar[str] = INPUT_RULES["INP-006"].description
     category: ClassVar[str] = CATEGORY
-    default_severity: ClassVar[Severity] = Severity.ERROR
-    recommendation: ClassVar[str] = (
-        "An expression failure means a relationship between columns that must always hold "
-        "does not. Inspect the listed rows for mismatched units or rows combined from "
-        "different sources."
-    )
+    default_severity: ClassVar[Severity] = INPUT_RULES["INP-006"].default_severity
+    recommendation: ClassVar[str] = INPUT_RULES["INP-006"].recommendation
     Params: ClassVar[type[RuleParams]] = DatasetSelection
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements | None:
@@ -74,7 +76,9 @@ class ExpressionRule(_SelectsDatasets):
                 if _must_assess(ctx, dataset, selection):
                     failures += [
                         Finding.unassessed(
-                            f"Not assessed: {reason}.",
+                            expression_input_unavailable(
+                                expression.name or expression.expr, dataset, reason
+                            ),
                             check=f"{dataset}: {expression.name or expression.expr}",
                             severity=expression.severity,
                             **_expression_identity(dataset, expression),
@@ -91,8 +95,9 @@ class ExpressionRule(_SelectsDatasets):
                         continue
                     failures.extend(
                         Finding.unassessed(
-                            f"Not assessed: expression '{expression.name or expression.expr}' "
-                            f"on {dataset} could not read its input: {_reason(exc)}",
+                            expression_input_unavailable(
+                                expression.name or expression.expr, dataset, _reason(exc)
+                            ),
                             check=f"{dataset}: {expression.name or expression.expr}",
                             severity=expression.severity,
                             **_expression_identity(dataset, expression),
@@ -107,8 +112,8 @@ class ExpressionRule(_SelectsDatasets):
         return outcome(
             failures,
             passed,
-            f"{plural(len(passed), 'row expression')} hold.",
-            "No row expressions are configured.",
+            expressions_hold(len(passed)),
+            INPUT_RULES[self.rule_id].unconfigured,
             check_id="row.expression.summary",
             checks=tuple(identities),
         )
@@ -137,8 +142,7 @@ class ExpressionRule(_SelectsDatasets):
                 # results of the others.
                 failures.append(
                     Finding.unassessed(
-                        f"Not assessed: expression '{label}' on {dataset} could not be "
-                        f"evaluated: {_reason(exc)}",
+                        expression_not_evaluated(label, dataset, _reason(exc)),
                         check=f"{dataset}: {label}",
                         severity=expression.severity,
                         **identity,
@@ -152,8 +156,7 @@ class ExpressionRule(_SelectsDatasets):
             bad = located.sample(condition, bad)
             failures.append(
                 Finding.fail(
-                    f"{plural(count, 'row')} of {rows:,} in {dataset} "
-                    f"{'violates' if count == 1 else 'violate'} '{expression.expr}'.",
+                    expression_violations(count, rows, dataset, expression.expr),
                     check=f"{dataset}: {label}",
                     severity=expression.severity,
                     affected=bad,
@@ -225,17 +228,11 @@ class SqlAssertionRule(Rule):
     """Configured SQL assertions return no rows."""
 
     rule_id: ClassVar[str] = "INP-007"
-    name: ClassVar[str] = "SQL assertions"
-    description: ClassVar[str] = (
-        "Each configured SQL assertion, a query that selects offending rows across any "
-        "datasets, returns nothing."
-    )
+    name: ClassVar[str] = INPUT_RULES["INP-007"].name
+    description: ClassVar[str] = INPUT_RULES["INP-007"].description
     category: ClassVar[str] = CATEGORY
-    default_severity: ClassVar[Severity] = Severity.ERROR
-    recommendation: ClassVar[str] = (
-        "Each returned row is a counter-example to the assertion. Run the assertion's query "
-        "yourself to explore them."
-    )
+    default_severity: ClassVar[Severity] = INPUT_RULES["INP-007"].default_severity
+    recommendation: ClassVar[str] = INPUT_RULES["INP-007"].recommendation
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements | None:
         # SQL may reference supplied runtime frames absent from settings.
@@ -256,7 +253,7 @@ class SqlAssertionRule(Rule):
                 # e.g. a database connection that cannot be attached: this assertion only.
                 failures.append(
                     Finding.unassessed(
-                        f"Not assessed: assertion '{name}' could not be evaluated: {_reason(exc)}",
+                        assertion_not_evaluated(name, _reason(exc)),
                         check=name,
                         severity=severity,
                     )
@@ -267,7 +264,7 @@ class SqlAssertionRule(Rule):
                 continue
             failures.append(
                 Finding.fail(
-                    f"Assertion '{name}' returned {plural(count, 'offending row')}.",
+                    assertion_rows(name, count),
                     check=name,
                     severity=severity,
                     affected=bad,
@@ -290,8 +287,8 @@ class SqlAssertionRule(Rule):
                 for finding in failures
             ],
             passed,
-            f"{plural(len(passed), 'SQL assertion')} hold.",
-            "No SQL assertions are configured.",
+            assertions_hold(len(passed)),
+            INPUT_RULES[self.rule_id].unconfigured,
             check_id="sql.assertion.summary",
             checks=tuple(
                 {

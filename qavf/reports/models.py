@@ -189,6 +189,16 @@ def check_identity(
     )
 
 
+def exact_count(status: Status, count: int, declared: bool = True) -> bool:
+    """Whether a result's affected count is an exact total.
+
+    A check that was not assessed (ERROR, SKIPPED) has no exact total, and a
+    failure without any counted item is never an exact zero.
+    """
+    assessed = status in (Status.PASS, Status.FAIL)
+    return declared and assessed and not (status == Status.FAIL and not count)
+
+
 class RuleResult(SnapshotModel):
     """Outcome of one rule execution."""
 

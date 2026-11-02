@@ -1,18 +1,78 @@
-"""Bounded evidence and structured outcomes shared by the SQL check executors."""
+"""Bounded evidence and the report results of the native input checks.
+
+Results take the same shape as the full backend's: the rule's metadata and
+wording from :mod:`qavf.input_rules`, one result per failing contract, and one
+summary per rule that accounts for every contract that passed.
+"""
 
 from __future__ import annotations
 
-from qavf.audit_codec import evidence_json_size
+import itertools
+from dataclasses import dataclass, field
+from typing import Any
+
+from qavf import input_rules as wording
+from qavf.audit_codec import (
+    EVIDENCE_OMITTED,
+    bounded_diagnostic,
+    evidence_json_size,
+    normalize_evidence,
+)
 from qavf.engine.severity import Severity, Status
+from qavf.input_rules import INPUT_RULES
 from qavf.redaction import redact, redact_text
-from qavf.reports.models import RuleResult
+from qavf.reports.models import RuleResult, check_identity, exact_count
+
+
+@dataclass(frozen=True, slots=True)
+class Summary:
+    """How a rule folds the contracts that passed into one result."""
+
+    check_id: str
+    message: Any
+    """Callable building the message from the number of passing contracts."""
+    single_identity: bool = False
+    """Whether one passing identity names the summary itself (INP-004)."""
+
+
+SUMMARIES: dict[str, Summary] = {
+    "INP-001": Summary("dataset.available.summary", wording.datasets_accessible),
+    "INP-002": Summary("schema.summary", wording.schemas_conform),
+    "INP-003": Summary("column.summary", wording.column_checks_passed),
+    "INP-004": Summary("key.summary", wording.key_contracts_passed, single_identity=True),
+    "INP-005": Summary("key.reference.summary", wording.foreign_keys_resolved),
+    "INP-006": Summary("row.expression.summary", wording.expressions_hold),
+    "INP-007": Summary("sql.assertion.summary", wording.assertions_hold),
+}
+"""Rules whose passing contracts are folded into a summary; others report each one."""
+
+
+@dataclass(order=True)
+class _Entry:
+    """A passing contract or exemption, with its place in the canonical report order."""
+
+    order: tuple[int, int]
+    rule_id: str = field(compare=False)
+    kind: str = field(compare=False)
+    label: str = field(compare=False, default="")
+    identities: tuple[dict[str, Any], ...] = field(compare=False, default=())
+    name: str = field(compare=False, default="")
+    rows: int = field(compare=False, default=0)
 
 
 class ResultCollector:
+    """Collect native results in the full backend's shape and order."""
+
     def __init__(self, connection, settings):
         self.connection = connection
         self.settings = settings
         self.results = []
+        self.locators = {}
+        self._orders = []
+        self._entries = []
+        self._elapsed = {}
+        self._sequence = itertools.count()
+        self._positions = {name: index for index, name in enumerate(settings.datasets)}
 
     def enabled(self, rule_id, dataset=None):
         rule = self.settings.rules.get(rule_id)
@@ -39,168 +99,277 @@ class ResultCollector:
             max_bytes=self.settings.engine.max_evidence_bytes,
         ).read(query)
 
-    def add(
+    @property
+    def evidence_limit(self):
+        return self.settings.engine.max_affected_records
+
+    def order(self, owner):
+        """A dataset's (or assertion's) place in the report; unowned results first."""
+        position = owner if isinstance(owner, int) else self._positions.get(owner, -1)
+        return position, next(self._sequence)
+
+    def rule_severity(self, rule_id):
+        configured = self.settings.rules.get(rule_id)
+        if configured is not None and configured.severity:
+            return Severity(configured.severity)
+        return INPUT_RULES[rule_id].default_severity
+
+    def _rule_parameters(self, rule_id):
+        configured = self.settings.rules.get(rule_id)
+        if configured is None:
+            return {}
+        return {key: value for key, value in configured.params.items() if value is not None}
+
+    def report(
         self,
         rule_id,
-        name,
-        dataset,
-        columns=(),
+        owner,
+        status,
+        message,
         *,
-        count=0,
-        total=None,
-        records=None,
-        parameters=None,
-        metrics=None,
-        unit="rows",
-        severity=None,
-        status=None,
-        message=None,
-        affected_rows=None,
         check=None,
         check_id=None,
-        affected_count_exact=None,
+        datasets=(),
+        columns=(),
+        parameters=None,
+        checks=(),
+        records=None,
+        count=None,
+        count_exact=True,
+        total=None,
+        unit=None,
+        affected_rows=None,
+        metrics=None,
+        severity=None,
     ):
-        if not self.enabled(rule_id, dataset):
+        """Record one result. ``records`` is ``None`` when no evidence was collected."""
+        selected = owner if isinstance(owner, str) and owner in self._positions else None
+        if not self.enabled(rule_id, selected):
             return
-        status = Status(status or (Status.FAIL if count else Status.PASS))
-        assessed = status in (Status.PASS, Status.FAIL)
-        count_known = assessed and count is not None and not (status == Status.FAIL and count == 0)
-        if affected_count_exact is not None:
-            count_known = count_known and affected_count_exact
-        count = count or 0
-        parameters = redact(dict(parameters or {}))
-        source_truncated = bool(getattr(records, "truncated", False))
-        records = list(records or [])
-        metrics = redact(dict(metrics or {}))
-        original = len(records)
-        records = records[: self.settings.engine.max_affected_records]
-        budget = self.settings.engine.max_evidence_bytes
-        # Counts and identity are the outcome ledger. Records, metrics and
-        # diagnostics share one optional payload budget, including list framing.
-        duplicate_complete = metrics.get("duplicate_positions_complete")
-        truncated = source_truncated or bool(metrics.get("duplicate_positions_truncated"))
-        metrics_dropped = bool(metrics) and evidence_json_size(metrics) > budget
-        if metrics_dropped:
-            metrics = {}
-        metric_bytes = evidence_json_size(metrics) if metrics else 0
-        admitted = []
-        record_bytes = 2  # Nonempty array framing.
-        for record in records:
-            size = evidence_json_size(record) + bool(admitted)
-            if record_bytes + size + metric_bytes > budget:
-                break
-            admitted.append(record)
-            record_bytes += size
-        records = admitted
-        truncated |= len(records) < original or metrics_dropped or count > len(records)
-        remaining = max(0, budget - metric_bytes - (record_bytes if records else 0))
-        default_message = (
-            "Check could not be assessed"
-            if status == Status.ERROR
-            else "Check skipped"
-            if status == Status.SKIPPED
-            else (f"{count} offending {unit}" if count else "Check failed")
-            if status == Status.FAIL
-            else "Check passed"
+        status = Status(status)
+        severity = Severity(severity) if severity else self.rule_severity(rule_id)
+        if status == Status.ERROR:
+            severity = max(severity, Severity.ERROR)
+        affected = records is not None
+        sample = list(records or ())
+        if count is None:
+            count = len(sample)
+        row_column = self._row_column(datasets)
+        if affected and row_column is not None:
+            sample = self.locators[datasets[0]].annotate(sample, row_column)
+        evidence = BoundedEvidence.admit(
+            self.settings.engine,
+            status,
+            message,
+            sample,
+            dict(metrics or {}),
+            count,
+            affected=affected,
+            omitted=bool(getattr(records, "omitted", False)),
         )
-        message = redact_text(message or default_message)
-        encoded_message = message.encode("utf-8")
-        if len(encoded_message) > remaining:
-            message = encoded_message[:remaining].decode("utf-8", errors="ignore")
-            truncated = True
-        rule = self.settings.rules.get(rule_id)
-        complete = (
-            count_known
-            and (count == 0 or len(records) >= count)
-            and duplicate_complete is not False
-            and not source_truncated
-            if assessed
-            else None
-        )
+        if affected_rows is None and unit == "rows" and affected:
+            affected_rows = count
+        rule = INPUT_RULES[rule_id]
+        self._orders.append(self.order(owner))
         self.results.append(
             RuleResult(
                 rule_id=rule_id,
-                name=name,
-                description=name,
-                category="input",
-                check=check or f"{dataset}.{','.join(columns)}: {name}",
-                check_id=check_id or name,
-                scope="run"
-                if dataset == "*"
-                else "column"
-                if len(columns) == 1
-                else "columns"
-                if columns
-                else "dataset",
+                name=rule.name,
+                description=rule.description,
+                category=rule.category,
+                check=check,
+                check_id=check_id or rule_id,
                 columns=list(columns),
-                parameters=parameters,
+                parameters=redact(parameters if parameters else self._rule_parameters(rule_id)),
+                checks=[check_identity(rule_id, **redact(dict(item))) for item in checks],
                 status=status,
-                severity=severity
-                or (
-                    rule.severity
-                    if rule and rule.severity
-                    else Severity.CRITICAL
-                    if rule_id in ("INP-001", "INP-002")
-                    else Severity.ERROR
-                ),
-                message=message,
-                affected_records=records,
+                severity=severity,
+                message=evidence.message,
+                affected_records=evidence.records,
                 affected_count=count,
-                affected_count_exact=count_known,
-                evidence_complete=complete,
-                evidence_truncated=truncated,
-                affected_rows=affected_rows
-                if affected_rows is not None
-                else count
-                if unit == "rows" and count_known
-                else None,
+                affected_count_exact=exact_count(status, count, count_exact),
+                evidence_complete=evidence.complete,
+                evidence_truncated=evidence.truncated,
                 total_records=total,
                 unit=unit,
-                metrics=metrics,
-                datasets=[] if dataset == "*" else [dataset],
+                affected_rows=affected_rows,
+                recommendation=rule.recommendation,
+                metrics=evidence.metrics,
+                datasets=list(datasets),
             )
         )
 
-    def row_check(
-        self,
-        rule_id,
-        name,
-        loaded,
-        condition,
-        *,
-        columns=(),
-        parameters=None,
-        table=None,
-        total=None,
-        severity=None,
-        metrics=None,
-    ):
-        if not self.enabled(rule_id, loaded.name):
-            return
-        from qavf.sources.sql import quote_identifier as qi
+    def _row_column(self, datasets):
+        """The row-position field of a single multi-file dataset's evidence, if any."""
+        if len(datasets) != 1 or datasets[0] not in self.locators:
+            return None
+        return self.locators[datasets[0]].row_column
 
-        source = qi(table or loaded.table)
-        count = self.connection.execute(
-            f"SELECT count(*) FROM {source} WHERE {condition}"
-        ).fetchone()[0]
-        records = []
-        limit = self.settings.engine.max_affected_records
-        if count and limit:
-            selected = list(dict.fromkeys([loaded.row_column, *columns]))
-            records = self.records(
-                f"SELECT {', '.join(qi(c) for c in selected)} FROM "
-                f"{source} WHERE {condition} ORDER BY "
-                f"{qi(loaded.row_column)} LIMIT {limit}"
+    def _ledger(self, rule_id, owner, kind, label="", identities=(), name="", rows=0):
+        selected = owner if isinstance(owner, str) and owner in self._positions else None
+        if self.enabled(rule_id, selected):
+            self._entries.append(
+                _Entry(self.order(owner), rule_id, kind, label, tuple(identities), name, rows)
             )
-        self.add(
+
+    def passed(self, rule_id, owner, label, *identities):
+        """Record a contract that passed, for its rule's summary."""
+        self._ledger(rule_id, owner, "passed", label, identities)
+
+    def assessed(self, rule_id, owner, *identities):
+        """Record contracts that passed without a summary label of their own (INP-004)."""
+        self._ledger(rule_id, owner, "identity", identities=identities)
+
+    def exempt(self, rule_id, owner, name, label, rows):
+        """Rows a rule exempted under its policy, reported with its summary."""
+        if rows:
+            self._ledger(rule_id, owner, "exempt", label, name=name, rows=rows)
+
+    def unattributed(self, rule_ids, elapsed):
+        """Time spent on contracts that passed, for their rules' summaries."""
+        for rule_id in rule_ids:
+            self._elapsed[rule_id] = self._elapsed.get(rule_id, 0.0) + elapsed / len(rule_ids)
+
+    def exclusions(self):
+        """Why each input rule that does not run was left out of this run."""
+        engine, excluded = self.settings.engine, {}
+        for rule_id in INPUT_RULES:
+            rule = self.settings.rules.get(rule_id)
+            if rule is None and not engine.run_unconfigured_rules:
+                excluded[rule_id] = "not configured (run_unconfigured_rules: false)"
+            elif rule is not None and not rule.enabled:
+                excluded[rule_id] = "disabled in the configuration"
+            elif engine.include_categories is not None and "input" not in engine.include_categories:
+                excluded[rule_id] = "category 'input' not in engine.include_categories"
+            elif "input" in engine.exclude_categories:
+                excluded[rule_id] = "category 'input' in engine.exclude_categories"
+        return excluded
+
+    def mark(self):
+        """A point to roll back to when a stage's results must be discarded."""
+        return len(self.results), next(self._sequence)
+
+    def rollback(self, mark):
+        """Discard results and ledger entries recorded after ``mark``."""
+        count, sequence = mark
+        del self.results[count:]
+        del self._orders[count:]
+        self._entries = [entry for entry in self._entries if entry.order[1] < sequence]
+
+    def _entries_of(self, rule_id, kind):
+        return sorted(e for e in self._entries if e.rule_id == rule_id and e.kind == kind)
+
+    def _exemptions(self, rule_id):
+        metrics = {}
+        for entry in self._entries_of(rule_id, "exempt"):
+            metrics.setdefault(entry.name, {})[entry.label] = entry.rows
+        return metrics
+
+    def finish(self, rule_ids):
+        """Fold passing contracts into summaries; mark rules that had nothing to check."""
+        for rule_id in rule_ids:
+            if not self.enabled(rule_id):
+                continue
+            produced = [i for i, result in enumerate(self.results) if result.rule_id == rule_id]
+            passes = self._entries_of(rule_id, "passed")
+            metrics = self._exemptions(rule_id)
+            summary = SUMMARIES.get(rule_id)
+            before = len(self.results)
+            if summary is not None and passes:
+                self._summarize(rule_id, summary, passes, metrics)
+            elif produced and metrics:
+                first = min(produced, key=self._orders.__getitem__)
+                result = self.results[first]
+                self.results[first] = result.model_copy(
+                    update={"metrics": {**result.metrics, **metrics}}
+                )
+            elif not produced:
+                self.report(rule_id, None, Status.SKIPPED, INPUT_RULES[rule_id].unconfigured)
+            if len(self.results) > before and rule_id in self._elapsed:
+                self.results[-1] = self.results[-1].model_copy(
+                    update={"execution_time_s": round(self._elapsed[rule_id], 6)}
+                )
+
+    def _summarize(self, rule_id, summary, passes, metrics):
+        if summary.single_identity:
+            entries = self._entries_of(rule_id, "identity")
+            identities = [identity for entry in entries for identity in entry.identities]
+            message = summary.message(len(identities))
+            own = dict(identities[0]) if len(identities) == 1 else {"check_id": summary.check_id}
+        else:
+            identities = [identity for entry in passes for identity in entry.identities]
+            message = summary.message(len(passes))
+            own = {"check_id": summary.check_id}
+        self.report(
             rule_id,
-            name,
-            loaded.name,
-            columns,
-            count=count,
-            total=loaded.rows if total is None else total,
-            records=records,
-            parameters=parameters,
-            metrics=metrics,
-            severity=severity,
+            None,
+            Status.PASS,
+            message,
+            check_id=own.get("check_id"),
+            datasets=tuple(own.get("datasets", ())),
+            columns=tuple(own.get("columns", ())),
+            parameters=own.get("parameters"),
+            checks=identities,
+            metrics={**metrics, "passed_checks": [entry.label for entry in passes]},
         )
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedEvidence:
+    """A result's optional payload within ``max_affected_records`` and the byte budget.
+
+    Counts and identity are the outcome ledger. Records, metrics and the message
+    share the byte budget; the passing-check ledger is never dropped.
+    """
+
+    message: str
+    records: list[dict[str, Any]]
+    metrics: dict[str, Any]
+    complete: bool | None
+    truncated: bool
+
+    @classmethod
+    def admit(cls, engine, status, message, sample, metrics, count, *, affected, omitted):
+        budget = engine.max_evidence_bytes
+        coverage = metrics.pop("passed_checks", None)
+        metrics = normalize_evidence(redact(metrics)) if metrics else {}
+        if metrics and evidence_json_size(metrics) > budget:
+            metrics_dropped, metrics = True, {}
+        else:
+            metrics_dropped = False
+        records = [normalize_evidence(dict(record)) for record in sample]
+        records = records[: engine.max_affected_records]
+        kept = list(itertools.takewhile(_Budget(budget).admits, records))
+        metrics_size = evidence_json_size(metrics) if metrics else 0
+        while kept and evidence_json_size(kept) + metrics_size > budget:
+            kept.pop()
+        used = (evidence_json_size(kept) if kept else 0) + metrics_size
+        omitted = omitted or len(kept) != len(records)
+        if omitted or metrics_dropped:
+            message += EVIDENCE_OMITTED
+        message = bounded_diagnostic(redact_text(message), max(0, budget - used))
+        if coverage is not None:
+            metrics["passed_checks"] = list(coverage)
+        complete = metrics.get("duplicate_positions_complete")
+        truncated = bool(metrics.get("duplicate_positions_truncated"))
+        if (affected and count > len(kept)) or omitted:
+            complete, truncated = False, True
+        if status == Status.FAIL and not count:
+            complete = False
+        if status not in (Status.PASS, Status.FAIL) and complete is not None:
+            complete = None
+        return cls(message, kept, metrics, complete, truncated or metrics_dropped)
+
+
+class _Budget:
+    """Admit records while their encoded sizes fit the evidence byte budget."""
+
+    def __init__(self, budget):
+        self.remaining = budget
+
+    def admits(self, record):
+        size = evidence_json_size(record)
+        if size > self.remaining:
+            return False
+        self.remaining -= size
+        return True

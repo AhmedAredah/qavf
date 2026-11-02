@@ -11,6 +11,7 @@ import polars as pl
 from qavf._float_accumulator import ExactFloatAccumulator
 from qavf.engine.registry import Finding
 from qavf.engine.sql_read import NativeReadUnavailable
+from qavf.input_rules import column_fails, outside_bounds, too_few_applicable
 from qavf.numeric import stable_float_statistic
 from qavf.rules._column_batch import ColumnInputs, exceeds_missing_fraction
 from qavf.rules._column_contract import require_statistic_population
@@ -81,10 +82,7 @@ def native_float_statistics(
         # Its exact projected reader remains valid; real source failures propagate.
         return NotImplemented
     if applicable < check.min_applicable_rows:
-        raise ValueError(
-            f"only {applicable} row(s) match 'where: {check.where}', "
-            f"fewer than min_applicable_rows {check.min_applicable_rows}"
-        )
+        raise ValueError(too_few_applicable(applicable, check.where, check.min_applicable_rows))
     problems = []
     require_statistic_population(statistics, accumulator.count)
     for statistic, bounds in statistics.items():
@@ -92,16 +90,14 @@ def native_float_statistics(
             statistic, lambda: deviation
         )()
         if not within(value, bounds):
-            problems.append(
-                f"{statistic} {show(value)} outside [{show(bounds.ge)}, {show(bounds.le)}]"
-            )
+            problems.append(outside_bounds(statistic, value, bounds))
     if exceeds_missing_fraction(check, applicable - accumulator.count, applicable):
         return NotImplemented
     if not problems:
         return None
     dataset = inputs.dataset
     return Finding.fail(
-        f"{dataset}.{column} fails '{label}': {'; '.join(problems)}.",
+        column_fails(f"{dataset}.{column}", label, problems),
         check=f"{dataset}.{column}: {label}",
         severity=check.severity,
         affected=[{"dataset": dataset, "column": column, "problem": p} for p in problems],

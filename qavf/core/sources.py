@@ -7,7 +7,7 @@ import os
 import re
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -25,6 +25,7 @@ from qavf.core.admission import (
 from qavf.duckdb_results import arrow_table, settle
 from qavf.inputs.descriptors import BatchSource, File, Loader, Query
 from qavf.optional import unsupported
+from qavf.redaction import redact_text
 from qavf.sources.base import SourceError, SourceIntegrityError, SourceNotFoundError
 from qavf.sources.errors import redacted_error, verify_postcondition
 from qavf.sources.formats import READERS, infer_format, is_remote
@@ -46,6 +47,12 @@ class LoadedDataset:
     original_types: dict[str, str] = field(default_factory=dict)
     metadata: dict = field(default_factory=dict)
     owned_relations: tuple[tuple[str, str], ...] = ()
+    reader: str | None = None
+    """The file format read, for file sources."""
+    files: tuple[str, ...] = ()
+    """The files of a multi-file read, in reading order."""
+    file_count_sql: str | None = None
+    """Counts the rows of each file of a multi-file read, when evidence needs it."""
 
 
 def evidence_row_name(columns: Sequence[str]) -> str:
@@ -121,7 +128,8 @@ class InputReader:
         if isinstance(value, File) and not is_remote(os.fspath(value.path)):
             paths = discover_local_files(self.settings.resolve(value.path))
             if not paths:
-                raise SourceNotFoundError(f"No files match {os.fspath(value.path)!r}")
+                location = redact_text(str(self.settings.resolve(value.path)))
+                raise SourceNotFoundError(f"file not found: {location}")
             return FileIdentity(paths, self.settings.report.hash_inputs)
         return None
 
@@ -184,6 +192,7 @@ class InputReader:
         table = "__qavf_input_" + uuid4().hex
         metadata = {"loaded_at": datetime.now(UTC).isoformat()}
         source_options = source_path = source_format = None
+        files, file_count_sql = (), None
         budget = policy.row_budget
         try:
             if isinstance(value, BatchSource):
@@ -219,6 +228,14 @@ class InputReader:
                 if fmt == "parquet":
                     self._parquet_precision(locations)
                 sql = self._reader_sql(fmt, locations, source_options)
+                if matched is not None and len(matched) > 1:
+                    files = tuple(str(p) for p in matched)
+                    counted = self._reader_sql(
+                        fmt, locations, {**source_options, "filename": "__qavf_file"}
+                    )
+                    file_count_sql = (
+                        f"SELECT __qavf_file, count(*) FROM ({counted}) files GROUP BY 1"
+                    )
                 desc = con.execute(f"DESCRIBE {sql}").fetchall()
                 if fmt == "csv":
                     self._csv_header(locations, source_options, [r[0] for r in desc])
@@ -306,7 +323,8 @@ class InputReader:
             inputs = [entry for entry in owned if entry != ("TABLE", table)]
             self._drop(inputs)
             owned[:] = [("TABLE", table)]
-            return self._result(name, table, projection, desc, rows, row_column, metadata, owned)
+            loaded = self._result(name, table, projection, desc, rows, row_column, metadata, owned)
+            return replace(loaded, reader=source_format, files=files, file_count_sql=file_count_sql)
         except duckdb.Error as exc:
             if source_format == "csv" and source_path is not None:
                 from qavf.sources.csv_diagnostics import CsvPolicy

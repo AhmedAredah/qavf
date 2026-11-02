@@ -10,18 +10,21 @@ from uuid import uuid4
 
 import duckdb
 
+from qavf import input_rules as wording
 from qavf._version import __version__
 from qavf.core.checks import DatasetChecks
 from qavf.core.configuration import prepare
+from qavf.core.evidence import FileRows
 from qavf.core.results import ResultCollector
 from qavf.core.sources import InputReader
-from qavf.engine.severity import Status
+from qavf.engine.severity import Severity, Status
+from qavf.input_rules import INPUT_RULES
 from qavf.redaction import redact, redact_text
 from qavf.reports.models import DatasetInfo, QAReport, RunMetadata
 from qavf.sources.base import SourceNotFoundError
 from qavf.sources.memory import reservation_is_stricter
 from qavf.sources.sql import quote_identifier as qi
-from qavf.sources.sql import resolve_sql_paths, validate_query
+from qavf.sources.sql import resolve_sql_paths, sql_table_names, validate_query
 from qavf.sources.sql import sql_literal as lit
 
 
@@ -49,16 +52,88 @@ def _dataset_rules(spec):
 
 
 def _blocked(out, name, rule_ids, exc, *, stage):
+    """Mark a stage's rules unassessed after an unexpected failure or timeout."""
     for rule_id in rule_ids:
-        out.add(
+        out.report(
             rule_id,
-            stage,
             name,
-            status=Status.ERROR,
-            check_id=f"{rule_id}.{stage}",
+            Status.ERROR,
+            f"Not assessed: {name}: {type(exc).__name__}: {redact_text(str(exc))}.",
+            check=None if name == "*" else name,
+            datasets=() if name == "*" else (name,),
             parameters={"stage": stage, "error_type": type(exc).__name__},
-            message=f"Not assessed: {redact_text(str(exc))}",
         )
+
+
+def _must_assess(out, rule_id, name, spec):
+    """Whether an unavailable dataset leaves this rule's configured contracts unassessed.
+
+    Required datasets, and datasets a rule was explicitly pointed at, must be
+    assessed; an optional dataset that is simply absent is not an error.
+    """
+    rule = out.settings.rules.get(rule_id)
+    selection = rule.params.get("datasets") if rule is not None else None
+    return spec.required or (selection is not None and name in selection)
+
+
+def _unavailable(out, name, spec, reason):
+    """Report every configured contract of a dataset that could not be read."""
+    schema = spec.schema_spec
+    if schema is not None:
+        blocked = [("INP-002", "schema check"), ("INP-003", "column QA limits")]
+        blocked.append(("INP-004", "key check"))
+        if any(column.na_values for column in schema.columns.values()):
+            blocked.append(("INP-009", "not-applicable values"))
+        for rule_id, what in blocked:
+            if _must_assess(out, rule_id, name, spec):
+                out.report(
+                    rule_id,
+                    name,
+                    Status.ERROR,
+                    wording.blocked_dataset(what, name, reason),
+                    check=name,
+                    datasets=(name,),
+                )
+    if _must_assess(out, "INP-005", name, spec):
+        for fk in spec.foreign_keys:
+            label = wording.reference_label(name, fk.columns, fk.ref_dataset)
+            out.report(
+                "INP-005",
+                name,
+                Status.ERROR,
+                wording.blocked_reference(label, reason),
+                check=label,
+                check_id="key.reference",
+                columns=tuple(fk.columns),
+                datasets=(name, fk.ref_dataset),
+                parameters=fk.model_dump(mode="python"),
+                severity=fk.severity,
+            )
+    if _must_assess(out, "INP-006", name, spec):
+        for expression in spec.expressions:
+            out.report(
+                "INP-006",
+                name,
+                Status.ERROR,
+                wording.expression_input_unavailable(
+                    expression.name or expression.expr, name, reason
+                ),
+                check=f"{name}: {expression.name or expression.expr}",
+                check_id="row.expression",
+                datasets=(name,),
+                parameters=expression.model_dump(mode="python"),
+                severity=expression.severity,
+            )
+
+
+def _referenced(settings, sql):
+    """Datasets an assertion reads as tables, matched case-insensitively like SQL."""
+    lookup = {name.lower(): name for name in settings.datasets}
+    try:
+        tables = sql_table_names(sql)
+    except Exception:
+        return ()
+    return tuple(sorted({lookup[t.lower()] for t in tables if t.lower() in lookup}))
 
 
 def _fit_report(report, limit):
@@ -116,7 +191,8 @@ class NativeRunner:
 
         if not any(out.enabled(rule, name) for rule in rule_ids):
             return
-        start, offset = perf_counter(), len(out.results)
+        start, mark = perf_counter(), out.mark()
+        offset = mark[0]
         deadline = Deadline(out.connection, self.settings.engine.rule_timeout_s)
         try:
             with deadline:
@@ -128,7 +204,7 @@ class NativeRunner:
                 raise
             _blocked(out, name, rule_ids, exc, stage="execution")
         if deadline.expired:
-            del out.results[offset:]
+            out.rollback(mark)
             _blocked(
                 out,
                 name,
@@ -141,6 +217,9 @@ class NativeRunner:
             elapsed
         )
         number = len(out.results) - offset
+        if not number:
+            # Passing contracts are reported by their rule's summary.
+            out.unattributed(rule_ids, elapsed)
         for index in range(offset, len(out.results)):
             out.results[index] = out.results[index].model_copy(
                 update={
@@ -192,24 +271,42 @@ class NativeRunner:
                         },
                     )
                 )
-                out.add("INP-001", "load", name, total=loaded.rows)
+                out.passed(
+                    "INP-001",
+                    name,
+                    name,
+                    {
+                        "check_id": "dataset.available",
+                        "datasets": (name,),
+                        "parameters": {"required": spec.required},
+                    },
+                )
+                if loaded.files:
+                    out.locators[name] = FileRows(
+                        out.connection, loaded.files, loaded.file_count_sql, loaded.row_column
+                    )
             except Exception as exc:
                 from qavf.optional import OptionalDependencyError
 
                 if isinstance(exc, OptionalDependencyError):
                     raise
-                self.unavailable[name] = redact_text(str(exc))
-                if not spec.required and isinstance(exc, SourceNotFoundError):
-                    out.add(
+                reason = redact_text(str(exc))
+                self.unavailable[name] = reason
+                if spec.required or not isinstance(exc, SourceNotFoundError):
+                    out.report(
                         "INP-001",
-                        "load",
                         name,
-                        status=Status.SKIPPED,
-                        parameters={"required": False},
-                        message="Optional dataset is absent",
+                        Status.FAIL,
+                        wording.dataset_unavailable(name, spec.required, reason),
+                        check=name,
+                        check_id="dataset.available",
+                        datasets=(name,),
+                        parameters={"required": spec.required},
+                        records=[{"dataset": name, "error": reason}],
+                        unit="datasets",
+                        severity=None if spec.required else Severity.WARNING,
                     )
-                else:
-                    _blocked(out, name, active, exc, stage="load")
+                _unavailable(out, name, spec, reason)
                 continue
             if (
                 not any(out.enabled(rule, name) for rule in _dataset_rules(spec))
@@ -227,26 +324,36 @@ class NativeRunner:
             if executor.schema is not None:
                 for ids, method in (
                     (("INP-002",), executor.shape),
-                    (("INP-002", "INP-003"), executor.columns),
+                    (("INP-003",), executor.columns),
                     (("INP-004",), executor.keys),
                     (("INP-009",), executor.applicability),
                 ):
                     self._stage(out, name, ids, method)
-            self._stage(out, name, ("INP-005",), functools.partial(executor.foreign_keys, checks))
+            self._stage(
+                out,
+                name,
+                ("INP-005",),
+                functools.partial(executor.foreign_keys, checks, self.unavailable),
+            )
             self._stage(out, name, ("INP-006",), executor.expressions)
         return checks
 
     def _assertions(self, out):
         if not out.enabled("INP-007"):
             return
-        for assertion in self.settings.assertions:
+        for index, assertion in enumerate(self.settings.assertions):
             snapshot = "__qavf_assertion_" + uuid4().hex
             self._stage(
-                out, "*", ("INP-007",), functools.partial(self._assertion, out, assertion, snapshot)
+                out,
+                "*",
+                ("INP-007",),
+                functools.partial(self._assertion, out, index, assertion, snapshot),
             )
 
-    def _assertion(self, out, assertion, snapshot):
+    def _assertion(self, out, index, assertion, snapshot):
         """Run one SQL assertion into a temporary snapshot and record its result."""
+        identity = {"check_id": "sql.assertion", "parameters": assertion.model_dump(mode="python")}
+        name, limit = assertion.name, self.settings.engine.max_affected_records
         try:
             sql = resolve_sql_paths(
                 validate_query(assertion.sql),
@@ -255,34 +362,41 @@ class NativeRunner:
             )
             out.connection.execute(f"CREATE TEMP TABLE {qi(snapshot)} AS {sql}")
             count = out.connection.execute(f"SELECT count(*) FROM {qi(snapshot)}").fetchone()[0]
+            # The kept sample is the first rows by every column: the same on every run.
             records = (
-                out.records(
-                    f"SELECT * FROM {qi(snapshot)} "
-                    f"LIMIT {self.settings.engine.max_affected_records}"
-                )
-                if count
-                else []
-            )
-            out.add(
-                "INP-007",
-                "assertion",
-                "*",
-                count=count,
-                records=records,
-                parameters={"name": assertion.name, "sql": assertion.sql},
-                severity=assertion.severity,
+                out.records(f"SELECT * FROM {qi(snapshot)} ORDER BY ALL LIMIT {limit}")
+                if count and limit
+                else None
             )
         except Exception as exc:
-            out.add(
+            out.report(
                 "INP-007",
-                "assertion",
-                "*",
-                status=Status.ERROR,
-                message=redact_text(str(exc)),
-                parameters={"name": assertion.name, "sql": assertion.sql},
+                index,
+                Status.ERROR,
+                wording.assertion_not_evaluated(name, str(exc)),
+                check=name,
+                severity=assertion.severity,
+                **identity,
             )
+            return
         finally:
             out.connection.execute(f"DROP TABLE IF EXISTS {qi(snapshot)}")
+        if not count:
+            out.passed("INP-007", index, name, {**identity, "scope": "run"})
+            return
+        out.report(
+            "INP-007",
+            index,
+            Status.FAIL,
+            wording.assertion_rows(name, count),
+            check=name,
+            severity=assertion.severity,
+            records=records,
+            count=count,
+            unit="rows",
+            datasets=_referenced(self.settings, assertion.sql),
+            **identity,
+        )
 
     def run(self):
         from qavf.audit_codec import canonical_digest
@@ -368,8 +482,9 @@ class NativeRunner:
                 except Exception as exc:
                     _blocked(out, loaded.name, ("INP-001",), exc, stage="source_integrity")
             self._release(reader, retained)
+            out.finish(INPUT_RULES)
         config = redact(settings.model_dump(mode="python", by_alias=True))
-        results = requirements(out.results, settings.engine.require)
+        results = requirements(out.results, settings.engine.require, out.exclusions())
         rules = [
             RuleInfo(
                 rule_id=rule_id,

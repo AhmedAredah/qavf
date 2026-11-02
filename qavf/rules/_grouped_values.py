@@ -10,10 +10,11 @@ from qavf.core.policy import NativeValueDomain, native_literal
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
 from qavf.grouped_values import GroupedValuePlan
+from qavf.input_rules import group_values_satisfy, group_values_violate, grouped_values_label
 from qavf.rules._execution import _native_key_type
 from qavf.rules._key_values import CanonicalKeyValues
 from qavf.rules._temporal import temporal_evidence
-from qavf.rules.helpers import fresh_internal, plural
+from qavf.rules.helpers import fresh_internal
 from qavf.settings import ColumnCheck, GroupedValueSpec
 from qavf.sources.sql import quote_identifier as qi
 
@@ -49,7 +50,7 @@ def grouped_values(ctx: DataContext, dataset: str, spec: GroupedValueSpec) -> Fi
         "columns": tuple(columns),
         "parameters": spec.model_dump(mode="python"),
     }
-    label = f"{dataset}: {spec.name or 'grouped values (' + ', '.join(columns) + ')'}"
+    label = grouped_values_label(dataset, spec.name, columns)
     try:
         actual = ctx.schema(dataset)
         absent = [c for c in columns if c not in actual]
@@ -86,7 +87,7 @@ def grouped_values(ctx: DataContext, dataset: str, spec: GroupedValueSpec) -> Fi
         total = int(ctx.sql(plan.total_sql, datasets=(dataset,)).item())
         if count:
             return Finding.fail(
-                f"{plural(count, 'group value')} of {total:,} violate their occurrence contract.",
+                group_values_violate(count, total),
                 check=label,
                 affected=temporal_evidence(evidence),
                 affected_count=count,
@@ -95,7 +96,7 @@ def grouped_values(ctx: DataContext, dataset: str, spec: GroupedValueSpec) -> Fi
                 **identity,
             )
         return Finding.ok(
-            f"{plural(total, 'group value')} satisfy their occurrence contract.",
+            group_values_satisfy(total),
             check=label,
             total_records=total,
             unit="group values",

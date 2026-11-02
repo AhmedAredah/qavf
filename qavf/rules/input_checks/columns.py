@@ -12,6 +12,13 @@ from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
+from qavf.input_rules import (
+    INPUT_RULES,
+    check_label,
+    column_checks_passed,
+    show_value,
+    unit_column_absent,
+)
 from qavf.rules._column_plan import coherent_column_checks, column_checks, column_plans
 from qavf.rules._declared_types import (
     ConvertedPlan,
@@ -25,7 +32,6 @@ from qavf.rules._execution import (
 )
 from qavf.rules.helpers import (
     outcome,
-    plural,
 )
 from qavf.settings import (
     ColumnSpec,
@@ -45,25 +51,18 @@ from ._datasets import (
 
 def _item_label(item: Any) -> str:
     """A planned column check's label: its configured check, or its kind."""
-    return values._check_name(item.check) if item.check else item.kind
+    return check_label(item.check) if item.check else item.kind
 
 
 class ColumnCheckRule(_SelectsDatasets):
     """Every configured column limit holds; each check is graded at its own severity."""
 
     rule_id: ClassVar[str] = "INP-003"
-    name: ClassVar[str] = "Column QA limits"
-    description: ClassVar[str] = (
-        "Column values respect their configured QA limits: nulls, bounds, allowed and "
-        "forbidden values, patterns, lengths, uniqueness and aggregate statistics."
-    )
+    name: ClassVar[str] = INPUT_RULES["INP-003"].name
+    description: ClassVar[str] = INPUT_RULES["INP-003"].description
     category: ClassVar[str] = CATEGORY
-    default_severity: ClassVar[Severity] = Severity.ERROR
-    recommendation: ClassVar[str] = (
-        "Inspect the listed rows. Out-of-range values usually come from unit mix-ups, sign "
-        "errors, sentinel values such as -999, or failed joins that leave nulls. If a value "
-        "is legitimate, widen the limit or downgrade that check's severity."
-    )
+    default_severity: ClassVar[Severity] = INPUT_RULES["INP-003"].default_severity
+    recommendation: ClassVar[str] = INPUT_RULES["INP-003"].recommendation
     Params: ClassVar[type[RuleParams]] = DatasetSelection
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
@@ -112,9 +111,7 @@ class ColumnCheckRule(_SelectsDatasets):
                         "check_id": f"column.{kind}",
                         "parameters": check.model_dump(mode="python", exclude_defaults=True),
                     }
-                    contracts.setdefault(f"{prefix}: {values._check_name(check)}", []).append(
-                        descriptor
-                    )
+                    contracts.setdefault(f"{prefix}: {check_label(check)}", []).append(descriptor)
         failures += blocked
         for dataset, schema in schemas.items():
             try:
@@ -142,8 +139,8 @@ class ColumnCheckRule(_SelectsDatasets):
         return outcome(
             identified,
             passed,
-            f"{plural(len(passed), 'column check')} passed.",
-            "No column QA limits are configured.",
+            column_checks_passed(len(passed)),
+            INPUT_RULES[self.rule_id].unconfigured,
             check_id="column.summary",
             checks=tuple(descriptor for label in passed for descriptor in contracts.get(label, ())),
         )
@@ -218,7 +215,7 @@ class ColumnCheckRule(_SelectsDatasets):
                     _item_label,
                     values._statistic,
                     values._within,
-                    values._show,
+                    show_value,
                 )
                 if assessed is not None:
                     return self._planned_dataset(ctx, dataset, schema, actual, assessed=assessed)
@@ -250,7 +247,7 @@ class ColumnCheckRule(_SelectsDatasets):
                         if column not in actual and spec.required
                     ]
                     for item in items:
-                        label = values._check_name(item.check) if item.check else item.kind
+                        label = check_label(item.check) if item.check else item.kind
                         failures.append(
                             Finding.unassessed(
                                 f"Not assessed: '{label}' on {dataset}.{item.column}: "
@@ -291,16 +288,23 @@ class ColumnCheckRule(_SelectsDatasets):
                 schema,
                 actual,
                 items,
-                lambda item: (
-                    values._check_name(item.check) if item.check is not None else item.kind
-                ),
+                lambda item: check_label(item.check) if item.check is not None else item.kind,
                 values._statistic,
                 values._within,
-                values._show,
+                show_value,
                 observation,
             )
         for item, finding in zip(items, assessed, strict=True):
-            label = values._check_name(item.check) if item.check is not None else item.kind
+            label = check_label(item.check) if item.check is not None else item.kind
+            if item.kind == "units" and item.spec.unit_column not in actual:
+                failures.append(
+                    Finding.unassessed(
+                        unit_column_absent(str(item.spec.unit_column), dataset, item.column),
+                        check=f"{dataset}.{item.column}: units",
+                        datasets=(dataset,),
+                    )
+                )
+                continue
             try:
                 if isinstance(finding, Exception):
                     raise finding

@@ -228,7 +228,8 @@ def test_sql_core_keys_share_policies_and_preserve_exact_totals():
             expected_keys,
             expected_rows,
         )
-        assert duplicates.metrics["exempt_na_rows"] == {"data (id)": 1}
+        # Exemptions describe the whole rule: on its first result when no key passed.
+        assert failures[0].metrics["exempt_na_rows"] == {"data (id)": 1}
         assert duplicates.check_id == "key.unique"
         assert duplicates.parameters == {"nulls": nulls, "rows_per_key": "all"}
         assert {tuple(record["rows"]) for record in duplicates.affected_records} == (

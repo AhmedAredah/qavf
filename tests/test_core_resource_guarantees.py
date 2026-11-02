@@ -37,15 +37,15 @@ def test_relative_temporary_parent_is_configuration_relative_and_owned_files_cle
 def test_records_metrics_and_diagnostic_share_evidence_budget():
     settings = QAVFSettings(engine={"max_evidence_bytes": 50, "max_affected_records": 2})
     collector = ResultCollector(None, settings)
-    collector.add(
+    collector.report(
         "INP-003",
-        "ge",
-        "data",
-        ["x"],
+        None,
+        Status.FAIL,
+        "diagnostic " * 100,
+        columns=("x",),
         count=5,
         records=[{"x": i} for i in range(5)],
         metrics={"huge": "x" * 1000},
-        message="diagnostic " * 100,
     )
     result = collector.results[0]
     assert result.affected_count == 5 and len(result.affected_records) <= 2

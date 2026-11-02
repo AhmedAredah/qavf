@@ -10,6 +10,7 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
 from qavf.engine.severity import Severity
+from qavf.input_rules import check_label, column_values_violate
 from qavf.rules._evidence_columns import EvidenceColumns
 from qavf.rules._predicates import (
     decimal_bound,
@@ -20,7 +21,6 @@ from qavf.rules._predicates import (
 from qavf.rules.helpers import (
     fresh_internal,
     missing_expr,
-    plural,
     present,
 )
 from qavf.settings import (
@@ -175,7 +175,7 @@ def evaluate_simple(
                 conditions.append(
                     (f"{operator} {format_value(check.constraints()[operator])}", predicate)
                 )
-            record(column, values._check_name(check), conditions, check.severity)
+            record(column, check_label(check), conditions, check.severity)
     for offset in range(0, len(jobs), 64):
         batch = jobs[offset : offset + 64]
         reductions = ["count(*) AS rows"]
@@ -280,13 +280,13 @@ def _lazy_dataset(
                     (label, ~missing & ~test(column).fill_null(True))
                     for label, test in row_tests(check.constraints(), actual[column]).values()
                 ]
-                record(column, values._check_name(check), predicates, check.severity)
+                record(column, check_label(check), predicates, check.severity)
             except Exception as exc:
                 failures.append(
                     Finding.unassessed(
-                        f"Not assessed: '{values._check_name(check)}' on {dataset}.{column}: "
+                        f"Not assessed: '{check_label(check)}' on {dataset}.{column}: "
                         f"{type(exc).__name__}: {exc}.",
-                        check=f"{dataset}.{column}: {values._check_name(check)}",
+                        check=f"{dataset}.{column}: {check_label(check)}",
                         severity=check.severity,
                         datasets=(dataset,),
                     )
@@ -320,8 +320,7 @@ def _row_failure(
 ) -> Finding:
     """Fused backends share the same row-count and bounded-evidence result contract."""
     return Finding.fail(
-        f"{plural(count, 'value')} of {rows:,} in {dataset}.{column} "
-        f"{'violates' if count == 1 else 'violate'} '{label}'.",
+        column_values_violate(count, rows, f"{dataset}.{column}", label),
         check=f"{dataset}.{column}: {label}",
         severity=severity,
         affected=sample,

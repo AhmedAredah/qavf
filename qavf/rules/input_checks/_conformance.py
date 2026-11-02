@@ -21,6 +21,7 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation
 from qavf.engine.registry import Finding
+from qavf.input_rules import non_integral_values, text_values, typed_read_values
 from qavf.rules._declared_types import (
     ConvertedPlan,
     TextConversion,
@@ -29,7 +30,7 @@ from qavf.rules._declared_types import (
 )
 from qavf.rules._row_summary import RowSummary, row_aliases, summarize_rows
 from qavf.rules._temporal import temporal_evidence
-from qavf.rules.helpers import annotate, fresh_internal, plural, present
+from qavf.rules.helpers import annotate, fresh_internal, present
 from qavf.settings import ColumnSpec, SchemaSpec
 from qavf.sources.base import DataSource, TypeViolations
 from qavf.sources.sql import quote_identifier, sql_literal
@@ -161,9 +162,7 @@ class TextValues(ColumnConformance):
         if not count:
             return None
         return Finding.fail(
-            f"{plural(count, 'value')} of {rows:,} in {view.name}.{column} "
-            f"{'is' if count == 1 else 'are'} not {kind}, so the column was read as "
-            f"{view.actual[column]}.",
+            text_values(count, rows, view.name, column, kind, str(view.actual[column])),
             check=self.check,
             affected=temporal_evidence(cells.evidence(sample, f"not {kind}")),
             affected_count=count,
@@ -236,10 +235,8 @@ class NonIntegralValues(ColumnConformance):
         if not summary.invalid:
             return None
         view = self.view
-        whole = "is not a whole number" if summary.invalid == 1 else "are not whole numbers"
         return Finding.fail(
-            f"{plural(summary.invalid, 'value')} of {summary.rows:,} in {view.name}."
-            f"{self.column} {whole} in a column declared int.",
+            non_integral_values(summary.invalid, summary.rows, view.name, self.column),
             check=self.check,
             affected=temporal_evidence(
                 present(summary.sample, {self.row: "_row", self.problem: "violates"})
@@ -330,7 +327,9 @@ class SourceChecks:
     def _typed_read_values(self) -> list[Finding]:
         """Values the source's typed read could not convert (they read as missing)."""
         original = {new: old for old, new in self.rename.items()}
-        context = [original.get(c, c) for c in self.view.schema.primary_key or []]
+        context = [
+            original.get(c, c) for c in self.view.schema.primary_key or [] if c in self.view.actual
+        ]
         try:
             violations = self.source.type_violations(context)
         except Exception as exc:
@@ -358,11 +357,8 @@ class SourceChecks:
             data = {self.rename.get(c, c): saved[c] for c in context if c in saved}
             data[column] = entry["value"]
             evidence.append(annotate(data, _row=entry["_row"], violates=f"not {kind}"))
-        one = found.count == 1
         return Finding.fail(
-            f"{plural(found.count, 'value')} of {view.rows:,} in {view.name}.{column} "
-            f"{'is' if one else 'are'} not {kind}, so {'it is' if one else 'they are'} "
-            "read as missing.",
+            typed_read_values(found.count, view.rows, view.name, column, kind),
             check=f"{view.name}.{column}: dtype {spec.dtype}",
             affected=evidence,
             affected_count=found.count,

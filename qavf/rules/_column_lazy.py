@@ -10,6 +10,7 @@ import polars as pl
 
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding
+from qavf.input_rules import outside_bounds
 from qavf.rules._column_batch import (
     ColumnInputs,
     ColumnReduction,
@@ -112,11 +113,7 @@ def _lazy_column_reduction(
             # Only a boolean and compact diagnostic cross the materialization boundary.
             def reduce(values: pl.Series, kind: str = name, bounds: Any = bound) -> str | None:
                 result = statistic(values, kind)
-                return (
-                    None
-                    if within(result, bounds)
-                    else f"{kind} {show(result)} outside [{show(bounds.ge)}, {show(bounds.le)}]"
-                )
+                return None if within(result, bounds) else outside_bounds(kind, result, bounds)
 
             reducers["stat_" + name] = value.map_batches(
                 reduce, return_dtype=pl.String, returns_scalar=True
@@ -187,9 +184,7 @@ def _lazy_column_reduction(
                 bounds = scalar_statistics[name]
                 result = summary["value_" + name]
                 if not within(result, bounds):
-                    problems.append(
-                        f"{name} {show(result)} outside [{show(bounds.ge)}, {show(bounds.le)}]"
-                    )
+                    problems.append(outside_bounds(name, result, bounds))
             elif summary.get("stat_" + name) is not None:
                 problems.append(summary["stat_" + name])
         missing_count = int(summary.get("missing") or 0)

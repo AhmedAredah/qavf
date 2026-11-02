@@ -7,6 +7,8 @@ import polars as pl
 from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
+from qavf.input_rules import CATEGORY as CATEGORY
+from qavf.input_rules import blocked_dataset
 from qavf.rules.helpers import (
     missing_expr,
 )
@@ -15,8 +17,6 @@ from qavf.settings import (
     SchemaSpec,
 )
 from qavf.sources.sql import quote_identifier
-
-CATEGORY = "input"
 
 
 class DatasetSelection(RuleParams):
@@ -50,7 +50,7 @@ class _SelectsDatasets(Rule):
 def _blocked(ctx: DataContext, dataset: str, what: str) -> Finding:
     """A finding for a check that could not run because ``dataset`` is unavailable."""
     return Finding.unassessed(
-        f"Not assessed: {what} on {dataset!r}: {ctx.unavailable_reason(dataset)}.",
+        blocked_dataset(what, dataset, ctx.unavailable_reason(dataset)),
         check=dataset,
         datasets=(dataset,),
     )

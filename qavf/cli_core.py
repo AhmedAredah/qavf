@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from qavf.capabilities import CORE_RULE_IDS
 from qavf.engine.severity import Severity
+from qavf.input_rules import INPUT_RULES
 from qavf.optional import unsupported
 from qavf.settings import DatasetSpec, QAVFSettings
 from qavf.sources.parameters import DatabaseParams, FileParams, QueryParams
@@ -23,34 +24,10 @@ class CoreRule:
     category: str = "input"
 
 
-_RULES = (
-    CoreRule("INP-001", "Datasets available", "Configured inputs can be read.", Severity.CRITICAL),
-    CoreRule(
-        "INP-002", "Schema conformance", "Inputs match their declared schema.", Severity.CRITICAL
-    ),
-    CoreRule("INP-003", "Column QA limits", "Column values meet declared limits.", Severity.ERROR),
-    CoreRule(
-        "INP-004",
-        "Unique primary keys",
-        "Primary, alternate and row keys meet uniqueness contracts.",
-        Severity.ERROR,
-    ),
-    CoreRule(
-        "INP-005",
-        "Referential integrity",
-        "Foreign keys refer to valid parent keys.",
-        Severity.ERROR,
-    ),
-    CoreRule("INP-006", "Row expressions", "Declared row expressions hold.", Severity.ERROR),
-    CoreRule(
-        "INP-007", "SQL assertions", "Assertion queries return no offending rows.", Severity.ERROR
-    ),
-    CoreRule(
-        "INP-009",
-        "Not-applicable values",
-        "Column groups meet applicability contracts.",
-        Severity.ERROR,
-    ),
+_RULES = tuple(
+    CoreRule(rule.rule_id, rule.name, rule.description, rule.default_severity, rule.category)
+    for rule_id, rule in INPUT_RULES.items()
+    if rule_id in CORE_RULE_IDS
 )
 
 

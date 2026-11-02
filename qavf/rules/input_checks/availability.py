@@ -11,13 +11,20 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
+from qavf.input_rules import (
+    INPUT_RULES,
+    dataset_unavailable,
+    datasets_accessible,
+    row_count_problem,
+    schema_violations,
+    schemas_conform,
+)
 from qavf.rules._predicates import (
     is_temporal,
 )
 from qavf.rules.helpers import (
     absent_column_hint,
     outcome,
-    plural,
 )
 from qavf.settings import (
     DType,
@@ -61,19 +68,11 @@ class RequiredDatasetsRule(Rule):
     """
 
     rule_id: ClassVar[str] = "INP-001"
-    name: ClassVar[str] = "Datasets available"
-    description: ClassVar[str] = (
-        "Required datasets are accessible and their schemas can be inspected; optional "
-        "datasets may be absent. Native sources are not fully scanned by this availability "
-        "check, so it does not certify that every source record can be parsed."
-    )
+    name: ClassVar[str] = INPUT_RULES["INP-001"].name
+    description: ClassVar[str] = INPUT_RULES["INP-001"].description
     category: ClassVar[str] = CATEGORY
-    default_severity: ClassVar[Severity] = Severity.CRITICAL
-    recommendation: ClassVar[str] = (
-        "Check the dataset's source settings (paths, queries, connection details) and confirm "
-        "the upstream step that produces it completed. Mark a dataset 'required: false' if it "
-        "is genuinely optional."
-    )
+    default_severity: ClassVar[Severity] = INPUT_RULES["INP-001"].default_severity
+    recommendation: ClassVar[str] = INPUT_RULES["INP-001"].recommendation
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements | None:
         return DataRequirements(frozenset(settings.datasets))
@@ -94,8 +93,7 @@ class RequiredDatasetsRule(Rule):
                 continue
             failures.append(
                 Finding.fail(
-                    f"{'Required' if required else 'Optional'} dataset {name!r} is not "
-                    f"available: {ctx.unavailable_reason(name)}",
+                    dataset_unavailable(name, required, ctx.unavailable_reason(name)),
                     check=name,
                     severity=None if required else Severity.WARNING,
                     affected=[{"dataset": name, "error": str(error)}],
@@ -108,8 +106,8 @@ class RequiredDatasetsRule(Rule):
         return outcome(
             failures,
             loaded,
-            f"{plural(len(loaded), 'dataset')} accessible.",
-            "No datasets are configured.",
+            datasets_accessible(len(loaded)),
+            INPUT_RULES[self.rule_id].unconfigured,
             check_id="dataset.available.summary",
             checks=tuple(
                 {
@@ -126,21 +124,11 @@ class SchemaConformanceRule(_SelectsDatasets):
     """Columns, logical types and row counts match the configured schema."""
 
     rule_id: ClassVar[str] = "INP-002"
-    name: ClassVar[str] = "Schema conformance"
-    description: ClassVar[str] = (
-        "Each dataset has its required columns with the declared types, no undeclared "
-        "columns when strict, and a row count within the configured limits."
-    )
+    name: ClassVar[str] = INPUT_RULES["INP-002"].name
+    description: ClassVar[str] = INPUT_RULES["INP-002"].description
     category: ClassVar[str] = CATEGORY
-    default_severity: ClassVar[Severity] = Severity.CRITICAL
-    recommendation: ClassVar[str] = (
-        "Fix the step that produced the dataset so column names and types match the schema, "
-        "or update the schema if the layout changed intentionally. A column read as text "
-        "when another type is declared usually holds a few stray values: the listed rows "
-        "show them. Declare placeholders such as 'N/A' in the column's missing_values. A "
-        "code declared str but read as a number has lost its leading zeros: read it as "
-        "text at the source ('text_columns' for CSV files)."
-    )
+    default_severity: ClassVar[Severity] = INPUT_RULES["INP-002"].default_severity
+    recommendation: ClassVar[str] = INPUT_RULES["INP-002"].recommendation
     Params: ClassVar[type[RuleParams]] = DatasetSelection
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
@@ -177,8 +165,8 @@ class SchemaConformanceRule(_SelectsDatasets):
         return outcome(
             failures,
             passed,
-            f"{plural(len(passed), 'dataset')} conform to their schemas.",
-            "No available dataset has a schema configured.",
+            schemas_conform(len(passed)),
+            INPUT_RULES[self.rule_id].unconfigured,
             check_id="schema.summary",
             checks=tuple(
                 {
@@ -230,20 +218,20 @@ class SchemaConformanceRule(_SelectsDatasets):
             problems.append(
                 {
                     "column": None,
-                    "problem": f"{row_count} rows, expected at least {schema.min_rows}",
+                    "problem": row_count_problem(row_count, schema.min_rows, at_least=True),
                 }
             )
         if schema.max_rows is not None and row_count > schema.max_rows:
             problems.append(
                 {
                     "column": None,
-                    "problem": f"{row_count} rows, expected at most {schema.max_rows}",
+                    "problem": row_count_problem(row_count, schema.max_rows, at_least=False),
                 }
             )
         if problems:
             failures.append(
                 Finding.fail(
-                    f"{plural(len(problems), 'schema violation')} in {dataset}.",
+                    schema_violations(len(problems), dataset),
                     check=dataset,
                     affected=problems,
                     unit="problems",

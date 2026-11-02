@@ -12,6 +12,7 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
+from qavf.input_rules import INPUT_RULES
 from qavf.rules._temporal import duration_seconds, temporal_scalar, temporal_ticks, tick_seconds
 from qavf.rules.helpers import missing_expr, outcome, plural, usable
 from qavf.settings import QAVFSettings
@@ -55,17 +56,11 @@ class FreshnessRule(Rule):
     """The newest value of each configured date/time column is recent enough."""
 
     rule_id: ClassVar[str] = "INP-008"
-    name: ClassVar[str] = "Data freshness"
-    description: ClassVar[str] = (
-        "The newest value of each configured date or datetime column is no older than its "
-        "max_age, measured from the run (or a configured reference time)."
-    )
+    name: ClassVar[str] = INPUT_RULES["INP-008"].name
+    description: ClassVar[str] = INPUT_RULES["INP-008"].description
     category: ClassVar[str] = CATEGORY
-    default_severity: ClassVar[Severity] = Severity.ERROR
-    recommendation: ClassVar[str] = (
-        "Stale data usually means an upstream job did not run or a file was not refreshed. "
-        "Check the producing pipeline's last run before trusting downstream results."
-    )
+    default_severity: ClassVar[Severity] = INPUT_RULES["INP-008"].default_severity
+    recommendation: ClassVar[str] = INPUT_RULES["INP-008"].recommendation
     Params: ClassVar[type[RuleParams]] = FreshnessParams
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements:
@@ -202,5 +197,5 @@ class FreshnessRule(Rule):
             failures,
             passed,
             f"{plural(len(passed), 'column')} fresh.",
-            "No freshness checks are configured.",
+            INPUT_RULES[self.rule_id].unconfigured,
         )

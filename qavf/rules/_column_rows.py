@@ -10,6 +10,7 @@ import polars as pl
 
 from qavf.engine.registry import Finding
 from qavf.engine.sql_read import NativeReadUnavailable, SqlReadSession
+from qavf.input_rules import column_values_violate, too_few_applicable
 from qavf.rules._column_batch import (
     ColumnInputs,
     exceeds_missing_fraction,
@@ -112,18 +113,14 @@ def native_row_check(
     except NativeReadUnavailable:
         return NotImplemented
     if applicable < check.min_applicable_rows:
-        raise ValueError(
-            f"only {applicable} row(s) match 'where: {check.where}', "
-            f"fewer than min_applicable_rows {check.min_applicable_rows}"
-        )
+        raise ValueError(too_few_applicable(applicable, check.where, check.min_applicable_rows))
     if exceeds_missing_fraction(check, missing, applicable):
         return NotImplemented
     if not count:
         return None
     dataset = inputs.dataset
     return Finding.fail(
-        f"{count:,} value{'s' if count != 1 else ''} of {applicable:,} "
-        f"in {dataset}.{column} {'violates' if count == 1 else 'violate'} '{label}'.",
+        column_values_violate(count, applicable, f"{dataset}.{column}", label),
         check=f"{dataset}.{column}: {label}",
         severity=check.severity,
         affected=samples or None,

@@ -12,38 +12,16 @@ import polars as pl
 
 from qavf.aggregation import exact_sum_expr
 from qavf.engine.registry import Finding
+from qavf.input_rules import required_column_absent
 from qavf.numeric import stable_float_statistic
-from qavf.rules._predicates import (
-    format_value,
-)
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import (
-    absent_column_hint,
     fresh_internal,
     present,
 )
 from qavf.settings import (
     Bounds,
-    ColumnCheck,
 )
-
-
-def _check_name(check: ColumnCheck) -> str:
-    if check.name:
-        return check.name
-    parts = []
-    for name, value in check.constraints().items():
-        if isinstance(value, Bounds):
-            sides = [
-                f"≥ {value.ge:g}" if value.ge is not None else "",
-                f"≤ {value.le:g}" if value.le is not None else "",
-            ]
-            parts.append(f"{name} {' and '.join(s for s in sides if s)}")
-        elif value is True:
-            parts.append(name)
-        else:
-            parts.append(f"{name} {format_value(value)}")
-    return ", ".join(parts)
 
 
 def _statistic(series: pl.Series, name: str) -> int | float | Decimal | Fraction | None:
@@ -124,16 +102,6 @@ def _within(value: int | float | Decimal | Fraction | None, bounds: Bounds) -> b
     return (bounds.ge is None or value >= bounds.ge) and (bounds.le is None or value <= bounds.le)
 
 
-def _show(value: int | float | Decimal | Fraction | None) -> str:
-    if value is None:
-        return "undefined"
-    return str(value) if isinstance(value, int | Decimal | Fraction) else f"{value:.6g}"
-
-
-def _show_bound(value: int | float | Decimal | Fraction | None) -> str:
-    return "" if value is None else _show(value)
-
-
 def _row_limits(
     original: pl.DataFrame,
     prepared: pl.DataFrame,
@@ -198,9 +166,8 @@ def _rows(
 
 def _missing_column(dataset: str, column: str, available: Iterable[str] = ()) -> Finding:
     """An absent required column leaves its limits unassessed on every backend."""
-    hint = absent_column_hint(column, available)
     return Finding.unassessed(
-        f"Not assessed: required column {dataset}.{column} is absent{hint}.",
+        required_column_absent(dataset, column, available),
         check=f"{dataset}.{column}",
         datasets=(dataset,),
     )

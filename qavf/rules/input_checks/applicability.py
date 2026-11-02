@@ -10,6 +10,14 @@ import polars as pl
 from qavf.applicability import AllOrNoneApplicability, NotApplicablePolicy
 from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
+from qavf.input_rules import (
+    INPUT_RULES,
+    na_group_absent,
+    na_group_label,
+    na_group_satisfied,
+    na_group_violations,
+    not_applicable_population,
+)
 from qavf.rules._row_summary import row_aliases, summarize_rows
 from qavf.rules.helpers import present
 from qavf.settings import SchemaSpec
@@ -44,17 +52,11 @@ class ApplicabilityRule(_SelectsDatasets):
     """Count valid N/A values separately and check configured row groups."""
 
     rule_id: ClassVar[str] = "INP-009"
-    name: ClassVar[str] = "Not-applicable values"
-    description: ClassVar[str] = (
-        "Declared N/A values are counted independently; configured groups are "
-        "all or none N/A in each row."
-    )
+    name: ClassVar[str] = INPUT_RULES["INP-009"].name
+    description: ClassVar[str] = INPUT_RULES["INP-009"].description
     category: ClassVar[str] = CATEGORY
-    default_severity: ClassVar[Severity] = Severity.ERROR
-    recommendation: ClassVar[str] = (
-        "Make every column in the group applicable, or mark every column "
-        "with its declared N/A token."
-    )
+    default_severity: ClassVar[Severity] = INPUT_RULES["INP-009"].default_severity
+    recommendation: ClassVar[str] = INPUT_RULES["INP-009"].recommendation
     Params: ClassVar[type[RuleParams]] = DatasetSelection
 
     def evaluate(self, ctx) -> list[Finding]:
@@ -85,7 +87,7 @@ class ApplicabilityRule(_SelectsDatasets):
                         datasets=(dataset,),
                     )
                 )
-        return findings or [Finding.skip("No not-applicable tokens or groups are configured.")]
+        return findings or [Finding.skip(INPUT_RULES[self.rule_id].unconfigured)]
 
     def _counts(self, ctx, dataset: str, schema: SchemaSpec, columns: list[str]) -> list[Finding]:
         actual = ctx.schema(dataset)
@@ -111,8 +113,7 @@ class ApplicabilityRule(_SelectsDatasets):
         rows = int(result["rows"][0])
         return [
             Finding.ok(
-                f"{dataset}.{name}: {int(result[f'n{i}'][0] or 0):,} of {rows:,} "
-                "values are not applicable.",
+                not_applicable_population(dataset, name, int(result[f"n{i}"][0] or 0), rows),
                 check=f"{dataset}.{name}: N/A population",
                 check_id="applicability.population",
                 columns=(name,),
@@ -135,7 +136,7 @@ class ApplicabilityRule(_SelectsDatasets):
     def _group(self, ctx, dataset: str, schema: SchemaSpec, columns: list[str]) -> Finding:
         actual = ctx.schema(dataset)
         identity = dict(
-            check=f"{dataset}: all-or-none N/A ({', '.join(columns)})",
+            check=na_group_label(dataset, columns),
             check_id="applicability.all_or_none",
             columns=tuple(columns),
             parameters={"na_values": {name: schema.columns[name].na_values for name in columns}},
@@ -143,9 +144,7 @@ class ApplicabilityRule(_SelectsDatasets):
         )
         absent = [column for column in columns if column not in actual]
         if absent:
-            return Finding.unassessed(
-                f"Not assessed: N/A group columns are absent: {', '.join(absent)}.", **identity
-            )
+            return Finding.unassessed(na_group_absent(absent), **identity)
         policy = AllOrNoneApplicability.from_schema(columns, schema)
         row, problem = row_aliases(tuple(actual))
         label = "partly not applicable"
@@ -183,12 +182,11 @@ class ApplicabilityRule(_SelectsDatasets):
         )
         if not summary.invalid:
             return Finding.ok(
-                f"All {summary.rows:,} rows in {dataset} satisfy the all-or-none N/A group.",
+                na_group_satisfied(summary.rows, dataset),
                 **kwargs,
             )
         return Finding.fail(
-            f"{summary.invalid:,} of {summary.rows:,} rows in {dataset} "
-            "have N/A in only part of the group.",
+            na_group_violations(summary.invalid, summary.rows, dataset),
             affected=present(summary.sample, {row: "_row", problem: "violates"}),
             **kwargs,
         )

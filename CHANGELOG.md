@@ -6,6 +6,27 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The native backend reports exactly what the full backend reports** for the
+  input rules: the same results, names, messages, check identities, counts and
+  evidence. Each column check is one result that counts every row breaking any of
+  its limits, with a `violates` column in its evidence; passing checks are listed
+  in one summary per rule; multi-file inputs locate evidence rows with `_file` and
+  `_file_row`. If you parse native-backend reports, expect these result shapes
+  instead of one result per limit.
+- Report messages agree in number ("1 dataset conforms to its schema",
+  "1 row expression holds", "1 key ... occurs more than once").
+- A check that was not assessed (`ERROR`, `SKIPPED`) no longer reports its
+  affected count as exact.
+
+### Fixed
+
+- A column-level limit with one open side reads `[0, ]`, not `[0, undefined]`.
+- A primary-key column absent from the data no longer makes the declared-type
+  check of a CSV file unassessable.
+- A missing unit column is reported as such on every execution path.
+
 ## [0.6.1] - 2026-11-01
 
 ### Changed
