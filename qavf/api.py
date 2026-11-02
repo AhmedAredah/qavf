@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from qavf.inputs.resources import ResourceLimits
     from qavf.profiles import ProfileName
     from qavf.reports.models import QAReport
+    from qavf.run_control import CancellationToken, RunEvent
     from qavf.settings import SchemaSpec
 
 
@@ -22,6 +23,8 @@ def validate(
     resources: ResourceLimits | None = None,
     profile: ProfileName | None = None,
     backend: str = "auto",
+    on_event: Callable[[RunEvent], None] | None = None,
+    cancel: CancellationToken | None = None,
 ) -> QAReport:
     """Validate explicit contracts and return a report without writing files.
 
@@ -37,6 +40,12 @@ def validate(
     otherwise uses the DuckDB/Arrow core. ``"duckdb"`` explicitly selects that
     core; ``"polars"`` requires the optional extra. Unsupported configured core
     capabilities raise an actionable optional-dependency error before execution.
+
+    ``on_event`` receives a :class:`~qavf.RunEvent` as each step starts and
+    finishes; ``cancel`` is a :class:`~qavf.CancellationToken` whose ``cancel()``
+    stops the run from any thread. A cancelled run still returns its report, with
+    the steps it did not finish reported as not assessed. Both need
+    ``engine.execution_mode: in_process``.
     """
     from qavf.optional import has_polars
 
@@ -50,11 +59,18 @@ def validate(
         from qavf.core.runner import validate_core
 
         return validate_core(
-            data, schema=schema, config=config, resources=resources, profile=profile
+            data,
+            schema=schema,
+            config=config,
+            resources=resources,
+            profile=profile,
+            on_event=on_event,
+            cancel=cancel,
         )
     from qavf.engine.runner import QARunner
     from qavf.inputs.normalize import prepare
     from qavf.profiles import apply_profile
+    from qavf.run_control import control_for
 
     if profile is None:
         settings, frames = prepare(data, schema=schema, config=config, resources=resources)
@@ -66,7 +82,11 @@ def validate(
         )
         settings = apply_profile(settings, profile)
         frames = _adapt(inputs, settings)
-    return QARunner(settings).run(frames=frames)
+    control = control_for(on_event, cancel, settings.engine.execution_mode)
+    if control is None:
+        # Runners overridden without the hooks keep working when none is requested.
+        return QARunner(settings).run(frames=frames)
+    return QARunner(settings).run(frames=frames, control=control)
 
 
 __all__ = ["validate"]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import tempfile
 from datetime import UTC, datetime
@@ -21,6 +22,7 @@ from qavf.engine.severity import Severity, Status
 from qavf.input_rules import INPUT_RULES
 from qavf.redaction import redact, redact_text
 from qavf.reports.models import DatasetInfo, QAReport, RunMetadata
+from qavf.run_control import CANCELLED_MESSAGE, control_for
 from qavf.sources.base import SourceNotFoundError
 from qavf.sources.memory import reservation_is_stricter
 from qavf.sources.sql import quote_identifier as qi
@@ -62,6 +64,20 @@ def _blocked(out, name, rule_ids, exc, *, stage):
             check=None if name == "*" else name,
             datasets=() if name == "*" else (name,),
             parameters={"stage": stage, "error_type": type(exc).__name__},
+        )
+
+
+def _cancelled(out, name, rule_ids):
+    """Mark rules the cancelled run did not assess."""
+    for rule_id in rule_ids:
+        out.report(
+            rule_id,
+            name,
+            Status.ERROR,
+            CANCELLED_MESSAGE,
+            check=None if name == "*" else name,
+            datasets=() if name == "*" else (name,),
+            parameters={"stage": "cancelled"},
         )
 
 
@@ -178,9 +194,10 @@ def _fit_report(report, limit):
 class NativeRunner:
     """Own one run; delegate source, planning, policy and evidence responsibilities."""
 
-    def __init__(self, settings, inputs):
+    def __init__(self, settings, inputs, control=None):
         self.settings = settings
         self.inputs = inputs
+        self.control = control
         self.datasets = []
         self.loaded = []
         self.unavailable = {}
@@ -191,8 +208,16 @@ class NativeRunner:
 
         if not any(out.enabled(rule, name) for rule in rule_ids):
             return
+        control = self.control
+        dataset = None if name == "*" else name
         start, mark = perf_counter(), out.mark()
         offset = mark[0]
+        if control is not None and control.cancelled:
+            _cancelled(out, name, rule_ids)
+            control.step_finished(rule_ids, dataset, out.results[offset:])
+            return
+        if control is not None:
+            control.step_started(rule_ids, dataset)
         deadline = Deadline(out.connection, self.settings.engine.rule_timeout_s)
         try:
             with deadline:
@@ -203,7 +228,11 @@ class NativeRunner:
             if isinstance(exc, OptionalDependencyError):
                 raise
             _blocked(out, name, rule_ids, exc, stage="execution")
-        if deadline.expired:
+        if control is not None and control.cancelled:
+            # The interrupt, not the data, ended this stage.
+            out.rollback(mark)
+            _cancelled(out, name, rule_ids)
+        elif deadline.expired:
             out.rollback(mark)
             _blocked(
                 out,
@@ -226,6 +255,8 @@ class NativeRunner:
                     "execution_time_s": elapsed / number,
                 }
             )
+        if control is not None:
+            control.step_finished(rule_ids, dataset, out.results[offset:])
 
     def _release(self, reader, checks):
         for executor in checks.values():
@@ -241,6 +272,9 @@ class NativeRunner:
                 rule for rule in ("INP-001", *_dataset_rules(spec)) if out.enabled(rule, name)
             )
             if not active and not query_inputs and name not in parents:
+                continue
+            if self.control is not None and self.control.cancelled:
+                _cancelled(out, name, active)
                 continue
             before = perf_counter()
             try:
@@ -290,6 +324,9 @@ class NativeRunner:
 
                 if isinstance(exc, OptionalDependencyError):
                     raise
+                if self.control is not None and self.control.cancelled:
+                    _cancelled(out, name, active)
+                    continue
                 reason = redact_text(str(exc))
                 self.unavailable[name] = reason
                 if spec.required or not isinstance(exc, SourceNotFoundError):
@@ -426,7 +463,10 @@ class NativeRunner:
         with (
             tempfile.TemporaryDirectory(prefix="qavf-", dir=parent) as temporary,
             duckdb.connect(config={"threads": 1}) as con,
+            self._interrupting(con),
         ):
+            if self.control is not None:
+                self.control.started(None)
             con.execute(f"SET temp_directory={lit(temporary)}")
             con.execute("SET preserve_insertion_order=true")
             con.execute("SET TimeZone='UTC'")
@@ -476,7 +516,8 @@ class NativeRunner:
                 else:
                     self._release(reader, checks)
             self._assertions(out)
-            for loaded in self.loaded:
+            cancelled = self.control is not None and self.control.cancelled
+            for loaded in [] if cancelled else self.loaded:
                 try:
                     reader.verify(loaded)
                 except Exception as exc:
@@ -512,6 +553,7 @@ class NativeRunner:
                 config_path=str(settings.source_path) if settings.source_path else None,
                 fail_on=settings.engine.fail_on,
                 fail_on_incomplete=settings.engine.fail_on_incomplete,
+                cancelled=self.control is not None and self.control.cancelled,
                 config=config,
                 config_digest=canonical_digest(config),
                 environment=environment(),
@@ -530,13 +572,32 @@ class NativeRunner:
             ),
             results=results,
         )
-        return _fit_report(report, settings.engine.max_report_bytes)
+        report = _fit_report(report, settings.engine.max_report_bytes)
+        if self.control is not None:
+            self.control.finished(report)
+        return report
+
+    def _interrupting(self, con):
+        """Interrupt ``con`` when the caller cancels the run."""
+        if self.control is None:
+            return contextlib.nullcontext()
+        return self.control.token.listening(con.interrupt)
 
 
-def validate_core(data=None, *, schema=None, config=None, resources=None, profile=None):
+def validate_core(
+    data=None,
+    *,
+    schema=None,
+    config=None,
+    resources=None,
+    profile=None,
+    on_event=None,
+    cancel=None,
+):
     settings, inputs = prepare(data, schema, config, resources, profile)
+    control = control_for(on_event, cancel, settings.engine.execution_mode)
     if settings.engine.execution_mode == "isolated":
         from qavf.core.execution import validate_isolated
 
         return validate_isolated(settings, inputs)
-    return NativeRunner(settings, inputs).run()
+    return NativeRunner(settings, inputs, control).run()

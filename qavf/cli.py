@@ -11,7 +11,9 @@ import argparse
 import json
 import logging
 import os
+import signal
 import sys
+import threading
 from collections.abc import Sequence
 from importlib import import_module
 from pathlib import Path
@@ -20,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from qavf._version import __version__
 from qavf.engine.severity import Severity
 from qavf.optional import OptionalDependencyError, has_polars, require_polars
+from qavf.run_control import CancellationToken, RunControl, RunEvent
 
 if TYPE_CHECKING:
     import yaml
@@ -152,6 +155,11 @@ def _parser() -> argparse.ArgumentParser:
         default="auto",
         help="validation backend (auto: Polars when installed, otherwise DuckDB)",
     )
+    run.add_argument(
+        "--progress",
+        action="store_true",
+        help="write one JSON progress event per line to stderr",
+    )
 
     init = commands.add_parser("init", help="write a complete starting configuration")
     init.add_argument("-o", "--output", type=Path, default=Path("qavf.yaml"))
@@ -274,6 +282,43 @@ def _check_report_destinations(html: Path | None, json_path: Path | None) -> Non
         raise ValueError("HTML and JSON reports must use different output paths")
 
 
+class _ProgressLines:
+    """Write each run event as one JSON line on stderr, for programs that watch."""
+
+    def __call__(self, event: RunEvent) -> None:
+        print(json.dumps(event.to_dict()), file=sys.stderr, flush=True)
+
+
+class _InterruptCancels:
+    """While running, the first interrupt cancels the run so its report is still written.
+
+    Ctrl-C (SIGINT), SIGTERM and, on Windows, Ctrl-Break (SIGBREAK) request
+    cancellation; a second interrupt stops the process at once.
+    """
+
+    def __init__(self, token: CancellationToken) -> None:
+        self.token = token
+        self.previous: dict[int, Any] = {}
+
+    def __enter__(self) -> _InterruptCancels:
+        if threading.current_thread() is threading.main_thread():
+            for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+                number = getattr(signal, name, None)
+                if number is not None:
+                    self.previous[number] = signal.signal(number, self.handle)
+        return self
+
+    def handle(self, number: int, frame: Any) -> None:
+        if self.token.cancelled:
+            raise KeyboardInterrupt
+        print("Cancelling: finishing the report (interrupt again to stop now)", file=sys.stderr)
+        self.token.cancel()
+
+    def __exit__(self, *_: object) -> None:
+        for number, previous in self.previous.items():
+            signal.signal(number, previous)
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     from qavf.reports.presentation import HtmlLimits
 
@@ -294,13 +339,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _check_report_destinations(html_path, json_path)
     protected = ProtectedInputs.of_settings(settings, args.config)
     protected.check(html_path, json_path)
-    if _native(args):
-        from qavf.api import validate
+    token = CancellationToken()
+    on_event = _ProgressLines() if args.progress else None
+    in_process = settings.engine.execution_mode == "in_process"
+    with _InterruptCancels(token):
+        if _native(args):
+            from qavf.api import validate
 
-        report = validate(config=settings, backend="duckdb")
-    else:
-        _use("QARunner")
-        report = QARunner(settings).run()
+            report = validate(
+                config=settings,
+                backend="duckdb",
+                on_event=on_event if in_process else None,
+                cancel=token if in_process else None,
+            )
+        else:
+            _use("QARunner")
+            control = RunControl(on_event, token) if in_process else None
+            report = QARunner(settings).run(control=control)
     fail_on = settings.engine.fail_on
     with protected.publication():
         written = []
@@ -332,7 +387,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     for path in written:
         print(f"Report: {path}")
     verdict = report.verdict(fail_on)
-    if verdict == "incomplete":
+    if report.metadata.cancelled:
+        print(f"QA CANCELLED: {summary.errored} configured check(s) were not assessed")
+    elif verdict == "incomplete":
         print(
             f"QA INCOMPLETE: {summary.errored} configured check(s) could not be assessed"
             if summary.errored

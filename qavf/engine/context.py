@@ -1179,6 +1179,10 @@ class DataContext:
     def cancel_rule(self, invocation: Invocation) -> None:
         self._session.cancel(invocation)
 
+    def cancel_active_rules(self) -> None:
+        """Interrupt every rule running now; used when the caller cancels the run."""
+        self._session.cancel_active()
+
     def _check_cancelled(self) -> None:
         self._session.check()
 

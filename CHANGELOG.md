@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Progress events and cancellation: `validate(..., on_event=..., cancel=...)`
+  reports each step as it runs, and `CancellationToken.cancel()` stops a run from
+  any thread while still returning its report (`metadata.cancelled`).
+- `qavf run --progress` writes progress as JSON lines on stderr; Ctrl-C now
+  cancels the run and still writes its reports.
+
 ## [0.6.2] - 2026-11-02
 
 ### Changed

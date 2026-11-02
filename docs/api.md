@@ -212,6 +212,40 @@ The existing `QARunner`, configuration models and plugin contracts remain
 available for advanced orchestration. `import qavf` itself defers heavyweight
 integration imports until a public object is requested.
 
+## Progress and cancellation
+
+Pass `on_event` to follow a run and a `CancellationToken` to stop it from any
+thread, for example from a GUI's Stop button:
+
+```python
+from qavf import CancellationToken, validate
+
+token = CancellationToken()
+
+
+def show(event):
+    print(event.kind, event.completed, event.total, event.rule_ids, event.dataset)
+
+
+report = validate("data.csv", config="qavf.yaml", on_event=show, cancel=token)
+# elsewhere: token.cancel()
+```
+
+Events arrive in order: `run_started`, then `step_started`/`step_finished` for
+each step, then `run_finished` with the report. A step is one rule on the Polars
+backend and one rule stage of one dataset on the DuckDB backend, where `total` is
+`None` because the number of steps is not known in advance. `step_finished`
+carries that step's results. A callback that raises is logged and ignored.
+
+Cancelling interrupts running DuckDB queries and stops further steps. The run
+still returns a report: finished steps keep their results, the rest are `ERROR`
+"Not assessed: the run was cancelled.", `report.metadata.cancelled` is true and
+the verdict is `incomplete`. Both hooks need `engine.execution_mode: in_process`.
+
+On the command line, `qavf run --progress` writes each event as one JSON line to
+stderr. Ctrl-C (or SIGTERM, or Ctrl-Break on Windows) cancels the run and still
+writes its reports; a second interrupt stops at once.
+
 ## Comparing two datasets
 
 `compare_datasets(baseline, candidate, keys=..., columns=..., levels=...)` takes the

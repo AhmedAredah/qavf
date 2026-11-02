@@ -70,6 +70,13 @@ class RunSession:
                 with contextlib.suppress(Exception):
                     connection.interrupt()
 
+    def cancel_active(self) -> None:
+        """Cancel every invocation running now (a caller cancelled the whole run)."""
+        with self.lock:
+            invocations = list(self.active.values())
+        for invocation in invocations:
+            self.cancel(invocation)
+
     def register_connection(self, token: object, connection: Any) -> None:
         with self.lock:
             self.connections[token] = (threading.get_ident(), connection)

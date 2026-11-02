@@ -64,6 +64,7 @@ from qavf.reports.models import (
     exact_count,
     normalize_evidence,
 )
+from qavf.run_control import CANCELLED_MESSAGE, RunControl
 from qavf.settings import QAVFSettings
 from qavf.sources.base import SourceRegistry
 
@@ -199,6 +200,8 @@ class QARunner:
         self,
         ctx: DataContext | None = None,
         frames: Mapping[str, Any] | None = None,
+        *,
+        control: RunControl | None = None,
     ) -> QAReport:
         """Execute the plan and return the report.
 
@@ -206,6 +209,7 @@ class QARunner:
             ctx: Data context. Built from the settings (and ``frames``) when omitted.
             frames: In-memory datasets (Polars, pandas or Arrow) that supply or
                 override configured ones. Ignored when ``ctx`` is given.
+            control: Progress events and cancellation (see :mod:`qavf.run_control`).
         """
         from qavf.execution.policy import check_policy
 
@@ -215,6 +219,10 @@ class QARunner:
                 raise ConfigurationError("isolated execution requires configured plugins")
             if ctx is not None:
                 raise ConfigurationError("isolated execution cannot borrow a live DataContext")
+            if control is not None:
+                raise ConfigurationError(
+                    "progress events and cancellation require engine.execution_mode: in_process"
+                )
             from qavf.execution.dispatch import validate_isolated
 
             return validate_isolated(self.settings, frames)
@@ -248,16 +256,21 @@ class QARunner:
             context.reporting_snapshot()
             started = datetime.now(UTC)
             logger.info("Running %d rule(s) with %d worker(s)", len(rules), workers)
+            if control is not None:
+                control.started(len(rules))
+                control.token.add_listener(context.cancel_active_rules)
+                ownership.callback(control.token.remove_listener, context.cancel_active_rules)
 
             timeout = self.settings.engine.rule_timeout_s
             if timeout is not None:
-                batches = self._run_with_deadlines(rules, context, workers, timeout)
+                batches = self._run_with_deadlines(rules, context, workers, timeout, control)
             elif workers > 1:
+                execute = functools.partial(self._execute, ctx=context, control=control)
                 with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="qavf") as pool:
-                    batches = list(pool.map(lambda rule: self._execute(rule, context), rules))
+                    batches = list(pool.map(execute, rules))
                 context.finish_inactive_workers()
             else:
-                batches = [self._execute(rule, context) for rule in rules]
+                batches = [self._execute(rule, context, control=control) for rule in rules]
             for name, reason in context.verify_inputs().items():
                 batches.append(
                     [
@@ -300,6 +313,7 @@ class QARunner:
                 plugins=self.plugin_status(),
                 fail_on=self.settings.engine.fail_on,
                 fail_on_incomplete=self.settings.engine.fail_on_incomplete,
+                cancelled=control is not None and control.cancelled,
                 config=config,
                 config_digest=config_digest(config),
                 rules=(infos := [_rule_info(rule) for rule in rules]),
@@ -328,6 +342,8 @@ class QARunner:
             summary.skipped,
             summary.highest_severity.value if summary.highest_severity else "none",
         )
+        if control is not None:
+            control.finished(report)
         return report
 
     def _fit_report_budget(self, report: QAReport) -> QAReport:
@@ -470,7 +486,12 @@ class QARunner:
         return requested
 
     def _run_with_deadlines(
-        self, rules: list[Rule], ctx: DataContext, workers: int, timeout: float
+        self,
+        rules: list[Rule],
+        ctx: DataContext,
+        workers: int,
+        timeout: float,
+        control: RunControl | None = None,
     ) -> list[list[RuleResult]]:
         """Bounded cooperative deadlines; timed-out threads are never replaced.
 
@@ -530,9 +551,16 @@ class QARunner:
                         started[index] = (time.monotonic(), invocation)
                         worker_threads[invocation] = threading.current_thread()
                         lock.notify_all()
+                    if control is not None and not control.cancelled:
+                        control.step_started((rules[index].rule_id,))
                     try:
                         outcome = self._execute(
-                            rules[index], ctx, invocation, finish_invocation=False
+                            rules[index],
+                            ctx,
+                            invocation,
+                            finish_invocation=False,
+                            control=control,
+                            emit=False,
                         )
                     except BaseException as exc:
                         # A plugin can terminate its worker with SystemExit;
@@ -550,6 +578,8 @@ class QARunner:
                         if index in abandoned:
                             return
                         results[index] = outcome
+                        if control is not None:
+                            control.step_finished((rules[index].rule_id,), None, outcome)
                         lock.notify_all()
             finally:
                 try:
@@ -607,6 +637,8 @@ class QARunner:
                                 severity=max(rule.severity, Severity.ERROR),
                             )
                         ]
+                        if control is not None:
+                            control.step_finished((rule.rule_id,), None, results[index] or [])
                 if len(abandoned) >= min(capacity, len(rules)) and rules:
                     while True:
                         try:
@@ -625,6 +657,8 @@ class QARunner:
                                 severity=max(rule.severity, Severity.ERROR),
                             )
                         ]
+                        if control is not None:
+                            control.step_finished((rule.rule_id,), None, results[index] or [])
                 finished = all(result is not None for result in results) and all(
                     index in abandoned for index in started
                 )
@@ -656,6 +690,44 @@ class QARunner:
         invocation: Invocation | None = None,
         *,
         finish_invocation: bool = True,
+        control: RunControl | None = None,
+        emit: bool = True,
+    ) -> list[RuleResult]:
+        """Run one rule as one progress step, honouring a cancellation request.
+
+        A rule that has not started when the run is cancelled, or that ends with
+        an error after it, is reported as not assessed because of the
+        cancellation rather than because of the interrupt it caused.
+        """
+        if control is None:
+            return self._invoke(rule, ctx, invocation, finish_invocation=finish_invocation)
+        if control.cancelled:
+            results = [self._cancelled(rule)]
+        else:
+            if emit:
+                control.step_started((rule.rule_id,))
+            results = self._invoke(
+                rule, ctx, invocation, finish_invocation=finish_invocation, control=control
+            )
+            if control.cancelled and any(result.status is Status.ERROR for result in results):
+                results = [self._cancelled(rule)]
+        if emit:
+            control.step_finished((rule.rule_id,), None, results)
+        return results
+
+    def _cancelled(self, rule: Rule) -> RuleResult:
+        return self._result(
+            rule, Status.ERROR, CANCELLED_MESSAGE, severity=max(rule.severity, Severity.ERROR)
+        )
+
+    def _invoke(
+        self,
+        rule: Rule,
+        ctx: DataContext,
+        invocation: Invocation | None = None,
+        *,
+        finish_invocation: bool = True,
+        control: RunControl | None = None,
     ) -> list[RuleResult]:
         """Isolate the complete invocation, including entry and resource release."""
         began = False
@@ -663,6 +735,9 @@ class QARunner:
         try:
             ctx.begin_rule(invocation)
             began = True
+            if control is not None and control.cancelled:
+                # Cancelled between the caller's check and this rule's start.
+                return [self._cancelled(rule)]
             started, loaded = time.perf_counter(), ctx.thread_load_seconds()
             results = self._execute_isolated(rule, ctx)
             elapsed = round(time.perf_counter() - started, 6)

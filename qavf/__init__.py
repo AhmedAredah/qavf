@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from qavf.regression.models import ComparisonResult
     from qavf.reports.html import render_html, write_html
     from qavf.reports.models import QAReport, RuleResult
+    from qavf.run_control import CancellationToken, RunEvent
     from qavf.settings import QAVFSettings, load_settings
     from qavf.sources import DataSource, SourceParams
 
@@ -50,6 +51,7 @@ _EXPORTS = {
     "Capability": "qavf.capabilities",
     "backend_capabilities": "qavf.capabilities",
     "BatchSource": "qavf.inputs.descriptors",
+    "CancellationToken": "qavf.run_control",
     "CheckIdentity": "qavf.reports.models",
     "ComparisonResult": "qavf.regression.models",
     "ConfigurationError": "qavf.engine.compilation",
@@ -68,6 +70,7 @@ _EXPORTS = {
     "QAVFSettings": "qavf.settings",
     "Query": "qavf.inputs.descriptors",
     "ResourceLimits": "qavf.inputs.resources",
+    "RunEvent": "qavf.run_control",
     "Rule": "qavf.engine.registry",
     "RuleParams": "qavf.engine.registry",
     "RuleRegistry": "qavf.engine.registry",
@@ -93,6 +96,7 @@ _EXPORTS = {
 __all__ = [
     "BackendCapabilities",
     "BatchSource",
+    "CancellationToken",
     "Capability",
     "CheckIdentity",
     "ComparisonResult",
@@ -116,6 +120,7 @@ __all__ = [
     "RuleParams",
     "RuleRegistry",
     "RuleResult",
+    "RunEvent",
     "Severity",
     "SourceParams",
     "Status",

@@ -365,6 +365,8 @@ class RunMetadata(SnapshotModel):
     """Lowest failure severity that fails the run."""
     fail_on_incomplete: bool = True
     """Whether an incomplete run (unassessed checks, or nothing assessed) fails."""
+    cancelled: bool = False
+    """Whether the caller cancelled the run; steps it did not finish are not assessed."""
     plugins: dict[str, str] = Field(default_factory=dict)
     """Entry-point plugins tried (``rules:name``/``sources:name``): ``loaded`` or the error."""
     excluded_rules: dict[str, str] = Field(default_factory=dict)
