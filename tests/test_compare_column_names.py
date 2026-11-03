@@ -132,3 +132,16 @@ def test_a_derive_reference_to_a_missing_column_is_a_configuration_error(derive,
 def test_a_measure_of_an_ignored_column_is_refused(level):
     with pytest.raises(ValidationError, match="uses ignored column"):
         compare_datasets(BASELINE, CANDIDATE, levels=[level], ignore_columns=["x"])
+
+
+def test_an_unknown_categorical_column_of_records_is_a_configuration_error():
+    levels = [{"level": "records", "categorical": ["xx"]}]
+    result = compare_datasets(BASELINE, CANDIDATE, keys="k", levels=levels)
+    assert result.error is not None and result.error.startswith("configuration error")
+    assert "levels[0] (records) categorical names column 'xx'" in result.error
+    assert "did you mean 'x'" in result.error
+
+
+def test_a_known_categorical_column_of_records_is_compared():
+    levels = [{"level": "records", "categorical": ["x"]}]
+    assert compare_datasets(BASELINE, CANDIDATE, keys="k", levels=levels).error is None

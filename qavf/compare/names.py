@@ -9,7 +9,7 @@ side. A misspelled name would otherwise be filtered out silently.
 from __future__ import annotations
 
 import difflib
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 
 import polars as pl
 
@@ -51,7 +51,8 @@ class ComparisonColumnNames:
             raise ComparisonConfigurationError("; ".join(problems))
 
     def check_options(self, known: Iterable[str]) -> None:
-        """``tolerances`` and ``ignore_columns`` name columns of at least one side.
+        """``tolerances``, ``ignore_columns`` and a records level's ``categorical``
+        name columns of at least one side.
 
         ``known`` holds every aligned column of either side; a column present on
         only one side is accepted (structure reports it as added or removed).
@@ -60,12 +61,19 @@ class ComparisonColumnNames:
         problems = [
             f"{setting} names column {name!r}, which neither aligned dataset has"
             f"{_hint(name, names)}"
-            for setting, configured in (
-                ("tolerances", self.spec.tolerances),
-                ("ignore_columns", self.spec.ignore_columns),
-            )
+            for setting, configured in self._column_options()
             for name in configured
             if name not in names
         ]
         if problems:
             raise ComparisonConfigurationError("; ".join(problems))
+
+    def _column_options(self) -> Iterator[tuple[str, Iterable[str]]]:
+        """Each option naming columns, with the setting it is written under."""
+        yield "tolerances", self.spec.tolerances
+        yield "ignore_columns", self.spec.ignore_columns
+        for index, level in enumerate(self.spec.levels or ()):
+            categorical = level.params.get("categorical") if level.level == "records" else None
+            if isinstance(categorical, list | tuple):
+                names = [name for name in categorical if isinstance(name, str)]
+                yield f"levels[{index}] (records) categorical", names
