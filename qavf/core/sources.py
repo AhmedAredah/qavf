@@ -26,6 +26,7 @@ from qavf.duckdb_results import arrow_table, settle
 from qavf.inputs.descriptors import BatchSource, File, Loader, Query
 from qavf.optional import unsupported
 from qavf.redaction import redact_text
+from qavf.run_control import CANCELLED_MESSAGE
 from qavf.sources.base import SourceError, SourceIntegrityError, SourceNotFoundError
 from qavf.sources.errors import redacted_error, verify_postcondition
 from qavf.sources.formats import READERS, infer_format, is_remote
@@ -68,12 +69,27 @@ def evidence_row_name(columns: Sequence[str]) -> str:
 class InputReader:
     """Own QAVF snapshots; borrowed frames and connections remain caller-owned."""
 
-    def __init__(self, connection, settings, projections=None, query_resolver=None):
+    def __init__(self, connection, settings, projections=None, query_resolver=None, control=None):
         self.connection = connection
         self.settings = settings
         self.projections = projections or {}
         self.query_resolver = query_resolver
+        self.control = control
+        """The run's :class:`~qavf.run_control.RunControl`: a cancelled run starts no
+        further attempt and does not wait out a retry delay."""
         self._identities = {}
+
+    def _check_cancelled(self):
+        if self.control is not None and self.control.cancelled:
+            raise SourceError(CANCELLED_MESSAGE)
+
+    def _pause(self, seconds):
+        """Wait before a retry, returning as soon as the run is cancelled."""
+        if self.control is None:
+            time.sleep(seconds)
+        else:
+            self.control.token.wait(seconds)
+        self._check_cancelled()
 
     def load(self, name, value, spec) -> LoadedDataset:
         from qavf.settings import SourcePolicy
@@ -95,6 +111,7 @@ class InputReader:
             isinstance(value, Loader | BatchSource) and value.replayable and value.retry_safe
         )
         for attempt in range(policy.retries + 1):
+            self._check_cancelled()
             owned: list[tuple[str, str]] = []
             attempt_identity = identity
             try:
@@ -121,7 +138,7 @@ class InputReader:
                     or isinstance(exc, SourceIntegrityError | SourceNotFoundError)
                 ):
                     raise exc from None
-                time.sleep(policy.retry_delay_s * 2**attempt)
+                self._pause(policy.retry_delay_s * 2**attempt)
         raise AssertionError("unreachable retry state")
 
     def _identity(self, value):

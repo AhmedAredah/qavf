@@ -53,6 +53,10 @@ class CancellationToken:
             except Exception:  # Interrupting is best effort; the run still stops.
                 logger.debug("A cancellation listener failed", exc_info=True)
 
+    def wait(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for cancellation; whether it was requested."""
+        return self._event.wait(max(0.0, timeout))
+
     def add_listener(self, listener: Callable[[], None]) -> None:
         """Call ``listener`` on cancellation, at once if already cancelled."""
         with self._lock:

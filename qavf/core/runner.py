@@ -512,7 +512,11 @@ class NativeRunner:
                 self.views = NativeViews(con, settings)
             sources = SourceConnections(con, settings)
             reader = InputReader(
-                con, settings, projections=plan.projections, query_resolver=sources.resolve
+                con,
+                settings,
+                projections=plan.projections,
+                query_resolver=sources.resolve,
+                control=self.control,
             )
             query_inputs = bool(settings.assertions and out.enabled("INP-007")) or any(
                 spec.expressions and out.enabled("INP-006", name)
