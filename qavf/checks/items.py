@@ -87,6 +87,28 @@ class CheckItem(BaseModel):
         return self.name or self.default_name(datasets)
 
 
+class CheckDefaults(BaseModel):
+    """``defaults``: settings per check name. It only describes the file-path settings
+    of each check's defaults for :mod:`qavf.config_paths`; ``defaults`` is validated
+    as a mapping."""
+
+    @classmethod
+    def path_parts(cls, raw: Mapping[str, Any]) -> tuple[tuple[str | None, type[BaseModel]], ...]:
+        """Each known check's defaults, described by that check's item model."""
+        try:
+            from qavf.checks.catalog import CATALOG
+        except ModuleNotFoundError as exc:  # the catalog needs the Polars backend
+            if not (exc.name or "").startswith("polars"):
+                raise
+            return ()
+        parts: list[tuple[str | None, type[BaseModel]]] = []
+        for name in raw:
+            definition = CATALOG.get(name) if isinstance(name, str) else None
+            if definition is not None and definition.configurable:
+                parts.append((name, definition.item_model()))
+        return tuple(parts)
+
+
 class ExpressionItem(CheckItem):
     """``expression``: a SQL condition every row of the dataset satisfies (INP-006)."""
 
@@ -185,6 +207,7 @@ def checks_union(models: Sequence[type[BaseModel]]) -> Any:
 
 __all__ = [
     "COMMON_FIELDS",
+    "CheckDefaults",
     "CheckItem",
     "ExpressionItem",
     "RunSettings",

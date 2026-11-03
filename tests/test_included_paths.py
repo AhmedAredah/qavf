@@ -186,3 +186,27 @@ def test_included_and_inline_contracts_agree_on_a_column_named_path(
     inline = validate(config=inline_config, backend=backend)
     assert included.verdict() == inline.verdict() == "passed"
     assert [r.status for r in included.results] == [r.status for r in inline.results]
+
+
+def test_file_paths_in_included_check_defaults_are_rebased(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "shared" / "base.yaml",
+        "defaults:\n"
+        "  matches_baseline: {path: baselines/counts.csv, keys: [id]}\n"
+        "  outliers: {column: path}\n",
+    )
+    config = _write(
+        tmp_path / "qa.yaml",
+        "include: [shared/base.yaml]\n"
+        "datasets:\n"
+        "  counts:\n"
+        "    path: counts.csv\n"
+        "    checks:\n"
+        "      - {check: matches_baseline}\n"
+        "      - {check: outliers}\n",
+    )
+    settings = load_settings(config)
+    assert settings.defaults["matches_baseline"]["path"] == "shared/baselines/counts.csv"
+    baseline, outliers = settings.datasets["counts"].checks
+    assert baseline.settings["path"] == "shared/baselines/counts.csv"
+    assert outliers.settings["column"] == "path"
