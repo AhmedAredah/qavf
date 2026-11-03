@@ -181,10 +181,10 @@ def test_scaffold_with_required_plugin_parameters_plans(tmp_path, plugin_registr
 def test_profiled_integer_bounds_are_exact() -> None:
     frame = pl.DataFrame({"n": [BIG, BIG + 2]})
     column = profile_frame(frame)["columns"]["n"]
-    assert column == {"dtype": "int", "ge": BIG, "le": BIG + 2}
-    assert all(type(column[key]) is int for key in ("ge", "le"))
+    assert column == {"dtype": "int", "between": [BIG, BIG + 2]}
+    assert all(type(bound) is int for bound in column["between"])
     widened = profile_frame(frame, margin=0.5)["columns"]["n"]
-    assert widened["ge"] == BIG - 1 and widened["le"] == BIG + 3
+    assert widened["between"][0] == BIG - 1 and widened["between"][1] == BIG + 3
 
 
 @pytest.mark.parametrize("margin", [-1.0, math.inf, math.nan])
@@ -209,11 +209,17 @@ def test_date_and_datetime_bounds_are_widened_by_the_margin() -> None:
         }
     )
     exact = profile_frame(frame)["columns"]
-    assert (exact["d"]["ge"], exact["d"]["le"]) == (date(2020, 1, 1), date(2020, 1, 11))
+    assert (exact["d"]["between"][0], exact["d"]["between"][1]) == (
+        date(2020, 1, 1),
+        date(2020, 1, 11),
+    )
     wide = profile_frame(frame, margin=0.5)["columns"]
-    assert (wide["d"]["ge"], wide["d"]["le"]) == (date(2019, 12, 27), date(2020, 1, 16))
-    assert wide["t"]["ge"] == datetime(2020, 1, 1) - timedelta(hours=5)
-    assert wide["t"]["le"] == datetime(2020, 1, 1, 15)
+    assert (wide["d"]["between"][0], wide["d"]["between"][1]) == (
+        date(2019, 12, 27),
+        date(2020, 1, 16),
+    )
+    assert wide["t"]["between"][0] == datetime(2020, 1, 1) - timedelta(hours=5)
+    assert wide["t"]["between"][1] == datetime(2020, 1, 1, 15)
 
 
 # =========================================================================

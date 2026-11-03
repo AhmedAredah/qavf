@@ -82,11 +82,11 @@ def test_profile_margin_matches_decimal_spelling_for_all_numeric_storage(margin,
     for values in ([0, span], [0.0, float(span)], [Decimal(0), Decimal(span)]):
         bounds = profile_frame(pl.DataFrame({"x": values}), margin=margin)["columns"]["x"]
         if isinstance(values[0], int):
-            assert bounds["ge"] == -math.ceil(exact_widen)
-            assert bounds["le"] == span + math.ceil(exact_widen)
+            assert bounds["between"][0] == -math.ceil(exact_widen)
+            assert bounds["between"][1] == span + math.ceil(exact_widen)
         else:
-            assert Fraction(str(bounds["ge"])) == -exact_widen
-            assert Fraction(str(bounds["le"])) == span + exact_widen
+            assert Fraction(str(bounds["between"][0])) == -exact_widen
+            assert Fraction(str(bounds["between"][1])) == span + exact_widen
 
 
 def test_profile_date_and_datetime_margins_round_outward_in_their_units():
@@ -94,14 +94,14 @@ def test_profile_date_and_datetime_margins_round_outward_in_their_units():
     bounds = profile_frame(pl.DataFrame({"x": [first, first + timedelta(days=100)]}), margin=0.07)[
         "columns"
     ]["x"]
-    assert bounds["ge"] == first - timedelta(days=7)
-    assert bounds["le"] == first + timedelta(days=107)
+    assert bounds["between"][0] == first - timedelta(days=7)
+    assert bounds["between"][1] == first + timedelta(days=107)
     first_time = datetime(2024, 1, 1)
     bounds = profile_frame(
         pl.DataFrame({"x": [first_time, first_time + timedelta(microseconds=1)]}), margin=0.1
     )["columns"]["x"]
-    assert bounds["ge"] == first_time - timedelta(microseconds=1)
-    assert bounds["le"] == first_time + timedelta(microseconds=2)
+    assert bounds["between"][0] == first_time - timedelta(microseconds=1)
+    assert bounds["between"][1] == first_time + timedelta(microseconds=2)
 
 
 @pytest.mark.parametrize("margin", [True, 10**400])
@@ -289,9 +289,9 @@ def test_profile_timezone_folds_compare_instants_across_batch_boundaries(reverse
     values = pl.Series([first] * 65_536 + [last], dtype=pl.Datetime("us", zone.key))
     frame = pl.DataFrame({"x": values})
     bounds = profile_frame(frame)["columns"]["x"]
-    assert bounds["ge"].astimezone(UTC) == early.astimezone(UTC)
-    assert bounds["le"].astimezone(UTC) == late.astimezone(UTC)
+    assert bounds["between"][0].astimezone(UTC) == early.astimezone(UTC)
+    assert bounds["between"][1].astimezone(UTC) == late.astimezone(UTC)
     bounds = profile_frame(frame, margin=0.1)["columns"]["x"]
-    assert bounds["ge"].astimezone(UTC) == early.astimezone(UTC) - timedelta(minutes=6)
-    assert bounds["le"].astimezone(UTC) == late.astimezone(UTC) + timedelta(minutes=6)
-    assert bounds["ge"].tzinfo == zone and bounds["le"].tzinfo == zone
+    assert bounds["between"][0].astimezone(UTC) == early.astimezone(UTC) - timedelta(minutes=6)
+    assert bounds["between"][1].astimezone(UTC) == late.astimezone(UTC) + timedelta(minutes=6)
+    assert bounds["between"][0].tzinfo == zone and bounds["between"][1].tzinfo == zone
