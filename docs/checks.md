@@ -194,8 +194,8 @@ and each member's rows that have a consensus. These are internal to the check;
 reports name them by role (`consensus`, `pooled`) or by member, and only the
 run's audit metadata lists them.
 
-Statistical tests are corrected for multiple testing within each check item (one
-pair's comparison), as set by the item's `correction`.
+Statistical tests are corrected for multiple testing within each check item, as
+set by its `correction`; items are never pooled into one family.
 
 ### Reports
 
