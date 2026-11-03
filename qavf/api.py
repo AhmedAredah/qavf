@@ -58,17 +58,10 @@ def validate(
     (:class:`~qavf.checks.selection.SelectionError`).
     """
     from qavf.checks.selection import Selection, narrow
-    from qavf.optional import has_polars
+    from qavf.optional import resolve_backend
 
     selection = Selection.of(only=only, tags=tags, skip_tags=skip_tags, datasets=datasets)
-
-    if backend not in ("auto", "duckdb", "polars"):
-        raise ValueError("backend must be 'auto', 'duckdb', or 'polars'")
-    if backend == "polars":
-        from qavf.optional import require_polars
-
-        require_polars("backend='polars'")
-    if backend == "duckdb" or not has_polars():
+    if resolve_backend(backend) == "duckdb":
         from qavf.core.runner import validate_core
 
         return validate_core(

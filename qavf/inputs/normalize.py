@@ -10,7 +10,8 @@ from typing import Any
 
 import duckdb
 import polars as pl
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+from pydantic_core import InitErrorDetails
 
 from qavf.checks.across import AcrossExpansion
 from qavf.checks.legacy import reject_legacy
@@ -100,6 +101,23 @@ def _configuration(config: Configuration) -> tuple[dict[str, Any], Path | None]:
         _check_configured_auxiliary_inputs(config)
         return dict(config), None
     raise TypeError("config must be settings, a configuration mapping, or a YAML/JSON path")
+
+
+def _dataset_spec(name: str, value: object) -> DatasetSpec:
+    """``datasets.<name>`` validated; its errors name their full configuration path."""
+    try:
+        return DatasetSpec.model_validate(value).model_copy(deep=True)
+    except ValidationError as exc:
+        errors = [
+            InitErrorDetails(
+                type=error["type"],
+                loc=("datasets", name, *error["loc"]),
+                input=error["input"],
+                ctx=error.get("ctx", {}),
+            )
+            for error in exc.errors(include_url=False)
+        ]
+        raise ValidationError.from_exception_data(exc.title, errors) from None
 
 
 def _validate_names(names: Mapping[str, object]) -> None:
@@ -354,10 +372,7 @@ def prepare_configuration(
         raise ValueError(
             "provide schema=, config=, or a Dataset QA contract; acceptance limits are not inferred"
         )
-    specs = {
-        name: DatasetSpec.model_validate(value).model_copy(deep=True)
-        for name, value in configured.items()
-    }
+    specs = {name: _dataset_spec(name, value) for name, value in configured.items()}
     for name, value in inputs.items():
         spec = specs.get(name, DatasetSpec())
         if isinstance(value, Dataset):

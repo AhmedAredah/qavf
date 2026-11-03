@@ -305,6 +305,31 @@ imports and configuration hooks, which are trusted Python execution and may do
 their own I/O. QAVF does not request dataset evaluation. `complete` means planning information was resolved,
 not that data has been validated.
 
+`explain` takes the selection and backend arguments of `validate`: `backend=`,
+`only=`, `tags=`, `skip_tags=` and `datasets=`. The plan applies the same selection
+(`plan.selection`, with unselected items under `excluded`) and the same backend
+admission (`plan.backend`), so a check the chosen backend cannot run raises
+`OptionalDependencyError` here, as `validate` would, and an unknown check name or
+dataset raises `SelectionError`.
+
+```python
+plan = explain(config="project.yaml", backend="duckdb", datasets="counts", tags="nightly")
+```
+
+On the command line, `qavf explain` validates a configuration and prints its plan
+without reading any data, so it doubles as a configuration check (it needs
+`qavf[polars]`):
+
+```text
+qavf explain -c project.yaml [--backend auto|duckdb|polars] [--dataset NAME] [--tags TAG]
+             [--skip-tags TAG] [--only NAME] [--format text|json] [-o plan.json]
+```
+
+It exits 0 when the configuration is valid and 2, naming the field path (for example
+`datasets.counts.schema.columns.aadt.dtype`), when it is not or when the backend
+cannot run a configured check. `-o` never writes over the configuration or a file it
+names. `--load-plugins` plans plugin checks too, importing their code.
+
 ## Explicit check profiles
 
 `validate(..., profile="validity")` adds INP-001 through INP-007 for declared

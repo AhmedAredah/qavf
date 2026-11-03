@@ -184,6 +184,32 @@ def _parser() -> argparse.ArgumentParser:
         help="run only this dataset's checks and schema contracts (repeatable)",
     )
 
+    explain = commands.add_parser(
+        "explain",
+        help="validate a configuration and show what a run would do, without reading data",
+    )
+    explain.add_argument(
+        "-c", "--config", required=True, type=Path, help="YAML or JSON configuration"
+    )
+    explain.add_argument(
+        "--backend",
+        choices=["auto", "duckdb", "polars"],
+        default="auto",
+        help="check against this backend's capabilities (as run --backend)",
+    )
+    explain.add_argument("--format", choices=["text", "json"], default="text")
+    explain.add_argument("-o", "--output", type=Path, help="file to write (default: stdout)")
+    explain.add_argument("--force", action="store_true", help="overwrite an existing file")
+    explain.add_argument(
+        "--load-plugins",
+        action="store_true",
+        help="import configured and installed plugins to plan their checks too",
+    )
+    explain.add_argument("--tags", action="append", default=[], metavar="TAG")
+    explain.add_argument("--skip-tags", action="append", default=[], metavar="TAG")
+    explain.add_argument("--only", action="append", default=[], metavar="NAME")
+    explain.add_argument("--dataset", action="append", default=[], metavar="NAME")
+
     init = commands.add_parser(
         "init", help="write a minimal starting configuration (--full: every setting)"
     )
@@ -635,6 +661,73 @@ def _cmd_schema(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+class PlanText:
+    """A :class:`~qavf.ValidationPlan` as text for the terminal."""
+
+    def __init__(self, plan: Any, config: Path) -> None:
+        self.plan = plan
+        self.config = config
+
+    def render(self) -> str:
+        plan = self.plan
+        selection = f", selection {plan.selection}" if plan.selection else ""
+        lines = [
+            f"Configuration valid: {self.config} (backend {plan.backend}{selection})",
+            "",
+            f"Datasets ({len(plan.datasets)}):",
+        ]
+        for dataset in plan.datasets:
+            columns = len(dataset.declared_columns)
+            lines.append(
+                f"  {dataset.name:<20} {dataset.input_kind:<10} {columns} declared columns"
+            )
+        lines += ["", f"Planned checks ({len(plan.rules)}):"]
+        for rule in plan.rules:
+            label = rule.item_name or rule.check_name or rule.name
+            datasets = ", ".join(rule.datasets) or "-"
+            lines.append(f"  {rule.rule_id:<9} {label:<24} {rule.severity:<8} datasets: {datasets}")
+        if plan.excluded:
+            lines += ["", "Not run:"]
+            lines += [f"  {name}: {reason}" for name, reason in plan.excluded.items()]
+        if plan.unresolved:
+            lines += ["", "Unresolved (the plan is incomplete):"]
+            lines += [f"  - {item}" for item in plan.unresolved]
+        lines += ["", "No data was read."]
+        return "\n".join(lines) + "\n"
+
+
+def _cmd_explain(args: argparse.Namespace) -> int:
+    """Validate and plan a configuration without reading data (``qavf explain``)."""
+    from qavf.planning import explain
+
+    if args.output:
+        _use("ProtectedInputs")
+        # The configuration and the files it names are never replaced, even with --force.
+        ProtectedInputs.of_settings(_settings(args.config), args.config).check(args.output)
+        if args.output.exists() and not args.force:
+            raise ValueError(f"refusing to overwrite {args.output} (use --force)")
+    plan = explain(
+        config=args.config,
+        backend=args.backend,
+        load_plugins=args.load_plugins,
+        only=args.only or None,
+        tags=args.tags or None,
+        skip_tags=args.skip_tags or None,
+        datasets=args.dataset or None,
+    )
+    if args.format == "json":
+        text = plan.model_dump_json(indent=2) + "\n"
+    else:
+        text = PlanText(plan, args.config).render()
+    if args.output:
+        _use("atomic_write")
+        atomic_write(args.output, text)
+        print(f"Plan written: {args.output}")
+    else:
+        sys.stdout.write(text)
+    return EXIT_OK
+
+
 def _cmd_profile(args: argparse.Namespace) -> int:
     _use("profile_input", "yaml")
     profile = profile_input(args.path, margin=args.margin, max_categories=args.max_categories)
@@ -885,6 +978,7 @@ _COMMANDS = {
     "run": _cmd_run,
     "capabilities": _cmd_capabilities,
     "init": _cmd_init,
+    "explain": _cmd_explain,
     "schema": _cmd_schema,
     "profile": _cmd_profile,
     "list-checks": _cmd_list_checks,
@@ -942,7 +1036,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     from qavf.sources.base import SourceError
 
     try:
-        if args.command in {"init", "profile", "compare", "compare-datasets", "baseline", "demo"}:
+        if args.command in {
+            "init",
+            "explain",
+            "profile",
+            "compare",
+            "compare-datasets",
+            "baseline",
+            "demo",
+        }:
             require_polars(f"qavf {args.command}")
         return _COMMANDS[args.command](args)
     except (

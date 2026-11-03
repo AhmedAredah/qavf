@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
 from qavf.checks.placement import placed_items
+from qavf.checks.selection import Selection, narrow
 from qavf.engine.compilation import (
     ConfigurationError,
     build_registry,
@@ -18,6 +19,7 @@ from qavf.engine.planning import build_plan
 from qavf.engine.registry import RuleRegistry, default_registry
 from qavf.inputs.normalize import Configuration, prepare_configuration
 from qavf.inputs.resources import ResourceLimits
+from qavf.optional import resolve_backend
 from qavf.plugins.transactions import visibility
 from qavf.profiles import ProfileName, apply_profile
 from qavf.redaction import exception_details
@@ -60,6 +62,10 @@ class ValidationPlan(SnapshotModel):
 
     datasets: tuple[DatasetExplanation, ...]
     rules: tuple[RuleExplanation, ...]
+    backend: str = "polars"
+    """The backend whose admission rules the plan was checked against."""
+    selection: str | None = None
+    """The selection the plan runs under (``None``: everything configured)."""
     excluded: dict[str, str] = Field(default_factory=dict)
     unresolved: tuple[str, ...] = ()
     resources: dict[str, Any] = Field(default_factory=dict)
@@ -83,6 +89,11 @@ def _work(rule_id: str) -> tuple[str, ...]:
     return ("execution depends on the configured contract and observed source schema",)
 
 
+def _enabled_checks(settings: QAVFSettings) -> set[str]:
+    """The checks of the enabled items (those a selection left on)."""
+    return {placed.item.check for placed in placed_items(settings) if placed.item.enabled}
+
+
 def _registered_rule_gaps(settings: QAVFSettings, registry: RuleRegistry) -> list[str]:
     """Disclose configured in-code rules without invoking their configuration hooks.
 
@@ -92,7 +103,7 @@ def _registered_rule_gaps(settings: QAVFSettings, registry: RuleRegistry) -> lis
     """
     with visibility(settings.plugins.entry_points):
         registered = tuple(default_registry)
-    configured = {placed.item.check for placed in placed_items(settings)}
+    configured = _enabled_checks(settings)
     gaps = []
     for rule in registered:
         if rule.rule_id in registry:
@@ -132,6 +143,11 @@ def explain(
     resources: ResourceLimits | None = None,
     profile: ProfileName | None = None,
     load_plugins: bool = False,
+    backend: str = "auto",
+    only: str | Iterable[str] | None = None,
+    tags: str | Iterable[str] | None = None,
+    skip_tags: str | Iterable[str] | None = None,
+    datasets: str | Iterable[str] | None = None,
 ) -> ValidationPlan:
     """Explain checks without reading data or adapting caller-owned inputs.
 
@@ -141,14 +157,31 @@ def explain(
     evaluation, but trusted plugin hooks can perform arbitrary Python I/O.
     No filesystem/source inspection is performed; file-based configuration itself
     is read when ``config`` names a configuration file.
+
+    ``backend``, ``only``, ``tags``, ``skip_tags`` and ``datasets`` mean what they
+    mean for :func:`~qavf.validate`: the plan applies the same selection and the
+    same backend admission, so a check the chosen backend cannot run raises
+    :class:`~qavf.optional.OptionalDependencyError` here, before any data is read.
+
+    Raises:
+        pydantic.ValidationError: for an invalid configuration (with field paths).
+        SelectionError: for an unknown check name or dataset, or an empty selection.
     """
     if not isinstance(load_plugins, bool):
         raise TypeError("load_plugins must be a boolean")
+    selection = Selection.of(only=only, tags=tags, skip_tags=skip_tags, datasets=datasets)
+    chosen = resolve_backend(backend)
     settings, inputs = prepare_configuration(
         data, schema=schema, config=config, resources=resources
     )
     if profile is not None:
         settings = apply_profile(settings, profile)
+    settings = narrow(settings, selection)
+    if chosen == "duckdb":
+        # The native backend's own admission: unsupported work is refused, not dropped.
+        from qavf.core.configuration import prepare as native_admission
+
+        native_admission(data, schema, config, resources, profile, selection)
     descriptions = []
     for name, spec in settings.datasets.items():
         source = spec.source_config() or {}
@@ -176,7 +209,7 @@ def explain(
         unresolved.extend(_registered_rule_gaps(settings, registry))
         unresolved.extend(
             f"plugin check {check!r} was not imported"
-            for check in sorted({placed.item.check for placed in placed_items(settings)} - known)
+            for check in sorted(_enabled_checks(settings) - known)
         )
         plugins = settings.plugins
         if (
@@ -228,6 +261,8 @@ def explain(
     return ValidationPlan(
         datasets=tuple(descriptions),
         rules=tuple(rules),
+        backend=chosen,
+        selection=selection.describe() if selection.active else None,
         excluded=excluded,
         unresolved=tuple(unresolved),
         complete=not unresolved,

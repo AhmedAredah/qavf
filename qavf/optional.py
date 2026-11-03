@@ -27,6 +27,27 @@ def require_polars(capability: str):
     return polars
 
 
+BACKENDS = ("auto", "duckdb", "polars")
+"""The ``backend=`` values of validation and planning."""
+
+
+def resolve_backend(backend: str) -> str:
+    """The backend a run requested with ``backend`` uses: ``"duckdb"`` or ``"polars"``.
+
+    ``"auto"`` is Polars when installed, otherwise the DuckDB core.
+
+    Raises:
+        ValueError: for an unknown backend name.
+        OptionalDependencyError: for ``"polars"`` without the optional extra.
+    """
+    if backend not in BACKENDS:
+        raise ValueError("backend must be 'auto', 'duckdb', or 'polars'")
+    if backend == "polars":
+        require_polars("backend='polars'")
+        return "polars"
+    return "duckdb" if backend == "duckdb" or not has_polars() else "polars"
+
+
 def unsupported(capability: str) -> NoReturn:
     action = (
         "select backend='polars' (CLI: --backend polars)"

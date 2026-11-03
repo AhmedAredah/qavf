@@ -376,6 +376,7 @@ datasets with the default strategy report exactly as a single comparison. See
 |---|---|
 | `qavf run -c CONFIG` | Run QA and write HTML/JSON reports |
 | `qavf init -d [NAME=]PATH` | Profile data and write a minimal starting configuration (`--full`: the complete reference) |
+| `qavf explain -c CONFIG` | Validate a configuration and show the plan without reading data (`--dataset`, `--tags`, `--backend`, `--format json`); exit 2 names the invalid field |
 | `qavf profile PATH` | Print inferred QA limits for a file |
 | `qavf schema` | Write the configuration JSON Schema for editor support |
 | `qavf list-checks` | List the checks a configuration can use |
@@ -387,8 +388,8 @@ datasets with the default strategy report exactly as a single comparison. See
 | `qavf demo DIR` | Write a runnable demo project |
 
 `--help`, `--version`, `schema`, `list-checks` and native `run` work with the core
-installation. `run`, `schema` and `list-checks` accept `--backend auto|duckdb|polars`;
-`auto` uses Polars when installed, otherwise DuckDB. Advanced profiling, comparison,
+installation. `run`, `explain`, `schema` and `list-checks` accept `--backend auto|duckdb|polars`;
+`auto` uses Polars when installed, otherwise DuckDB. Planning (`explain`), advanced profiling, comparison,
 scaffolding and demo commands require `qavf[polars]`. Inspect the import-light
 [capability catalog](docs/backend_capabilities.md) before selecting a backend.
 
