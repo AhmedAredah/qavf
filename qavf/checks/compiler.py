@@ -22,6 +22,7 @@ from qavf.checks.placement import (
     placed_items,
     row_check_errors,
 )
+from qavf.checks.reuse import default_problems
 from qavf.engine.registry import CheckBinding, Rule, RuleRegistry
 
 if TYPE_CHECKING:
@@ -109,6 +110,12 @@ def configuration_errors(settings: QAVFSettings) -> list[str]:
         if placed.item.enabled or placed.item.settings:
             # A check switched off before any settings were given is not validated.
             problems.extend(definition.errors(placed.item, placed.scope, parameters=not deferred))
+    known = {
+        name: tuple(definition.item_fields())
+        for name, definition in CATALOG.items()
+        if definition.configurable and name not in ROW_CHECKS
+    }
+    problems.extend(default_problems(settings.defaults, known))
     return problems + row_check_errors(settings)
 
 
@@ -153,9 +160,26 @@ def compile_checks(
             problems.append(f"{placed.scope.at(exc.field)}: {exc.message}")
             continue
         compiled.append(CompiledCheck(definition, placed, params))
+    problems.extend(_default_check_problems(settings, registry))
     if problems:
         raise CheckCompilationError("invalid checks: " + "; ".join(problems))
     return compiled
+
+
+def _default_check_problems(settings: QAVFSettings, registry: RuleRegistry | None) -> list[str]:
+    """``defaults`` naming an unknown check, or a plugin check's unknown setting."""
+    problems = []
+    for check in settings.defaults:
+        definition = _definition(check, registry)
+        if definition is None:
+            problems.append(
+                f"defaults.{check}: unknown check {check!r}. Run 'qavf list-checks' to see "
+                "what is available (plugins must be installed)."
+            )
+        elif isinstance(definition, PluginDefinition):
+            known = {check: tuple(definition.item_fields())}
+            problems.extend(default_problems({check: settings.defaults[check]}, known))
+    return problems
 
 
 def item_names(compiled: Iterable[CompiledCheck]) -> dict[str, list[CompiledCheck]]:

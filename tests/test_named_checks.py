@@ -110,8 +110,7 @@ def test_dataset_requirements_cover_every_check_on_the_dataset() -> None:
         ),
         (
             _counts({"check": "change_rate", "series": "aadt_by_site"}),
-            "datasets.counts.checks[0].series: naming a series defined elsewhere arrives in a "
-            "later version of QAVF",
+            "datasets.counts.checks[0].series: unknown series 'aadt_by_site'",
         ),
         (
             _counts({"check": "outliers", "column": "aadt", "where": "year > 2000"}),

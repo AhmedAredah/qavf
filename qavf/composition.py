@@ -1,0 +1,252 @@
+"""Configuration reuse resolved before validation: ``include`` files and ``vars``.
+
+* ``include`` lists other YAML/JSON files, relative to the including file. They
+  merge first, in order; the including file wins on conflicting values. A
+  dataset defined twice, or an explicitly named top-level check repeated across
+  files, is an error rather than a silent override. Include cycles are errors.
+* ``vars`` holds named values; ``${vars.name}`` in any string value refers to
+  one. A value that is exactly a reference takes the variable's value (a list
+  stays a list); inside a longer string it is spelled out. An unknown variable
+  is an error.
+"""
+
+from __future__ import annotations
+
+import copy
+import re
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import Any
+
+INCLUDE_KEY = "include"
+VARS_KEY = "vars"
+
+_VAR_REFERENCE = re.compile(r"\$\{vars\.([^}]*)\}")
+_VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_UNIQUE_SECTIONS = ("datasets",)
+"""Top-level mappings whose entries may be defined in one file only."""
+_CONCATENATED_SECTIONS = ("checks",)
+"""Top-level lists that collect the entries of every file."""
+
+Parser = Callable[[str, Path], dict[str, Any]]
+"""Parses one file's text (without expanding references) as the content of a path."""
+
+
+class IncludeResolver:
+    """Merges the files a configuration includes into one mapping."""
+
+    def __init__(self, parse: Parser) -> None:
+        self._parse = parse
+
+    def resolve(self, raw: dict[str, Any], source: Path) -> dict[str, Any]:
+        """``raw`` (the content of ``source``) with its included files merged in."""
+        return self._resolve(raw, source, (source.resolve(),))
+
+    def _resolve(
+        self, raw: dict[str, Any], source: Path, chain: tuple[Path, ...]
+    ) -> dict[str, Any]:
+        entries = raw.pop(INCLUDE_KEY, None)
+        if entries is None:
+            return raw
+        if isinstance(entries, str):
+            entries = [entries]
+        if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
+            raise ValueError(f"{source}: include must be a file path or a list of paths")
+        merged: dict[str, Any] = {}
+        for entry in entries:
+            path = Path(entry)
+            target = (path if path.is_absolute() else source.parent / path).resolve()
+            if target in chain:
+                cycle = " -> ".join(str(step) for step in (*chain, target))
+                raise ValueError(f"include cycle: {cycle}")
+            try:
+                text = target.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(f"{source}: cannot include {entry!r}: {exc.strerror}") from None
+            included = self._resolve(self._parse(text, target), target, (*chain, target))
+            merged = ConfigMerge(str(target)).merge(merged, included)
+        return ConfigMerge(str(source)).merge(merged, raw)
+
+
+class ConfigMerge:
+    """Merges one file's configuration over what earlier files defined."""
+
+    def __init__(self, origin: str) -> None:
+        self.origin = origin
+        """The file whose content is merged in, for error messages."""
+
+    def merge(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        """``override`` merged over ``base``: the override wins on conflicting values."""
+        result = dict(base)
+        for key, value in override.items():
+            if key not in result:
+                result[key] = value
+            elif key in _UNIQUE_SECTIONS:
+                result[key] = self._unique(key, result[key], value)
+            elif key in _CONCATENATED_SECTIONS:
+                result[key] = self._concatenated(key, result[key], value)
+            else:
+                result[key] = _deep_merge(result[key], value)
+        return result
+
+    def _unique(self, section: str, base: Any, override: Any) -> Any:
+        if not isinstance(base, Mapping) or not isinstance(override, Mapping):
+            return override
+        repeated = sorted(set(base) & set(override), key=str)
+        if repeated:
+            raise ValueError(
+                f"{self.origin}: {section} {repeated[0]!r} is already defined by an included "
+                "file; each dataset is defined once"
+            )
+        return {**base, **override}
+
+    def _concatenated(self, section: str, base: Any, override: Any) -> Any:
+        if not isinstance(base, list) or not isinstance(override, list):
+            return override
+        named = {_item_name(item) for item in base} - {None}
+        for item in override:
+            name = _item_name(item)
+            if name is not None and name in named:
+                raise ValueError(
+                    f"{self.origin}: the {section} entry named {name!r} is already defined "
+                    "by an included file; give each check its own name"
+                )
+        return [*base, *override]
+
+
+def _item_name(item: Any) -> str | None:
+    name = item.get("name") if isinstance(item, Mapping) else None
+    return name if isinstance(name, str) else None
+
+
+def _deep_merge(base: Any, override: Any) -> Any:
+    if isinstance(base, Mapping) and isinstance(override, Mapping):
+        merged = dict(base)
+        for key, value in override.items():
+            merged[key] = _deep_merge(merged[key], value) if key in merged else value
+        return merged
+    return override
+
+
+class VariableSubstitution:
+    """Replaces ``${vars.name}`` references with the configuration's ``vars``.
+
+    Variables may refer to other variables; a cycle is an error. Shared parts
+    (YAML anchors) are substituted once and stay shared.
+    """
+
+    def __init__(self, variables: Any) -> None:
+        if variables is None:
+            variables = {}
+        if not isinstance(variables, Mapping):
+            raise ValueError("vars must be a mapping of names to values")
+        for name in variables:
+            if not isinstance(name, str) or not _VAR_NAME.fullmatch(name):
+                raise ValueError(f"vars: {name!r} is not a valid variable name")
+        self._raw = dict(variables)
+        self._resolved: dict[str, Any] = {}
+        self._resolving: list[str] = []
+        self._memo: dict[int, Any] = {}
+
+    @classmethod
+    def apply(cls, raw: dict[str, Any]) -> dict[str, Any]:
+        """``raw`` with every reference substituted (unchanged without references)."""
+        if VARS_KEY not in raw and not _mentions_vars(raw):
+            return raw
+        substitution = cls(raw.get(VARS_KEY))
+        result: dict[str, Any] = {}
+        for key, value in raw.items():
+            result[key] = (
+                {name: substitution.value(name) for name in substitution._raw}
+                if key == VARS_KEY
+                else substitution.substitute(value, key)
+            )
+        return result
+
+    def value(self, name: str) -> Any:
+        """The value of variable ``name``, its own references substituted."""
+        if name in self._resolved:
+            return self._resolved[name]
+        if name not in self._raw:
+            known = ", ".join(sorted(self._raw)) or "none are defined"
+            raise ValueError(f"unknown variable ${{vars.{name}}} (defined: {known})")
+        if name in self._resolving:
+            cycle = " -> ".join([*self._resolving[self._resolving.index(name) :], name])
+            raise ValueError(f"vars refer to each other in a cycle: {cycle}")
+        self._resolving.append(name)
+        try:
+            resolved = self.substitute(self._raw[name], f"vars.{name}")
+        finally:
+            self._resolving.pop()
+        self._resolved[name] = resolved
+        return resolved
+
+    def substitute(self, item: Any, path: str) -> Any:
+        """``item`` with every reference substituted; ``path`` locates errors."""
+        if isinstance(item, str):
+            return self._text(item, path)
+        if not isinstance(item, dict | list):
+            return item
+        identity = id(item)
+        if identity in self._memo:
+            return self._memo[identity]
+        if isinstance(item, dict):
+            result: Any = {
+                key: self.substitute(child, f"{path}.{key}") for key, child in item.items()
+            }
+        else:
+            result = [self.substitute(child, f"{path}[{i}]") for i, child in enumerate(item)]
+        self._memo[identity] = result
+        return result
+
+    def _text(self, text: str, path: str) -> Any:
+        whole = _VAR_REFERENCE.fullmatch(text)
+        if whole is not None:
+            return copy.deepcopy(self._named(whole.group(1), path))
+        return _VAR_REFERENCE.sub(self._spelled_out(path), text)
+
+    def _named(self, name: str, path: str) -> Any:
+        try:
+            return self.value(name)
+        except ValueError as exc:
+            raise ValueError(f"{path}: {exc}") from None
+
+    def _spelled_out(self, path: str) -> _SpelledOut:
+        return _SpelledOut(self, path)
+
+
+class _SpelledOut:
+    """Replaces one reference inside a longer string with the variable's text."""
+
+    def __init__(self, substitution: VariableSubstitution, path: str) -> None:
+        self.substitution = substitution
+        self.path = path
+
+    def __call__(self, match: re.Match[str]) -> str:
+        value = self.substitution._named(match.group(1), self.path)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, str | int | float):
+            return str(value)
+        raise ValueError(
+            f"{self.path}: ${{vars.{match.group(1)}}} holds a {type(value).__name__}; only "
+            "a value that is exactly the reference can take a list or mapping"
+        )
+
+
+def _mentions_vars(value: Any) -> bool:
+    """Whether any string in ``value`` refers to a variable (cheap pre-check)."""
+    stack = [value]
+    seen: set[int] = set()
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            if "${vars." in item:
+                return True
+        elif isinstance(item, dict | list) and id(item) not in seen:
+            seen.add(id(item))
+            stack.extend(item.values() if isinstance(item, dict) else item)
+    return False
+
+
+__all__ = ["INCLUDE_KEY", "VARS_KEY", "ConfigMerge", "IncludeResolver", "VariableSubstitution"]

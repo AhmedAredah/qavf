@@ -32,7 +32,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from pydantic.fields import FieldInfo
 
 from qavf.checks.items import CheckItem, ExpressionItem, SqlItem
-from qavf.checks.placement import CheckSettingError, Scope, expression_errors, sql_errors
+from qavf.checks.placement import (
+    BLOCK_SECTIONS,
+    CheckSettingError,
+    Scope,
+    expression_errors,
+    sql_errors,
+)
 from qavf.engine.registry import Rule
 from qavf.input_rules import INPUT_RULES
 from qavf.rules.comparison_checks import DatasetComparisonRule
@@ -329,16 +335,17 @@ class InlineCheck(CheckDefinition):
         settings = item.settings
         inline = settings.pop(self.inline_key, None)
         if isinstance(inline, str):
-            raise CheckSettingError(
-                self.inline_key,
-                f"naming a {self.inline_key} defined elsewhere {LATER_VERSION}; "
-                f"give the {self.inline_key} inline as a mapping",
-            )
+            inline = scope.resolve(self.inline_key, inline)
         if not isinstance(inline, Mapping):
             raise CheckSettingError(
-                self.inline_key, f"the {self.name} check needs a '{self.inline_key}' mapping"
+                self.inline_key,
+                f"the {self.name} check needs a '{self.inline_key}': the name of one the "
+                f"dataset defines, or a mapping",
             )
-        element = {self.inline_renames.get(key, key): value for key, value in inline.items()}
+        element: dict[str, Any] = {
+            self.inline_renames.get(str(key), str(key)): value for key, value in inline.items()
+        }
+        self.translate(element)
         if "dataset" in element:
             raise CheckSettingError(
                 f"{self.inline_key}.dataset", "the dataset is the one the check is placed on"
@@ -382,21 +389,77 @@ class InlineCheck(CheckDefinition):
                 if element.get(old) is not None:
                     promoted[new] = element.pop(old)
                 element.pop(old, None)
-            item[self.inline_key] = {
-                back_inline.get(key, key): value for key, value in element.items()
-            }
+            item[self.inline_key] = self.untranslate(
+                {str(back_inline.get(key, key)): value for key, value in element.items()}
+            )
             item |= rule_level | promoted
             items.append(Decompiled(dataset, item))
         return items
 
+    def translate(self, element: dict[str, Any]) -> None:
+        """Turn shorthand values of an inline mapping into rule element fields."""
+
+    def untranslate(self, inline: dict[str, Any]) -> dict[str, Any]:
+        """The shorthand form of an inline mapping recovered from rule parameters."""
+        return inline
+
+    def inline_fields(self) -> dict[str, FieldSpec]:
+        """The settings of the inline mapping, for the configuration JSON Schema."""
+        return _fields_of(self.element_model, self.inline_renames, ("dataset",))
+
     def item_fields(self) -> dict[str, FieldSpec]:
         inline = _inline_model(self)
         fields: dict[str, FieldSpec] = {
-            self.inline_key: (inline, Field(description=f"The {self.inline_key} examined."))
+            self.inline_key: (
+                inline | str,
+                Field(
+                    description=f"The {self.inline_key} examined: the name of one the dataset "
+                    f"defines under {BLOCK_SECTIONS[self.inline_key]} (``other.name`` for another "
+                    "dataset's), or the definition itself."
+                ),
+            )
         }
         element = self.element_model.model_fields
         fields |= {new: _field_copy(element[old]) for new, old in self.into_inline.items()}
         fields |= _fields_of(self.rule_cls.Params, self.rule_fields, (self.list_param,))
+        return fields
+
+
+class MetricCheck(InlineCheck):
+    """A spatial check: its ``metric`` may name its normalizer as ``per: dataset.column``."""
+
+    def __init__(self, rule_cls: type[Rule]) -> None:
+        super().__init__(
+            rule_cls,
+            inline_key="metric",
+            list_param="metrics",
+            inline_renames={"entity": "entity_column", "per": "normalize_by"},
+        )
+
+    def translate(self, element: dict[str, Any]) -> None:
+        per = element.get("normalize_by")
+        if isinstance(per, str):
+            dataset, _, column = per.rpartition(".")
+            if not dataset or not column:
+                raise CheckSettingError(
+                    "metric.per", f"write the normalizer as <dataset>.<column>, got {per!r}"
+                )
+            element["normalize_by"] = {"dataset": dataset, "value": column}
+
+    def untranslate(self, inline: dict[str, Any]) -> dict[str, Any]:
+        per = inline.get("per")
+        if isinstance(per, Mapping) and set(per) == {"dataset", "value"}:
+            inline["per"] = f"{per['dataset']}.{per['value']}"
+        return inline
+
+    def inline_fields(self) -> dict[str, FieldSpec]:
+        fields = super().inline_fields()
+        annotation, info = fields["per"]
+        info.description = (
+            "Normalizer: ``<dataset>.<column>`` (e.g. ``counts.aadt``), or a mapping with "
+            "``dataset``, ``value``, ``on`` and ``aggregate``."
+        )
+        fields["per"] = (annotation | str, info)
         return fields
 
 
@@ -850,12 +913,7 @@ def _definitions() -> Iterator[CheckDefinition]:
     yield ElementCheck(ConsistentBatchRule, "top", "batches", inject_dataset=False)
     yield ElementCheck(CoordinateRule, "dataset", "points")
     for rule_cls in (EntityOutlierRule, GroupComparisonRule):
-        yield InlineCheck(
-            rule_cls,
-            inline_key="metric",
-            list_param="metrics",
-            inline_renames={"entity": "entity_column"},
-        )
+        yield MetricCheck(rule_cls)
     yield WholeCheck(
         CoverageRule,
         "top",
@@ -946,7 +1004,7 @@ def _item_model(definition: CheckDefinition) -> type[BaseModel]:
 
 @functools.cache
 def _inline_model(definition: InlineCheck) -> type[BaseModel]:
-    fields = _fields_of(definition.element_model, definition.inline_renames, ("dataset",))
+    fields = definition.inline_fields()
     for name in definition.into_inline:
         fields.pop(name, None)
     for name in definition.into_inline.values():

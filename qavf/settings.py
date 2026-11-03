@@ -36,8 +36,8 @@ from qavf.checks.items import CheckItem, RunSettings
 from qavf.checks.legacy import reject_legacy
 from qavf.configuration import ConfigurationGraph
 from qavf.configuration import expand_env as expand_env
-from qavf.configuration import parse_config_text as _parse_config_text
 from qavf.configuration import read_config_mapping as _read_config_mapping
+from qavf.configuration import resolve_config_text as _resolve_config_text
 from qavf.engine.severity import Severity
 from qavf.number_grammar import AllowedValueDomain, NumberGrammar, Whitespace, converted_options
 from qavf.scalars import normalize_scalar, normalize_scalar_sequence
@@ -750,6 +750,24 @@ class SqlAssertion(_Strict):
     description: str | None = None
 
 
+class ViewSpec(_Strict):
+    """A named slice of a dataset, used as ``<dataset>.<view>`` wherever a check
+    names a dataset. It has the dataset's columns and types."""
+
+    where: str | None = None
+    """SQL condition selecting the view's rows (all rows when omitted)."""
+    columns: list[str] | None = Field(default=None, min_length=1)
+    """Columns the view keeps (all when omitted)."""
+    description: str | None = None
+
+    @field_validator("where")
+    @classmethod
+    def _valid_where(cls, condition: str | None) -> str | None:
+        if condition is not None:
+            _check_where(condition, "view condition")
+        return condition
+
+
 class SourcePolicy(_Strict):
     """Loading safeguards independent of the input's location or representation.
 
@@ -790,8 +808,18 @@ class DatasetSpec(_Strict):
     """Column renames applied after loading (``old: new``)."""
     schema_spec: SchemaSpec | None = Field(default=None, alias="schema")
     foreign_keys: list[ForeignKeySpec] = Field(default_factory=list)
+    series: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Named time series for temporal checks (``series: <name>``): ``value``,
+    ``time_column``, ``group_by``, ``aggregate`` and the other settings of an inline
+    series."""
+    metrics: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Named per-entity metrics for spatial checks (``metric: <name>``): ``value``,
+    ``entity``, ``group_by``, ``aggregate`` and ``per`` (normalizer, e.g. ``counts.aadt``)."""
+    views: dict[str, ViewSpec] = Field(default_factory=dict)
+    """Named slices of this dataset, usable as ``<dataset>.<view>`` wherever a check
+    names a dataset."""
     checks: list[CheckItem] = Field(default_factory=list)
-    """Checks of this dataset, e.g. ``{check: missing_periods, series: {...}}``.
+    """Checks of this dataset, e.g. ``{check: missing_periods, series: aadt_by_site}``.
     ``qavf list-checks`` lists the checks and their settings."""
 
     @property
@@ -1248,6 +1276,15 @@ class QAVFSettings(_Strict):
     """Root configuration object."""
 
     project: str = "QA run"
+    vars: dict[str, Any] = Field(default_factory=dict)
+    """Named values, used as ``${vars.<name>}`` in any value."""
+    include: list[str] = Field(default_factory=list)
+    """Other configuration files merged first, in order (paths relative to this file).
+    This file wins on conflicting values; a dataset or named check defined twice is
+    an error."""
+    defaults: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Default settings per check name, e.g. ``change_rate: {max: 0.15}``; an item's
+    own settings win."""
     datasets: dict[str, DatasetSpec] = Field(default_factory=dict)
     connections: dict[str, ConnectionSpec] = Field(default_factory=dict)
     secrets: dict[str, SecretSpec] = Field(default_factory=dict)
@@ -1271,7 +1308,17 @@ class QAVFSettings(_Strict):
     def _string_mapping_keys(cls, data: Any) -> Any:
         validate_config_mapping_keys(data)
         reject_legacy(data)
-        return data
+        if not isinstance(data, dict):
+            return data
+        from qavf.checks.reuse import ItemPreparation
+        from qavf.composition import VariableSubstitution
+
+        if data.get("include"):
+            raise ValueError(
+                "include is resolved when a configuration file is read (load_settings, "
+                "settings_from_text or a configuration path); merge mappings yourself"
+            )
+        return ItemPreparation.apply(VariableSubstitution.apply(data))
 
     @property
     def assertions(self) -> list[SqlAssertion]:
@@ -1322,11 +1369,28 @@ class QAVFSettings(_Strict):
                 unknown = set(attached) - self.connections.keys()
                 if unknown:
                     raise ValueError(f"dataset {name!r}: unknown connections {sorted(unknown)!r}")
-        if self.checks or self.run.require or any(spec.checks for spec in self.datasets.values()):
+        if (
+            self.checks
+            or self.run.require
+            or self.defaults
+            or any(spec.checks for spec in self.datasets.values())
+        ):
             problems = _check_errors(self)
             if problems:
                 raise ValueError("invalid checks: " + "; ".join(problems))
         return self
+
+    def views(self) -> dict[str, tuple[str, ViewSpec]]:
+        """Every dataset view as ``<dataset>.<view>`` -> (dataset, definition)."""
+        return {
+            f"{name}.{view}": (name, spec)
+            for name, dataset in self.datasets.items()
+            for view, spec in dataset.views.items()
+        }
+
+    def knows_dataset(self, name: str) -> bool:
+        """Whether ``name`` is a dataset or a view (``counts.recent``) of one."""
+        return name in self.datasets or name in self.views()
 
     @property
     def base_dir(self) -> Path:
@@ -1450,7 +1514,7 @@ def settings_from_text(text: str, path: str | Path) -> QAVFSettings:
     the same errors as :func:`load_settings`.
     """
     source = Path(path).resolve()
-    return _validated(_parse_config_text(text, source), source)
+    return _validated(_resolve_config_text(text, source), source)
 
 
 def _validated(raw: dict[str, Any], source: Path) -> QAVFSettings:

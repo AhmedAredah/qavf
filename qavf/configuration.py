@@ -147,7 +147,25 @@ def expand_env(value: Any, environ: Mapping[str, str] | None = None) -> Any:
 def read_config_mapping(path: str | Path) -> tuple[dict[str, Any], Path]:
     """Parse one configuration document before callers assemble inline contracts."""
     source = Path(path).resolve()
-    return parse_config_text(source.read_text(encoding="utf-8"), source), source
+    return resolve_config_text(source.read_text(encoding="utf-8"), source), source
+
+
+def resolve_config_text(text: str, source: Path) -> dict[str, Any]:
+    """Parse configuration text as the content of ``source`` and resolve its reuse.
+
+    Included files merge first (relative to ``source``), then ``${vars.name}``
+    and ``${ENV}`` references are substituted.
+    """
+    from qavf.composition import IncludeResolver, VariableSubstitution
+
+    raw = parse_config_text(text, source, expand=False)
+    merged = IncludeResolver(_parse_unexpanded).resolve(raw, source)
+    result: dict[str, Any] = expand_env(VariableSubstitution.apply(merged))
+    return result
+
+
+def _parse_unexpanded(text: str, source: Path) -> dict[str, Any]:
+    return parse_config_text(text, source, expand=False)
 
 
 def parse_config_text(text: str, source: Path, *, expand: bool = True) -> dict[str, Any]:
