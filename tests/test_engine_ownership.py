@@ -225,7 +225,8 @@ def test_native_retry_uses_same_source_policy(tmp_path):
 
     with DataContext(sources={"data": source}) as ctx, patch.object(module, "connect", connect):
         assert ctx.has("data")
-        assert len(calls) == 2
+        # One failed bind, then the retried bind and its read (reads use relations too).
+        assert len(calls) == 3
         assert ctx._catalog.sources["data"].load_notes["retries_used"] == 1
 
 

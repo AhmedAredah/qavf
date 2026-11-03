@@ -205,7 +205,8 @@ def test_native_and_eager_transient_retries_share_policy(tmp_path):
 
         with patch.object(ctx, "_connection", return_value=FlakyBinding()):
             assert ctx.has("d")
-        assert len(native_calls) == 2
+        # One failed bind, then the retried bind and its read (reads use relations too).
+        assert len(native_calls) == 3
         assert ctx._catalog.sources["d"].load_notes["retries_used"] == 1
     with DataContext(sources={"d": FileSource(params, SourceEnvironment())}) as ctx:
         source = ctx._catalog.sources["d"]
