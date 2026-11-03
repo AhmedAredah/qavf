@@ -31,6 +31,7 @@ from qavf.keys import cast_key
 from qavf.missingness import missing_rows
 from qavf.numeric import exact_rational, report_number
 from qavf.rules.helpers import fresh_internal, plural
+from qavf.typed_values import precise_frame
 
 if TYPE_CHECKING:
     from qavf.engine.context import DataContext
@@ -137,6 +138,30 @@ def pairs_frame(ctx: DataContext | None, crosswalk: Crosswalk) -> pl.DataFrame:
     )
 
 
+def _python_ids(frame: pl.DataFrame, *columns: str) -> pl.DataFrame:
+    """``columns`` of ``frame`` with temporal ids as their physical integers.
+
+    Python datetimes drop nanoseconds, so two distinct native ids could merge in a
+    Python dictionary; the physical integers keep every id distinct.
+    """
+    return frame.select(
+        pl.col(c).to_physical() if frame.schema[c].is_temporal() else pl.col(c) for c in columns
+    )
+
+
+def _native_ids(name: str, values: Sequence[Any], dtype: pl.DataType) -> pl.Series:
+    """Ids collected through :func:`_python_ids`, back in their native ``dtype``."""
+    if dtype.is_temporal():
+        physical = pl.Series(name, [], dtype=dtype).to_physical().dtype
+        return pl.Series(name, values, dtype=physical).cast(dtype)
+    return pl.Series(name, values, dtype=dtype)
+
+
+def _id_labels(values: Sequence[Any], dtype: pl.DataType) -> list[Any]:
+    """Display values of ids collected through :func:`_python_ids`."""
+    return precise_frame(_native_ids(SOURCE, values, dtype).to_frame()).to_series().to_list()
+
+
 def validate_crosswalk(frame: pl.DataFrame, tolerance: float, label: str) -> pl.DataFrame:
     """``frame`` (``from``, ``to``, ``weight``) once every split is proven to sum to 1.
 
@@ -153,15 +178,19 @@ def validate_crosswalk(frame: pl.DataFrame, tolerance: float, label: str) -> pl.
         raise ValueError(f"crosswalk {label!r}: {plural(bad, 'weight')} outside (0, 1]")
     # Exact sums of the binary weights, compared with the tolerance exactly.
     totals: dict[Any, Fraction] = {}
-    for source, value in frame.select(SOURCE, WEIGHT).iter_rows():
+    for source, value in _python_ids(frame, SOURCE, WEIGHT).iter_rows():
         totals[source] = totals.get(source, Fraction(0)) + Fraction(value)
     limit = Fraction(tolerance)
     off = sorted(
         ((source, total) for source, total in totals.items() if abs(total - 1) > limit),
-        key=lambda item: str(item[0]),
+        key=_by_text,
     )
     if off:
-        sample = ", ".join(f"{source!r}: {float(total):.12g}" for source, total in off[:5])
+        labels = _id_labels([source for source, _ in off[:5]], frame.schema[SOURCE])
+        sample = ", ".join(
+            f"{label!r}: {float(total):.12g}"
+            for label, (_, total) in zip(labels, off[:5], strict=True)
+        )
         raise ValueError(
             f"crosswalk {label!r}: the weights of {plural(len(off), 'zone')} do not sum to 1 "
             f"within {tolerance:g} ({sample})"
@@ -201,15 +230,15 @@ def compose(*frames: pl.DataFrame) -> pl.DataFrame:
         # This step's products, and sums over paths reaching one parent, are exact;
         # rounded once per step, so the next step starts from a Float64 crosswalk.
         weights: dict[tuple[Any, Any], Fraction] = {}
-        for source, parent, a, b in joined.select(
-            SOURCE, "next", WEIGHT, "next_weight"
+        for source, parent, a, b in _python_ids(
+            joined, SOURCE, "next", WEIGHT, "next_weight"
         ).iter_rows():
             pair = (source, parent)
             weights[pair] = weights.get(pair, Fraction(0)) + Fraction(a) * Fraction(b)
         chained = pl.DataFrame(
             {
-                SOURCE: pl.Series([p[0] for p in weights], dtype=joined.schema[SOURCE]),
-                TARGET: pl.Series([p[1] for p in weights], dtype=joined.schema["next"]),
+                SOURCE: _native_ids(SOURCE, [p[0] for p in weights], joined.schema[SOURCE]),
+                TARGET: _native_ids(TARGET, [p[1] for p in weights], joined.schema["next"]),
                 WEIGHT: pl.Series([float(w) for w in weights.values()], dtype=pl.Float64),
             }
         )
@@ -269,18 +298,26 @@ def aggregate_up(
             parents = narrow_integer(parents, column)
         return parents.sort(TARGET).rename({TARGET: zone})
     totals: dict[Any, list[Fraction | None]] = {}
-    for row in keyed.select(TARGET, WEIGHT, *values).iter_rows():
+    for row in _python_ids(keyed, TARGET, WEIGHT, *values).iter_rows():
         parent, weight, numbers = row[0], Fraction(row[1]), row[2:]
         sums = totals.setdefault(parent, [None] * len(values))
         for index, number in enumerate(numbers):
             exact = exact_rational(number)
             if exact is not None:
                 sums[index] = (sums[index] or Fraction(0)) + exact * weight
-    order = sorted(totals, key=lambda parent: (str(type(parent)), parent))
+    order = sorted(totals, key=_typed_order)
     columns = {
         column: pl.Series(
             column, [report_number(totals[p][index]) for p in order], dtype=pl.Float64
         )
         for index, column in enumerate(values)
     }
-    return pl.DataFrame({zone: pl.Series(zone, order, dtype=crosswalk.schema[TARGET]), **columns})
+    return pl.DataFrame({zone: _native_ids(zone, order, crosswalk.schema[TARGET]), **columns})
+
+
+def _by_text(item: tuple[Any, Fraction]) -> str:
+    return str(item[0])
+
+
+def _typed_order(parent: Any) -> tuple[str, Any]:
+    return str(type(parent)), parent

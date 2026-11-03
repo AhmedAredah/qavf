@@ -158,6 +158,9 @@ Reports written by earlier versions still load.
 - `derive` columns apply in mapping order, so a later one may use an earlier one;
   every level had been not assessed with a missing column. A reference to a
   column that does not exist is a configuration error before any row is read.
+- Crosswalks keep temporal zone ids exact: two `Datetime(ns)` ids 1 ns apart, or the
+  two instants of a DST fold, had merged in validation, `compose` and
+  `aggregate_up`, so a valid crosswalk was rejected as not summing to 1.
 
 ## [Unreleased]
 
