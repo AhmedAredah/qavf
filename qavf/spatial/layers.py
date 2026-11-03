@@ -29,6 +29,7 @@ import duckdb
 import polars as pl
 from pydantic import model_validator
 
+from qavf.config_paths import FilePath
 from qavf.duckdb_results import settle
 from qavf.engine.registry import RuleParams
 from qavf.missingness import missing_count
@@ -52,7 +53,7 @@ class ZoneLayer(RuleParams):
 
     dataset: str | None = None
     """A configured dataset holding the zones (an id and a WKB or WKT geometry column)."""
-    path: str | None = None
+    path: FilePath | None = None
     """A local GeoParquet, GeoJSON, shapefile or other ``ST_Read`` file (relative to the
     configuration)."""
     id: str = "zone"

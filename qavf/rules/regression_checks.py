@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 
+from qavf.config_paths import BaselinePath, SourceSpec
 from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
@@ -47,9 +48,9 @@ class BaselineSpec(RuleParams):
     dataset: str
     name: str | None = None
     """Optional unique comparison identity when a dataset has several baselines."""
-    path: str | None = None
+    path: BaselinePath | None = None
     """Baseline file; relative paths resolve against the configuration file."""
-    source: dict[str, Any] | None = None
+    source: SourceSpec | None = None
     """Any source specification instead of ``path``, e.g. a baseline database table."""
     keys: tuple[str, ...] = Field(min_length=1)
     rtol: float | None = Field(default=None, ge=0)

@@ -36,6 +36,7 @@ from pydantic import (
 from qavf.checks.items import CheckItem, RunSettings, dataset_item_id, top_level_item_id
 from qavf.checks.legacy import reject_legacy
 from qavf.checks.relations import RelationNamespace
+from qavf.config_paths import FilePath, PathRole, SourceSpec
 from qavf.configuration import ConfigurationGraph
 from qavf.configuration import expand_env as expand_env
 from qavf.configuration import read_config_mapping as _read_config_mapping
@@ -934,11 +935,11 @@ class SourcePolicy(_Strict):
 class DatasetSpec(_Strict):
     """Where a dataset comes from and what it must look like."""
 
-    path: str | None = None
+    path: FilePath | None = None
     """Shorthand for ``source: {type: file, path: ...}``."""
     format: Literal["csv", "parquet", "json", "ndjson", "excel"] | None = None
     """With ``path``: the file format, inferred from the suffix when omitted."""
-    source: dict[str, Any] | None = None
+    source: SourceSpec | None = None
     """Full source specification, e.g. ``{type: query, sql: ...}``. See ``qavf schema``."""
     load_policy: SourcePolicy = Field(default_factory=SourcePolicy)
     """Location-independent safeguards. Explicit values override policy fields
@@ -962,7 +963,7 @@ class DatasetSpec(_Strict):
     checks: list[CheckItem] = Field(default_factory=list)
     """Checks of this dataset, e.g. ``{check: missing_periods, series: aadt_by_site}``.
     ``qavf list-checks`` lists the checks and their settings."""
-    across: list[str] | dict[str, dict[str, Any] | list[str | int] | None] | None = None
+    across: list[str] | dict[str, SourceSpec | list[str | int] | None] | None = None
     """Copy this dataset across several sources: a list of connection names, a mapping
     of copy names to the source settings that differ (``connection``, ``path``,
     ``secret``, ``table``, ...), or ``{key: [values]}`` filling ``{key}`` in the
@@ -1157,7 +1158,7 @@ class ConnectionSpec(_Strict):
     """A database DuckDB attaches for ``database`` and ``query`` sources."""
 
     type: Literal["duckdb", "sqlite", "postgres", "mysql"]
-    path: str | None = None
+    path: FilePath | None = None
     """Database file for ``duckdb`` and ``sqlite``; relative to the configuration file."""
     uri: str | None = None
     """libpq/MySQL connection string for ``postgres`` and ``mysql``, e.g.
@@ -1407,7 +1408,7 @@ class PluginSettings(_Strict):
     """Importable packages whose modules are scanned for rules."""
     modules: list[str] = Field(default_factory=list)
     """Additional importable modules scanned for rules and sources."""
-    paths: list[Path] = Field(default_factory=list)
+    paths: list[Annotated[Path, PathRole.FILE]] = Field(default_factory=list)
     """Stand-alone ``.py`` files (or directories of them) scanned for rules."""
     entry_points: bool = True
     """Also load plugins advertised under the ``qavf.rules`` / ``qavf.sources`` groups.

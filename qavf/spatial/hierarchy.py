@@ -25,6 +25,7 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from qavf.aggregation import exact_sum_expr, narrow_integer
+from qavf.config_paths import FilePath
 from qavf.engine.registry import RuleParams
 from qavf.keys import cast_key
 from qavf.missingness import missing_rows
@@ -43,7 +44,7 @@ class Crosswalk(RuleParams):
 
     dataset: str | None = None
     """A configured dataset holding the pairs."""
-    path: str | None = None
+    path: FilePath | None = None
     """A local CSV or Parquet file holding the pairs."""
     pairs: tuple[tuple[Any, Any] | tuple[Any, Any, float], ...] | None = None
     """Inline ``[from, to]`` or ``[from, to, weight]`` pairs."""

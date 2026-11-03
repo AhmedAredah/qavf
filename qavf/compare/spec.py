@@ -11,10 +11,11 @@ from __future__ import annotations
 
 import math
 from collections import Counter
+from collections.abc import Mapping
 from decimal import Decimal
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
 from qavf.engine.registry import RuleParams
 from qavf.engine.severity import Severity
@@ -23,6 +24,9 @@ from qavf.inference.resampling import DEFAULT_MAX_WORK, DEFAULT_SEED
 from qavf.inference.results import Correction, DecisionPolicy
 from qavf.rules.regression_checks import ColumnTolerance
 from qavf.settings import DType, NumericBound
+
+if TYPE_CHECKING:
+    from qavf.plugins.registry import ComponentRegistry
 
 Side = Literal["baseline", "candidate"]
 SideSelection = Literal["baseline", "candidate", "both"]
@@ -134,6 +138,24 @@ class _Configured(RuleParams):
     def _selector(cls) -> str:
         raise NotImplementedError
 
+    @classmethod
+    def _registry(cls) -> ComponentRegistry[Any] | None:
+        """The registry of the components this entry selects; ``None`` if none has file paths."""
+        return None
+
+    @classmethod
+    def path_parts(cls, raw: Mapping[str, Any]) -> tuple[tuple[str | None, type[BaseModel]], ...]:
+        """The parameter model of a raw component entry, for :mod:`qavf.config_paths`."""
+        name = raw.get(cls._selector())
+        registry = cls._registry()
+        if not isinstance(name, str) or registry is None:
+            return ()
+        try:
+            params: type[BaseModel] = registry.get(name).Params
+        except KeyError:
+            return ()
+        return (("params", params),) if "params" in raw else ((None, params),)
+
 
 class StepConfig(_Configured):
     """A plugin (or built-in) alignment step: ``{step: name, ...its parameters}``."""
@@ -144,6 +166,12 @@ class StepConfig(_Configured):
     @classmethod
     def _selector(cls) -> str:
         return "step"
+
+    @classmethod
+    def _registry(cls) -> ComponentRegistry[Any]:
+        from qavf.compare.align import ALIGNMENT_STEPS
+
+        return ALIGNMENT_STEPS
 
     @model_validator(mode="after")
     def _known(self) -> StepConfig:
@@ -212,6 +240,12 @@ class LevelConfig(_Configured):
     @classmethod
     def _selector(cls) -> str:
         return "level"
+
+    @classmethod
+    def _registry(cls) -> ComponentRegistry[Any]:
+        from qavf.compare.levels import LEVELS
+
+        return LEVELS
 
     @model_validator(mode="after")
     def _known(self) -> LevelConfig:

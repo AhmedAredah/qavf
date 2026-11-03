@@ -8,7 +8,7 @@ implementations. Check-specific settings are kept as extra fields of
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -55,6 +55,19 @@ class CheckItem(BaseModel):
             if not tag or not tag.strip() or any(ch.isspace() for ch in tag):
                 raise ValueError(f"tag {tag!r} must be a single nonempty word")
         return tags
+
+    @classmethod
+    def path_parts(cls, raw: Mapping[str, Any]) -> tuple[tuple[str | None, type[BaseModel]], ...]:
+        """The model of a raw item's settings, for :mod:`qavf.config_paths`.
+
+        An item's settings are those of the check its ``check`` names; an unknown
+        check has no file-path settings known here.
+        """
+        from qavf.checks.catalog import CATALOG
+
+        name = raw.get("check")
+        definition = CATALOG.get(name) if isinstance(name, str) else None
+        return ((None, definition.item_model()),) if definition is not None else ()
 
     @property
     def settings(self) -> dict[str, Any]:

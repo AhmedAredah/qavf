@@ -23,6 +23,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from qavf.config_paths import ConfigPaths, PathRole
+
 INCLUDE_KEY = "include"
 VARS_KEY = "vars"
 
@@ -79,52 +81,35 @@ class IncludedPaths:
     """Rewrites the relative file paths of an included file for the root configuration.
 
     Paths resolve against the root configuration's directory once files merge, so a
-    relative ``path`` written in an included file is rewritten to the same file
+    relative file path written in an included file is rewritten to the same file
     relative to the root (absolute when no relative form exists, e.g. on another
     drive). Absolute paths, URLs and paths starting with a ``${...}`` reference are
     kept as written. SQL text is not rewritten: file paths inside queries stay
     relative to the root configuration.
-    """
 
-    SECTIONS = ("datasets", "connections", "checks", "plugins")
-    """Top-level sections whose ``path`` values (and plugin ``paths``) are file paths."""
+    Only the settings typed as file paths are rewritten (:mod:`qavf.config_paths`):
+    a dataset's ``path`` and its source's ``path``/``paths``, a connection's
+    database file, check settings such as a baseline ``path`` or a zone layer's
+    ``path``, and ``plugins.paths``. Column names, renames and other user data are
+    never rewritten, whatever their key.
+    """
 
     def __init__(self, directory: Path, root: Path) -> None:
         self.directory = directory
         self.root = root
-        self._memo: dict[int, Any] = {}
 
     def rebase(self, raw: dict[str, Any]) -> dict[str, Any]:
         """``raw`` (an included file's content) with its relative paths rebased."""
         if self.directory == self.root:
             return raw
-        return {
-            key: self._walk(value) if key in self.SECTIONS else value for key, value in raw.items()
-        }
+        from qavf.settings import QAVFSettings
 
-    def _walk(self, value: Any) -> Any:
-        if not isinstance(value, dict | list):
-            return value
-        identity = id(value)
-        if identity in self._memo:
-            return self._memo[identity]
-        result: Any
-        if isinstance(value, list):
-            result = [self._walk(item) for item in value]
-        else:
-            result = {
-                key: self._paths(child) if key in ("path", "paths") else self._walk(child)
-                for key, child in value.items()
-            }
-        self._memo[identity] = result
-        return result
+        rebased: dict[str, Any] = ConfigPaths(self.visit).model(raw, QAVFSettings)
+        return rebased
 
-    def _paths(self, value: Any) -> Any:
-        if isinstance(value, str):
-            return self.path(value)
-        if isinstance(value, list) and all(isinstance(item, str) for item in value):
-            return [self.path(item) for item in value]
-        return self._walk(value)
+    def visit(self, value: str, role: PathRole) -> str:
+        """A :data:`~qavf.config_paths.PathVisitor` rebasing each path."""
+        return self.path(value)
 
     def path(self, value: str) -> str:
         """``value`` relative to the root directory, when it is a relative file path."""

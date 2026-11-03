@@ -111,3 +111,78 @@ def test_validation_reads_data_next_to_the_included_file(tmp_path: Path, backend
     report = validate(config=config, backend=backend)
     assert report.verdict() == "passed"
     assert {d.name for d in report.metadata.datasets} == {"rows"}
+
+
+USER_DATA = """
+datasets:
+  roads:
+    path: roads.csv
+    rename: {path: route}
+    schema:
+      columns:
+        route: {dtype: str, isin: [a, b]}
+        paths: {dtype: int}
+    series:
+      by_route: {value: paths, time_column: paths, group_by: [route]}
+    views:
+      some: {where: "route <> 'path'"}
+    checks:
+      - {check: expression, expr: "paths >= 0", where: "route = 'path'"}
+extensions:
+  custom: {path: not/a/file, paths: [also, not]}
+"""
+
+
+def test_user_data_named_path_is_not_rebased(tmp_path: Path) -> None:
+    _write(tmp_path / "modules" / "child.yaml", USER_DATA)
+    settings = load_settings(_write(tmp_path / "qa.yaml", "include: [modules/child.yaml]\n"))
+    roads = settings.datasets["roads"]
+    assert roads.path == "modules/roads.csv"
+    assert roads.rename == {"path": "route"}
+    assert roads.series["by_route"]["value"] == "paths"
+    assert roads.views["some"].where == "route <> 'path'"
+    assert settings.extensions["custom"] == {"path": "not/a/file", "paths": ["also", "not"]}
+
+
+def test_only_typed_file_fields_are_rebased() -> None:
+    raw = {
+        "datasets": {
+            "a": {
+                "source": {"type": "file", "paths": ["x.csv", "y.csv"]},
+                "rename": {"path": "p", "paths": "ps"},
+                "across": {"east": {"path": "east.csv"}, "west": {"path": "west.csv"}},
+            }
+        },
+        "checks": [
+            {"check": "matches_baseline", "dataset": "a", "path": "base.csv", "keys": ["id"]},
+            {"check": "sql", "sql": "SELECT 1 WHERE 'path' = 'x'", "name": "path"},
+            {"check": "unknown_plugin_check", "path": "kept.csv"},
+        ],
+    }
+    rebased = IncludedPaths(Path("/root/mod"), Path("/root")).rebase(raw)
+    dataset = rebased["datasets"]["a"]
+    assert dataset["source"]["paths"] == ["mod/x.csv", "mod/y.csv"]
+    assert dataset["rename"] == {"path": "p", "paths": "ps"}
+    assert dataset["across"] == {"east": {"path": "mod/east.csv"}, "west": {"path": "mod/west.csv"}}
+    assert rebased["checks"][0]["path"] == "mod/base.csv"
+    assert rebased["checks"][1] == raw["checks"][1]
+    assert rebased["checks"][2] == {"check": "unknown_plugin_check", "path": "kept.csv"}
+
+
+@pytest.mark.parametrize("backend", ["duckdb", "polars"])
+def test_included_and_inline_contracts_agree_on_a_column_named_path(
+    tmp_path: Path, backend: str
+) -> None:
+    contract = (
+        "datasets:\n  roads:\n    path: roads.csv\n    rename: {path: route}\n"
+        "    schema: {columns: {route: {dtype: str, isin: [a, b]}, id: {dtype: int}}}\n"
+    )
+    _write(tmp_path / "modules" / "roads.csv", "path,id\na,1\nb,2\n")
+    _write(tmp_path / "modules" / "child.yaml", contract)
+    included = validate(
+        config=_write(tmp_path / "qa.yaml", "include: [modules/child.yaml]\n"), backend=backend
+    )
+    inline_config = _write(tmp_path / "modules" / "inline.yaml", contract)
+    inline = validate(config=inline_config, backend=backend)
+    assert included.verdict() == inline.verdict() == "passed"
+    assert [r.status for r in included.results] == [r.status for r in inline.results]
