@@ -211,18 +211,24 @@ def test_success_does_not_leave_an_ordinary_descendant_running(tmp_path):
     assert (tmp_path / "observed/descendant.json").exists()
 
 
+OS_LIMIT_DEADLINE_S = 20
+"""Wall-clock limit of the OS-limit probes, well above the CPU allowance it must not replace."""
+
+
 @pytest.mark.parametrize(
     ("mode", "resources"),
     [
         ("memory", {"address_space": "2GiB"}),
-        ("cpu", {"cpu_time": 2}),
+        # Worker startup (interpreter, Polars and DuckDB imports) spends CPU time from
+        # the same allowance, more on a loaded machine; leave it room to reach the probe.
+        ("cpu", {"cpu_time": 4}),
         ("file", {"file_size": "32KiB"}),
     ],
 )
 def test_os_limits_reject_real_excess_without_modifying_parent_limits(tmp_path, mode, resources):
     if not _supported_or_rejected():
         return
-    record, report = _probe(tmp_path, mode, wall_time=12, **resources)
+    record, report = _probe(tmp_path, mode, wall_time=OS_LIMIT_DEADLINE_S, **resources)
     if UNENFORCEABLE & resources.keys():
         assert record["outcome"] == "error", record
         assert record["error_type"] == "ExecutionLimitError"
@@ -234,7 +240,9 @@ def test_os_limits_reject_real_excess_without_modifying_parent_limits(tmp_path, 
     if mode == "file":
         assert (tmp_path / "observed/oversized.bin").stat().st_size <= 32 << 10
     if mode == "cpu":
-        assert record["elapsed"] < 10, "the wall deadline substituted for the CPU allowance"
+        assert record["elapsed"] < OS_LIMIT_DEADLINE_S - 4, (
+            "the wall deadline substituted for the CPU allowance"
+        )
 
 
 def test_abrupt_worker_exit_never_returns_a_partial_report(tmp_path):
