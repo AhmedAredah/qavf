@@ -217,7 +217,7 @@ TODAY: dict[str, tuple[str, dict[str, Any]]] = {
 
 def _comparable(result: Any) -> dict[str, Any]:
     row = json.loads(result.model_dump_json())
-    for field in (*_VOLATILE, "item_name", "check_name", "tags", "description"):
+    for field in (*_VOLATILE, "item_name", "item_ids", "check_name", "tags", "description"):
         row.pop(field, None)
     return row
 

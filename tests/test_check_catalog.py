@@ -225,7 +225,14 @@ CASES: list[tuple[dict[str, Any], str | None, str, dict[str, Any]]] = [
     ),
 ]
 
-IDENTITY_FIELDS = {"check_name", "item_name", "execution_time_s", "load_time_s", "description"}
+IDENTITY_FIELDS = {
+    "check_name",
+    "item_name",
+    "item_ids",
+    "execution_time_s",
+    "load_time_s",
+    "description",
+}
 
 
 def _frames() -> dict[str, pl.DataFrame]:
@@ -356,4 +363,10 @@ def test_expression_and_sql_items_compile_to_the_old_models(tmp_path: Path) -> N
         ExpressionCheck(expr="aadt >= 0", name="positive"),
         ExpressionCheck(expr="share <= 1", null_as="fail"),
     ]
-    assert settings.assertions == [SqlAssertion(name="none", sql="SELECT 1 WHERE false")]
+    assert settings.assertions == [
+        SqlAssertion(name="none", sql="SELECT 1 WHERE false", item_id="checks[0]")
+    ]
+    assert [check.item_id for check in settings.datasets["counts"].expressions_of("counts")] == [
+        "datasets.counts.checks[0]",
+        "datasets.counts.checks[1]",
+    ]

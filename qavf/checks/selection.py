@@ -13,9 +13,9 @@ native DuckDB backend can apply a selection.
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from qavf.checks.across import ALL_COPIES, COPY_SEPARATOR, expand_dataset_names
 from qavf.checks.placement import ROW_CHECKS, PlacedItem, placed_items
@@ -217,35 +217,31 @@ def narrow(
     return copied
 
 
-def item_tags(settings: QAVFSettings) -> dict[tuple[str | None, str], tuple[str, ...]]:
-    """The explicit tags of every item, by (dataset placed on or ``None``, item name)."""
-    return {
-        (placed.scope.dataset, placed.name): tuple(placed.item.tags)
-        for placed in placed_items(settings)
-        if placed.item.tags
-    }
+class ItemTags:
+    """The explicit tags of every check item, by instance id (never by name, which
+    two items may share)."""
 
+    def __init__(self, settings: QAVFSettings) -> None:
+        self.tags = {
+            placed.path: tuple(placed.item.tags)
+            for placed in placed_items(settings)
+            if placed.item.tags
+        }
 
-def row_item_key(check_id: str, item_name: str | None, datasets: Iterable[str]) -> Any:
-    """The :func:`item_tags` key of an ``expression``/``sql`` result, if it is one."""
-    if item_name is None:
-        return None
-    if check_id == "row.expression":
-        first = next(iter(datasets), None)
-        return (first, item_name) if first is not None else None
-    if check_id == "sql.assertion":
-        return (None, item_name)
-    return None
+    def of(self, item_ids: Sequence[str]) -> list[str]:
+        """The tags of the one item ``item_ids`` names; none for a summary of several."""
+        if len(item_ids) != 1:
+            return []
+        return list(self.tags.get(item_ids[0], ()))
 
 
 __all__ = [
     "CONTRACT_TAG",
     "NOT_SELECTED",
     "AppliedSelection",
+    "ItemTags",
     "Selection",
     "SelectionError",
     "builtin_families",
-    "item_tags",
     "narrow",
-    "row_item_key",
 ]

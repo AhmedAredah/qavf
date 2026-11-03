@@ -27,7 +27,7 @@ from qavf._version import __version__
 from qavf.audit_codec import EVIDENCE_OMITTED, canonical_digest
 from qavf.audit_codec import bounded_diagnostic as _bounded_diagnostic
 from qavf.checks.requirements import Requirements, RuleDescription
-from qavf.checks.selection import item_tags, row_item_key
+from qavf.checks.selection import ItemTags
 from qavf.engine.compilation import (
     ConfigurationError as ConfigurationError,
 )
@@ -144,7 +144,7 @@ class QARunner:
                 "isolated execution requires configured plugins, not live rule/source registries"
             )
         self._registry = registry
-        self._tag_index: dict[tuple[str | None, str], tuple[str, ...]] | None = None
+        self._tag_index: ItemTags | None = None
         self._sources = sources
         if self.settings.engine.execution_mode != "isolated":
             self._registry = self.registry  # Preserve eager in-process discovery.
@@ -919,14 +919,11 @@ class QARunner:
         """The explicit tags of the check item a result reports on."""
         if rule.binding is not None:
             return list(rule.binding.tags)
-        if finding is None or not finding.check_id:
-            return []
-        key = row_item_key(finding.check_id, rule.item_name(finding), finding.datasets)
-        if key is None:
+        if rule.item_name(finding) is None:
             return []
         if self._tag_index is None:
-            self._tag_index = item_tags(self.settings)
-        return list(self._tag_index.get(key, ()))
+            self._tag_index = ItemTags(self.settings)
+        return self._tag_index.of(rule.item_ids(finding))
 
     def _result(
         self,
@@ -1009,6 +1006,7 @@ class QARunner:
             check=finding.check if finding else None,
             check_name=rule.check_name,
             item_name=rule.item_name(finding),
+            item_ids=list(rule.item_ids(finding)),
             tags=self._tags(rule, finding),
             group=finding.group if finding is not None and finding.group else rule.group_role(),
             check_id=finding.check_id if finding and finding.check_id else rule.rule_id,

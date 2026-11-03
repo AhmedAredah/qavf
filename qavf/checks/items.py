@@ -136,6 +136,22 @@ class RunSettings(BaseModel):
         return {tag: str(policy.fail_on) for tag, policy in self.tags.items()}
 
 
+def dataset_item_id(dataset: str, index: int) -> str:
+    """The instance id of the ``index``-th item in a dataset's ``checks`` list.
+
+    Ids are item locations (``datasets.counts.checks[2]``; an ``across`` copy's
+    items are located on the copy, ``datasets.counts@a.checks[0]``). They are
+    unique within a configuration, unlike names, and identify an item's results,
+    tags and requirements.
+    """
+    return f"datasets.{dataset}.checks[{index}]"
+
+
+def top_level_item_id(index: int) -> str:
+    """The instance id of the ``index``-th item in the top-level ``checks`` list."""
+    return f"checks[{index}]"
+
+
 def checks_union(models: Sequence[type[BaseModel]]) -> Any:
     """The type of a ``checks`` list entry: one of ``models``, chosen by ``check``.
 
@@ -154,4 +170,6 @@ __all__ = [
     "SqlItem",
     "TagPolicy",
     "checks_union",
+    "dataset_item_id",
+    "top_level_item_id",
 ]

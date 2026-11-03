@@ -6,13 +6,13 @@ backend validates ``expression`` and ``sql`` items with it.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from qavf.checks.items import CheckItem
+from qavf.checks.items import CheckItem, dataset_item_id, top_level_item_id
 from qavf.checks.reuse import default_problems
 
 if TYPE_CHECKING:
@@ -118,6 +118,7 @@ class PlacedItem:
 
     @property
     def path(self) -> str:
+        """The item's location, which is also its instance id."""
         return self.scope.path
 
     @property
@@ -146,9 +147,9 @@ def placed_items(settings: QAVFSettings) -> Iterator[PlacedItem]:
     blocks = NamedBlocks.of(settings)
     for dataset, spec in settings.datasets.items():
         for index, item in enumerate(spec.checks):
-            yield PlacedItem(item, Scope(f"datasets.{dataset}.checks[{index}]", dataset, blocks))
+            yield PlacedItem(item, Scope(dataset_item_id(dataset, index), dataset, blocks))
     for index, item in enumerate(settings.checks):
-        yield PlacedItem(item, Scope(f"checks[{index}]", None, blocks))
+        yield PlacedItem(item, Scope(top_level_item_id(index), None, blocks))
 
 
 def _location(loc: tuple[Any, ...]) -> str:
@@ -201,18 +202,43 @@ ROW_CHECK_SETTINGS: dict[str, tuple[str, ...]] = {
 """The own settings of the ``expression`` and ``sql`` checks."""
 
 
-def name_errors(settings: QAVFSettings) -> list[str]:
-    """Explicit item names repeated within one list, and unmatched ``run.require``."""
+def list_name_errors(items: Iterable[PlacedItem]) -> list[str]:
+    """Explicit names in one ``checks`` list that repeat another item's name or
+    default name. Unnamed items may share a default name: results are told apart
+    by instance id."""
+    placed = list(items)
+    defaults = {item.name: item.path for item in reversed(placed) if item.item.name is None}
     problems = []
-    seen: dict[str | None, set[str]] = {}
-    for placed in placed_items(settings):
-        name = placed.item.name
+    named: set[str] = set()
+    for item in placed:
+        name = item.item.name
         if name is None:
             continue
-        names = seen.setdefault(placed.scope.dataset, set())
-        if name in names:
-            problems.append(f"{placed.scope.at('name')}: {name!r} is already used in this list")
-        names.add(name)
+        if name in named:
+            problems.append(f"{item.scope.at('name')}: {name!r} is already used in this list")
+        elif name in defaults:
+            problems.append(
+                f"{item.scope.at('name')}: {name!r} is the default name of {defaults[name]}; "
+                "give one of them another name"
+            )
+        named.add(name)
+    return problems
+
+
+def name_errors(settings: QAVFSettings) -> list[str]:
+    """Item names repeated within one list, item names that are dataset names, and
+    unmatched ``run.require``."""
+    problems = []
+    lists: dict[str | None, list[PlacedItem]] = {}
+    for placed in placed_items(settings):
+        lists.setdefault(placed.scope.dataset, []).append(placed)
+        if placed.item.name is not None and placed.item.name in settings.datasets:
+            problems.append(
+                f"{placed.scope.at('name')}: {placed.item.name!r} is the name of a dataset; "
+                "a check needs a name of its own so run.require and --only are unambiguous"
+            )
+    for items in lists.values():
+        problems.extend(list_name_errors(items))
     blocks = NamedBlocks.of(settings)
     known = {placed.name for placed in placed_items(settings)} | set(settings.datasets)
     problems.extend(
@@ -250,6 +276,7 @@ __all__ = [
     "PlacedItem",
     "Scope",
     "expression_errors",
+    "list_name_errors",
     "name_errors",
     "placed_items",
     "related_datasets",

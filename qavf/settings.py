@@ -33,7 +33,7 @@ from pydantic import (
     model_validator,
 )
 
-from qavf.checks.items import CheckItem, RunSettings
+from qavf.checks.items import CheckItem, RunSettings, dataset_item_id, top_level_item_id
 from qavf.checks.legacy import reject_legacy
 from qavf.configuration import ConfigurationGraph
 from qavf.configuration import expand_env as expand_env
@@ -870,6 +870,8 @@ class ExpressionCheck(_Strict):
     description: str | None = None
     null_as: Literal["pass", "fail"] = "pass"
     """How a row whose expression evaluates to NULL counts (SQL CHECK semantics: pass)."""
+    item_id: str | None = Field(default=None, exclude=True)
+    """The check item's instance id (``datasets.<d>.checks[<i>]``); not a parameter."""
 
 
 class SqlAssertion(_Strict):
@@ -884,6 +886,8 @@ class SqlAssertion(_Strict):
     sql: str
     severity: Severity | None = None
     description: str | None = None
+    item_id: str | None = Field(default=None, exclude=True)
+    """The check item's instance id (``checks[<i>]``); not a parameter."""
 
 
 class ViewSpec(_Strict):
@@ -979,6 +983,14 @@ class DatasetSpec(_Strict):
         return [
             expression_check(item)
             for item in self.checks
+            if item.check == "expression" and item.enabled
+        ]
+
+    def expressions_of(self, dataset: str) -> list[ExpressionCheck]:
+        """:attr:`expressions`, each with its instance id as this spec's ``dataset``."""
+        return [
+            expression_check(item, dataset_item_id(dataset, index))
+            for index, item in enumerate(self.checks)
             if item.check == "expression" and item.enabled
         ]
 
@@ -1271,8 +1283,9 @@ class SecretSpec(_Strict):
 
 
 # --------------------------------------------------------------------- engine
-def expression_check(item: CheckItem) -> ExpressionCheck:
-    """The row expression of an ``expression`` check item.
+def expression_check(item: CheckItem, item_id: str | None = None) -> ExpressionCheck:
+    """The row expression of an ``expression`` check item (with ``item_id``, its
+    instance id).
 
     A ``where`` condition limits the rows assessed: rows it does not select pass.
     """
@@ -1286,16 +1299,18 @@ def expression_check(item: CheckItem) -> ExpressionCheck:
         severity=item.severity,
         description=item.description,
         null_as=settings.get("null_as", "pass"),
+        item_id=item_id,
     )
 
 
-def sql_assertion(item: CheckItem) -> SqlAssertion:
-    """The query of a top-level ``sql`` check item."""
+def sql_assertion(item: CheckItem, item_id: str | None = None) -> SqlAssertion:
+    """The query of a top-level ``sql`` check item (with ``item_id``, its instance id)."""
     return SqlAssertion(
         name=item.name or "",
         sql=item.settings.get("sql"),
         severity=item.severity,
         description=item.description,
+        item_id=item_id,
     )
 
 
@@ -1477,7 +1492,11 @@ class QAVFSettings(_Strict):
     @property
     def assertions(self) -> list[SqlAssertion]:
         """The enabled top-level ``sql`` checks, as the queries INP-007 evaluates."""
-        return [sql_assertion(item) for item in self.checks if item.check == "sql" and item.enabled]
+        return [
+            sql_assertion(item, top_level_item_id(index))
+            for index, item in enumerate(self.checks)
+            if item.check == "sql" and item.enabled
+        ]
 
     @model_validator(mode="after")
     def _references_resolve(self) -> QAVFSettings:

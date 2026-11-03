@@ -1,10 +1,12 @@
 """``run.require``: checks that must actually be assessed, for either backend.
 
-An entry names a check item (its ``name``, or the default ``<check> on
+An entry names check items (their ``name``, or the default ``<check> on
 <dataset>``) or a dataset, which stands for every check on that dataset and its
-schema contracts. A requirement is met when every result for it was assessed
-(PASS or FAIL) and none could not be assessed; otherwise the run gains an
-ERROR result explaining why.
+schema contracts. Results are matched to items by instance id, never by name,
+and every item an entry names must be assessed: a requirement is met when each
+of them produced a PASS or FAIL and none could not be assessed; otherwise the run
+gains an ERROR result explaining why. Items a run-time selection leaves out are
+not required.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from qavf.checks.items import CheckItem
+from qavf.checks.placement import placed_items
 from qavf.engine.severity import Severity, Status
 from qavf.input_rules import INPUT_RULES, required_not_assessed
 from qavf.reports.models import RuleResult
@@ -51,32 +53,24 @@ def input_rule_description(rule_id: str) -> RuleDescription:
 
 @dataclass(frozen=True, slots=True)
 class _Item:
+    item_id: str
+    """The item's instance id (its location), which its results carry."""
     name: str
     check: str
     datasets: tuple[str, ...]
     enabled: bool
-    passed_label: str | None
-    """How a passing ``expression``/``sql`` item is listed in its rule's summary."""
 
 
 def _items(settings: QAVFSettings) -> list[_Item]:
-    items: list[_Item] = []
-    for dataset, spec in settings.datasets.items():
-        items.extend(_item(item, (dataset,)) for item in spec.checks)
-    for item in settings.checks:
-        named = item.settings.get("datasets")
-        datasets = tuple(named) if isinstance(named, list | tuple) else ()
-        items.append(_item(item, datasets))
-    return items
-
-
-def _item(item: CheckItem, datasets: tuple[str, ...]) -> _Item:
-    label = None
-    if item.check == "expression" and datasets:
-        label = f"{datasets[0]}: {item.name or item.settings.get('expr')}"
-    elif item.check == "sql":
-        label = item.name
-    return _Item(item.effective_name(datasets), item.check, datasets, item.enabled, label)
+    """Every check item, except those a run-time selection left out: a selection
+    narrows the requirements to the items it runs."""
+    applied = settings.selection
+    left_out = applied.not_selected if applied is not None else frozenset()
+    return [
+        _Item(placed.path, placed.name, placed.item.check, placed.datasets, placed.item.enabled)
+        for placed in placed_items(settings)
+        if placed.path not in left_out
+    ]
 
 
 class Requirements:
@@ -105,30 +99,35 @@ class Requirements:
         return [*results, *added]
 
     def _unmet(self, entry: str, results: Sequence[RuleResult]) -> str | None:
+        """Why ``entry`` is not met, or ``None``. A name stands for every item that
+        has it, and each of them must be assessed."""
         named = [item for item in self.items if item.name == entry]
         if named:
-            if not any(item.enabled for item in named):
-                return "the check is disabled in the configuration"
-            labels = {item.passed_label for item in named} - {None}
-            matching = [
-                r
-                for r in results
-                if r.item_name == entry or labels & set(r.metrics.get("passed_checks") or ())
-            ]
-            return _assessed(matching)
+            return self._unmet_items(named, results)
         if entry in self.settings.datasets:
-            disabled = [
-                item.name for item in self.items if entry in item.datasets and not item.enabled
-            ]
+            on_it = [item for item in self.items if entry in item.datasets]
+            disabled = [item.name for item in on_it if not item.enabled]
             if disabled:
                 return f"check {disabled[0]!r} on it is disabled in the configuration"
-            for name in dict.fromkeys(item.name for item in self.items if entry in item.datasets):
-                reason = self._unmet(name, results)
+            for name in dict.fromkeys(item.name for item in on_it):
+                reason = self._unmet_items([i for i in on_it if i.name == name], results)
                 if reason is not None:
                     return f"check {name!r} on it: {reason}"
             blocked = [r for r in results if entry in r.datasets and r.status is Status.ERROR]
             return "it could not be assessed" if blocked else None
         return "no check or dataset has this name"
+
+    @staticmethod
+    def _unmet_items(items: Sequence[_Item], results: Sequence[RuleResult]) -> str | None:
+        """Why one of ``items`` is not assessed (naming it when there are several)."""
+        for item in items:
+            if not item.enabled:
+                reason: str | None = "the check is disabled in the configuration"
+            else:
+                reason = _assessed([r for r in results if item.item_id in r.item_ids])
+            if reason is not None:
+                return f"its item {item.item_id}: {reason}" if len(items) > 1 else reason
+        return None
 
     def _result(self, entry: str, reason: str) -> RuleResult:
         item = next((item for item in self.items if item.name == entry), None)
@@ -142,6 +141,7 @@ class Requirements:
             check=f"required: {entry}",
             check_name=item.check if item else None,
             item_name=entry if item else None,
+            item_ids=[named.item_id for named in self.items if named.name == entry],
             status=Status.ERROR,
             severity=max(description.default_severity, Severity.ERROR),
             message=required_not_assessed(entry, reason),

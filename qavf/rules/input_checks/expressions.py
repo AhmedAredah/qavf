@@ -31,9 +31,7 @@ from qavf.rules.helpers import (
     outcome,
     present,
 )
-from qavf.settings import (
-    QAVFSettings,
-)
+from qavf.settings import ExpressionCheck, QAVFSettings, SqlAssertion
 from qavf.sources.sql import quote_identifier
 
 from ._datasets import (
@@ -71,6 +69,7 @@ class ExpressionRule(_SelectsDatasets):
         failures: list[Finding] = []
         passed: list[str] = []
         identities: list[dict[str, Any]] = []
+        passed_ids: list[str] = []
         known_unavailable = ctx.unavailable()
         for dataset, spec in ctx.specs.items():
             selection = self.params.datasets
@@ -88,9 +87,10 @@ class ExpressionRule(_SelectsDatasets):
                             ),
                             check=f"{dataset}: {expression.name or expression.expr}",
                             severity=expression.severity,
+                            item_ids=_ids(expression),
                             **_expression_identity(dataset, expression),
                         )
-                        for expression in spec.expressions
+                        for expression in spec.expressions_of(dataset)
                     ]
                 continue
             with contextlib.ExitStack() as stack:
@@ -107,15 +107,19 @@ class ExpressionRule(_SelectsDatasets):
                             ),
                             check=f"{dataset}: {expression.name or expression.expr}",
                             severity=expression.severity,
+                            item_ids=_ids(expression),
                             **_expression_identity(dataset, expression),
                         )
-                        for expression in spec.expressions
+                        for expression in spec.expressions_of(dataset)
                     )
                     continue
-                found, successful, assessed = self._evaluate_observed(ctx, dataset, rows, observed)
+                found, successful, assessed, ids = self._evaluate_observed(
+                    ctx, dataset, rows, observed
+                )
                 failures.extend(found)
                 passed.extend(successful)
                 identities.extend(assessed)
+                passed_ids.extend(ids)
         return outcome(
             failures,
             passed,
@@ -123,18 +127,21 @@ class ExpressionRule(_SelectsDatasets):
             INPUT_RULES[self.rule_id].unconfigured,
             check_id="row.expression.summary",
             checks=tuple(identities),
+            item_ids=tuple(passed_ids),
         )
 
     @staticmethod
     def _evaluate_observed(
         ctx: DataContext, dataset: str, rows: int, observed: Observation
-    ) -> tuple[list[Finding], list[str], list[dict[str, Any]]]:
+    ) -> tuple[list[Finding], list[str], list[dict[str, Any]], list[str]]:
+        """Failures, then the labels, identities and instance ids of the passes."""
         failures: list[Finding] = []
         passed: list[str] = []
         identities: list[dict[str, Any]] = []
+        passed_ids: list[str] = []
         table = quote_identifier(dataset)
         located = ViolatingRows(ctx, dataset, observed)
-        for expression in ctx.specs[dataset].expressions:
+        for expression in ctx.specs[dataset].expressions_of(dataset):
             identity = _expression_identity(dataset, expression)
             label = expression.name or expression.expr
             fallback = "true" if expression.null_as == "pass" else "false"
@@ -152,6 +159,7 @@ class ExpressionRule(_SelectsDatasets):
                         expression_not_evaluated(label, dataset, _reason(exc)),
                         check=f"{dataset}: {label}",
                         severity=expression.severity,
+                        item_ids=_ids(expression),
                         **identity,
                     )
                 )
@@ -159,6 +167,7 @@ class ExpressionRule(_SelectsDatasets):
             if not count:
                 passed.append(f"{dataset}: {label}")
                 identities.append(identity)
+                passed_ids.extend(_ids(expression))
                 continue
             bad = located.sample(condition, bad)
             failures.append(
@@ -170,10 +179,16 @@ class ExpressionRule(_SelectsDatasets):
                     affected_count=count,
                     total_records=rows,
                     unit="rows",
+                    item_ids=_ids(expression),
                     **identity,
                 )
             )
-        return failures, passed, identities
+        return failures, passed, identities, passed_ids
+
+
+def _ids(check: ExpressionCheck | SqlAssertion) -> tuple[str, ...]:
+    """The instance id of an expression's or assertion's check item, as ``item_ids``."""
+    return (check.item_id,) if check.item_id is not None else ()
 
 
 def _expression_identity(dataset: str, expression: Any) -> dict[str, Any]:
@@ -270,6 +285,7 @@ class SqlAssertionRule(Rule):
                         assertion_not_evaluated(name, _reason(exc)),
                         check=name,
                         severity=severity,
+                        item_ids=_ids(assertion),
                     )
                 )
                 continue
@@ -285,6 +301,7 @@ class SqlAssertionRule(Rule):
                     affected_count=count,
                     unit="rows",
                     datasets=tuple(ctx.referenced(sql)),
+                    item_ids=_ids(assertion),
                 )
             )
         return outcome(
@@ -312,5 +329,11 @@ class SqlAssertionRule(Rule):
                 }
                 for assertion in ctx.assertions
                 if assertion.name in passed
+            ),
+            item_ids=tuple(
+                item_id
+                for assertion in ctx.assertions
+                if assertion.name in passed
+                for item_id in _ids(assertion)
             ),
         )

@@ -323,6 +323,11 @@ class RuleResult(SnapshotModel):
     item_name: str | None = None
     """The configured check item's name (its default ``<check> on <dataset>`` when the
     configuration gives none); ``None`` for schema contracts."""
+    item_ids: list[str] = Field(default_factory=list)
+    """Instance ids of the configured check items the result reports on: their
+    locations, such as ``datasets.counts.checks[2]`` or ``checks[0]``. Unlike names,
+    ids are unique; a summary of passing checks lists every item it covers. Empty
+    for schema contracts and in reports written before QAVF 0.7."""
     tags: list[str] = Field(default_factory=list)
     """The check item's own tags (its family is :attr:`category`)."""
     group: GroupRole | None = None

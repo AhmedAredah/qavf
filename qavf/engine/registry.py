@@ -136,6 +136,9 @@ class Finding:
     """Structured identities of checks combined into this finding (e.g. passes)."""
     group: GroupRole | None = field(default=None, kw_only=True)
     """For a check relating many datasets: which member the finding is about."""
+    item_ids: tuple[str, ...] = field(default=(), kw_only=True)
+    """Instance ids of the check items the finding reports on, for a rule evaluating
+    several items in one instance (a bound rule's item is its binding's ``key``)."""
 
     def __post_init__(self) -> None:
         """Reject ambiguous plugin outcomes before the engine interprets them.
@@ -263,6 +266,13 @@ class Rule[P: RuleParams](ABC):
         Rules that evaluate several configured items in one instance override it.
         """
         return self.binding.name if self.binding is not None else None
+
+    def item_ids(self, finding: Finding | None) -> tuple[str, ...]:
+        """Instance ids of the check items ``finding`` reports on: the bound item's
+        ``key``, otherwise the ids the finding names."""
+        if self.binding is not None:
+            return (self.binding.key,)
+        return finding.item_ids if finding is not None else ()
 
     def configuration_errors(self, settings: QAVFSettings) -> list[str]:
         """Problems with this rule's parameters that need the whole configuration to

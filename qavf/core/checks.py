@@ -204,8 +204,9 @@ class DatasetChecks:
         name = self.data.name
         if not self.out.enabled("INP-006", name):
             return
-        for check in self.spec.expressions:
+        for check in self.spec.expressions_of(name):
             label = check.name or check.expr
+            item_ids = (check.item_id,)
             identity = {
                 "check_id": "row.expression",
                 "datasets": (name,),
@@ -226,11 +227,14 @@ class DatasetChecks:
                     wording.expression_not_evaluated(label, name, str(exc)),
                     check=f"{name}: {label}",
                     severity=check.severity,
+                    item_ids=item_ids,
                     **identity,
                 )
                 continue
             if not count:
-                self.out.passed("INP-006", name, f"{name}: {label}", identity)
+                self.out.passed(
+                    "INP-006", name, f"{name}: {label}", identity, item_id=check.item_id
+                )
                 continue
             self.out.report(
                 "INP-006",
@@ -243,6 +247,7 @@ class DatasetChecks:
                 count=count,
                 total=self.data.rows,
                 unit="rows",
+                item_ids=item_ids,
                 **identity,
             )
 

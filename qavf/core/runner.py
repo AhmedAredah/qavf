@@ -125,7 +125,7 @@ def _unavailable(out, name, spec, reason):
                 severity=fk.severity,
             )
     if _must_assess(out, "INP-006", name, spec):
-        for expression in spec.expressions:
+        for expression in spec.expressions_of(name):
             out.report(
                 "INP-006",
                 name,
@@ -138,6 +138,7 @@ def _unavailable(out, name, spec, reason):
                 datasets=(name,),
                 parameters=expression.model_dump(mode="python"),
                 severity=expression.severity,
+                item_ids=(expression.item_id,),
             )
 
 
@@ -416,13 +417,16 @@ class NativeRunner:
                 wording.assertion_not_evaluated(name, str(exc)),
                 check=name,
                 severity=assertion.severity,
+                item_ids=(assertion.item_id,),
                 **identity,
             )
             return
         finally:
             out.connection.execute(f"DROP TABLE IF EXISTS {qi(snapshot)}")
         if not count:
-            out.passed("INP-007", index, name, {**identity, "scope": "run"})
+            out.passed(
+                "INP-007", index, name, {**identity, "scope": "run"}, item_id=assertion.item_id
+            )
             return
         out.report(
             "INP-007",
@@ -435,6 +439,7 @@ class NativeRunner:
             count=count,
             unit="rows",
             datasets=_referenced(self.settings, assertion.sql),
+            item_ids=(assertion.item_id,),
             **identity,
         )
 

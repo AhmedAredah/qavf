@@ -18,7 +18,7 @@ from qavf.audit_codec import (
     evidence_json_size,
     normalize_evidence,
 )
-from qavf.checks.selection import item_tags, row_item_key
+from qavf.checks.selection import ItemTags
 from qavf.engine.severity import Severity, Status
 from qavf.input_rules import INPUT_RULES
 from qavf.redaction import redact, redact_text
@@ -59,6 +59,7 @@ class _Entry:
     identities: tuple[dict[str, Any], ...] = field(compare=False, default=())
     name: str = field(compare=False, default="")
     rows: int = field(compare=False, default=0)
+    item_id: str | None = field(compare=False, default=None)
 
 
 class ResultCollector:
@@ -134,14 +135,13 @@ class ResultCollector:
             return {}
         return {"datasets": datasets}
 
-    def tags(self, check_id, item_name, datasets):
+    def tags(self, item_name, item_ids):
         """The explicit tags of the ``expression``/``sql`` item a result reports on."""
-        key = row_item_key(check_id or "", item_name, datasets)
-        if key is None:
+        if item_name is None:
             return []
         if self._tag_index is None:
-            self._tag_index = item_tags(self.settings)
-        return list(self._tag_index.get(key, ()))
+            self._tag_index = ItemTags(self.settings)
+        return self._tag_index.of(item_ids)
 
     def report(
         self,
@@ -164,8 +164,10 @@ class ResultCollector:
         affected_rows=None,
         metrics=None,
         severity=None,
+        item_ids=(),
     ):
-        """Record one result. ``records`` is ``None`` when no evidence was collected."""
+        """Record one result. ``records`` is ``None`` when no evidence was collected.
+        ``item_ids`` are the instance ids of the check items it reports on."""
         selected = owner if isinstance(owner, str) and owner in self._positions else None
         if not self.enabled(rule_id, selected):
             return
@@ -204,7 +206,8 @@ class ResultCollector:
                 check_id=check_id or rule_id,
                 check_name=rule.check_name,
                 item_name=(item := self.item_name(check_id, check, datasets, parameters)),
-                tags=self.tags(check_id, item, datasets),
+                item_ids=list(item_ids),
+                tags=self.tags(item, item_ids),
                 columns=list(columns),
                 parameters=redact(parameters or self.rule_parameters(rule_id)),
                 checks=[check_identity(rule_id, **redact(dict(item))) for item in checks],
@@ -231,16 +234,19 @@ class ResultCollector:
             return None
         return self.locators[datasets[0]].row_column
 
-    def _ledger(self, rule_id, owner, kind, label="", identities=(), name="", rows=0):
+    def _ledger(self, rule_id, owner, kind, label="", identities=(), name="", rows=0, item_id=None):
         selected = owner if isinstance(owner, str) and owner in self._positions else None
         if self.enabled(rule_id, selected):
             self._entries.append(
-                _Entry(self.order(owner), rule_id, kind, label, tuple(identities), name, rows)
+                _Entry(
+                    self.order(owner), rule_id, kind, label, tuple(identities), name, rows, item_id
+                )
             )
 
-    def passed(self, rule_id, owner, label, *identities):
-        """Record a contract that passed, for its rule's summary."""
-        self._ledger(rule_id, owner, "passed", label, identities)
+    def passed(self, rule_id, owner, label, *identities, item_id=None):
+        """Record a contract that passed, for its rule's summary; ``item_id`` is the
+        instance id of the check item it belongs to, if any."""
+        self._ledger(rule_id, owner, "passed", label, identities, item_id=item_id)
 
     def assessed(self, rule_id, owner, *identities):
         """Record contracts that passed without a summary label of their own (INP-004)."""
@@ -322,6 +328,7 @@ class ResultCollector:
             parameters=own.get("parameters"),
             checks=identities,
             metrics={**metrics, "passed_checks": [entry.label for entry in passes]},
+            item_ids=[entry.item_id for entry in passes if entry.item_id is not None],
         )
 
 

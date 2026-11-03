@@ -504,8 +504,43 @@ def _across_scenario(directory: Path) -> dict[str, Any]:
     }
 
 
+def _item_identity_scenario(directory: Path) -> dict[str, Any]:
+    """Items sharing a name keep their own tags, policies and requirements."""
+    a = _write(directory, "a.csv", "x\n-1\n2\n")
+    b = _write(directory, "b.csv", "x\n1\n2\n")
+    return {
+        "datasets": {
+            "a": {
+                "path": a,
+                "checks": [
+                    {"check": "expression", "expr": "x > 0", "tags": ["critical"]},
+                    {"check": "expression", "expr": "x > -10", "tags": ["exploratory"]},
+                    {"check": "expression", "expr": "x < 10", "where": "x > 0"},
+                    {"check": "expression", "name": "x small", "expr": "x < 5"},
+                ],
+            },
+            "b": {
+                "path": b,
+                "checks": [
+                    {"check": "expression", "expr": "x < 10", "where": "x > 0"},
+                    {"check": "expression", "name": "x small", "expr": "x < 5", "enabled": False},
+                ],
+            },
+        },
+        "checks": [
+            {"check": "sql", "name": "no big a", "sql": "SELECT * FROM a WHERE x > 40"},
+            {"check": "sql", "name": "no big b", "sql": "SELECT * FROM b WHERE x > 40"},
+        ],
+        "run": {
+            "tags": {"exploratory": {"fail_on": "never"}},
+            "require": ["expression on a", "expression on b", "x small", "no big b"],
+        },
+    }
+
+
 SCENARIOS = {
     "across": _across_scenario,
+    "item_identity": _item_identity_scenario,
     "named_checks": _named_checks_scenario,
     "columns": _columns_scenario,
     "statistics": _statistics_scenario,
