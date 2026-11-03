@@ -144,6 +144,7 @@ checks:
     datasets: published@*           # every copy of published
     strategy: consensus             # each office against the majority of offices
     keys: [site_id, year]
+    decision: material              # no significance test; needs no stats extra
 
 run:
   fail_on: ERROR                    # lowest severity that fails the run
