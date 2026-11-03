@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from qavf.config_paths import ConfigPaths, PathRole
+from qavf.configuration import ConfigurationGraph
 
 INCLUDE_KEY = "include"
 VARS_KEY = "vars"
@@ -48,8 +49,13 @@ class IncludeResolver:
         """Every file merged in so far (resolved), in the order they were read."""
 
     def resolve(self, raw: dict[str, Any], source: Path) -> dict[str, Any]:
-        """``raw`` (the content of ``source``) with its included files merged in."""
+        """``raw`` (the content of ``source``) with its included files merged in.
+
+        Each file is measured before it is merged (:class:`ConfigurationGraph`), so a
+        file whose shared parts expand beyond the limit fails before any copy is made.
+        """
         root = source.resolve()
+        ConfigurationGraph().check(raw)
         return self._resolve(raw, root, (root,))
 
     def _resolve(
@@ -75,7 +81,9 @@ class IncludeResolver:
                 raise ValueError(f"{source}: cannot include {entry!r}: {exc.strerror}") from None
             if target not in self.included:
                 self.included.append(target)
-            parsed = IncludedPaths(target.parent, chain[0].parent).rebase(self._parse(text, target))
+            content = self._parse(text, target)
+            ConfigurationGraph().check(content)
+            parsed = IncludedPaths(target.parent, chain[0].parent).rebase(content)
             included = self._resolve(parsed, target, (*chain, target))
             merged = ConfigMerge(str(target)).merge(merged, included)
         return ConfigMerge(str(source)).merge(merged, raw)
@@ -134,6 +142,7 @@ class ConfigMerge:
     def __init__(self, origin: str) -> None:
         self.origin = origin
         """The file whose content is merged in, for error messages."""
+        self._deep = DeepMerge()
 
     def merge(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
         """``override`` merged over ``base``: the override wins on conflicting values."""
@@ -146,7 +155,7 @@ class ConfigMerge:
             elif key in _CONCATENATED_SECTIONS:
                 result[key] = self._concatenated(key, result[key], value)
             else:
-                result[key] = _deep_merge(result[key], value)
+                result[key] = self._deep.merge(result[key], value)
         return result
 
     def _unique(self, section: str, base: Any, override: Any) -> Any:
@@ -179,13 +188,31 @@ def _item_name(item: Any) -> str | None:
     return name if isinstance(name, str) else None
 
 
-def _deep_merge(base: Any, override: Any) -> Any:
-    if isinstance(base, Mapping) and isinstance(override, Mapping):
+class DeepMerge:
+    """Merges mappings recursively, each pair of shared parts once.
+
+    YAML anchors share one part in many places; merging occurrence by occurrence
+    would copy it exponentially often, so the merge of a ``(base, override)`` pair
+    is memoized and shared parts stay shared in the result.
+    """
+
+    def __init__(self) -> None:
+        self._memo: dict[tuple[int, int], Any] = {}
+        self._kept: list[Any] = []  # keeps memoised inputs alive, so ids stay unique
+
+    def merge(self, base: Any, override: Any) -> Any:
+        """``override`` merged over ``base`` (the override wins on other values)."""
+        if not (isinstance(base, Mapping) and isinstance(override, Mapping)):
+            return override
+        key = (id(base), id(override))
+        if key in self._memo:
+            return self._memo[key]
         merged = dict(base)
-        for key, value in override.items():
-            merged[key] = _deep_merge(merged[key], value) if key in merged else value
+        self._memo[key] = merged
+        self._kept.append((base, override))
+        for name, value in override.items():
+            merged[name] = self.merge(merged[name], value) if name in merged else value
         return merged
-    return override
 
 
 class VariableSubstitution:

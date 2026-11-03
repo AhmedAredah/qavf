@@ -69,3 +69,43 @@ def test_compare_rejects_negative_show() -> None:
     with pytest.raises(SystemExit) as exc:
         main(["compare", "left", "right", "--keys", "id", "--show", "-1"])
     assert exc.value.code == 2
+
+
+def _shared_dag(depth: int) -> dict:
+    node: dict = {"leaf": 1}
+    for _ in range(depth):
+        node = {"a": node, "b": node}
+    return node
+
+
+def _unique_mappings(value: object, seen: set[int] | None = None) -> int:
+    seen = set() if seen is None else seen
+    if isinstance(value, dict) and id(value) not in seen:
+        seen.add(id(value))
+        for child in value.values():
+            _unique_mappings(child, seen)
+    return len(seen)
+
+
+def test_merging_shared_parts_merges_each_pair_once() -> None:
+    from qavf.composition import ConfigMerge
+
+    base, override = {"vars": {"x": _shared_dag(40)}}, {"vars": {"x": _shared_dag(40)}}
+    merged = ConfigMerge("child.yaml").merge(base, override)
+    assert _unique_mappings(merged) <= _unique_mappings(base) + _unique_mappings(override)
+
+
+def _yaml_dag(depth: int) -> str:
+    lines = ["n0: &n0 {leaf: 1}"]
+    lines += [f"n{i}: &n{i} {{a: *n{i - 1}, b: *n{i - 1}}}" for i in range(1, depth + 1)]
+    return "vars:\n" + "".join(f"  {line}\n" for line in lines)
+
+
+def test_an_included_file_that_expands_too_far_fails_before_merging(tmp_path: Path) -> None:
+    from qavf.settings import load_settings
+
+    (tmp_path / "child.yaml").write_text(_yaml_dag(24), encoding="utf-8")
+    root = tmp_path / "qa.yaml"
+    root.write_text("include: [child.yaml]\n" + _yaml_dag(24), encoding="utf-8")
+    with pytest.raises(ValueError, match="expands to"):
+        load_settings(root)
