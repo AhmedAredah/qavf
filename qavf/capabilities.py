@@ -121,6 +121,9 @@ _BACKENDS = {
                 "Transient failures only; loaders and batch sources must declare replay safety.",
             ),
             Capability("max_spill_files", False),
+            Capability(
+                "connection_snapshots", False, "Refused before reading; use the Polars backend."
+            ),
             Capability("plugins", False),
         ),
         limitations=(
@@ -156,6 +159,7 @@ _BACKENDS = {
             Capability("hash_inputs", True),
             Capability("source_retries", True),
             Capability("max_spill_files", True),
+            Capability("connection_snapshots", True, "One transaction per connection."),
             Capability("plugins", True),
         ),
         limitations=(
