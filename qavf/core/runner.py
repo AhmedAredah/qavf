@@ -407,14 +407,23 @@ class NativeRunner:
                 self.settings.base_dir,
                 known_tables=(*self.settings.datasets, *self.settings.views()),
             )
-            out.connection.execute(f"CREATE TEMP TABLE {qi(snapshot)} AS {sql}")
-            count = out.connection.execute(f"SELECT count(*) FROM {qi(snapshot)}").fetchone()[0]
-            # The kept sample is the first rows by every column: the same on every run.
-            records = (
-                out.records(f"SELECT * FROM {qi(snapshot)} ORDER BY ALL LIMIT {limit}")
-                if count and limit
-                else None
-            )
+            if not limit:
+                # No evidence is kept: one counting evaluation, no snapshot of the rows.
+                counted = out.connection.execute(
+                    f"SELECT count(*) FROM ({sql}) AS {qi(snapshot)}"
+                ).fetchone()
+                count, records = counted[0], None
+            else:
+                # The snapshot keeps the count and the evidence of one evaluation.
+                out.connection.execute(f"CREATE TEMP TABLE {qi(snapshot)} AS {sql}")
+                counted = out.connection.execute(f"SELECT count(*) FROM {qi(snapshot)}").fetchone()
+                count = counted[0]
+                # The kept sample is the first rows by every column: the same on every run.
+                records = (
+                    out.records(f"SELECT * FROM {qi(snapshot)} ORDER BY ALL LIMIT {limit}")
+                    if count
+                    else None
+                )
         except Exception as exc:
             out.report(
                 "INP-007",
