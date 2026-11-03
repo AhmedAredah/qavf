@@ -25,19 +25,13 @@ import polars as pl
 
 from qavf.compare.consensus import NO_CONSENSUS, ConsensusBuilder, ConsensusError, pooled
 from qavf.compare.pairing import ConsensusSettings
+from qavf.engine.derived_names import derived_name
 from qavf.sources.base import DataSource, SourceEnvironment, SourceError, SourceParams
 
 if TYPE_CHECKING:
     from qavf.engine.views import FrameProvider
 
 DerivedRole = Literal["consensus_full", "consensus", "member", "pooled"]
-
-
-def derived_name(role: str, path: str, member: str | None = None) -> str:
-    """The name of a dataset a check item at ``path`` derives: ``consensus~checks[2]``,
-    ``pooled~checks[2]``, or ``<member>~checks[2]`` for a member without its keys that
-    have no consensus."""
-    return f"{member if role == 'member' else role}~{path}"
 
 
 class DerivedParams(SourceParams):
@@ -137,4 +131,9 @@ class DerivedSource(DataSource[DerivedParams]):
         return f"consensus of {', '.join(p.members)}"
 
 
-__all__ = ["DerivedParams", "DerivedRole", "DerivedSource", "derived_name"]
+__all__ = [
+    "DerivedParams",
+    "DerivedRole",
+    "DerivedSource",
+    "derived_name",
+]

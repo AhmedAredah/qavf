@@ -54,6 +54,12 @@ VALUE_RANGE = {
     ],
     "description": "Every whole number of a range: 2016..2024 or {from, to, step}.",
 }
+DATASET_SELECTOR = {
+    "type": "string",
+    "minLength": 1,
+    "description": "One dataset selector, e.g. counts@* for every copy of counts.",
+}
+"""A single string where a check lists ``datasets``: a one-element selector."""
 _ANNOTATIONS = ("title", "description", "default", "examples")
 
 
@@ -66,21 +72,30 @@ def accept_reuse_values(schema: dict[str, Any]) -> dict[str, Any]:
     definitions = schema.setdefault("$defs", {})
     definitions["VarReference"] = VAR_REFERENCE
     definitions["ValueRange"] = VALUE_RANGE
+    definitions["DatasetSelector"] = DATASET_SELECTOR
     for name, definition in definitions.items():
         if not name.startswith("Check_"):
             continue
         properties = definition.get("properties", {})
         for field, spec in properties.items():
             if field not in COMMON_FIELDS:
-                properties[field] = _reusable(spec)
+                properties[field] = _reusable(spec, selector=field == "datasets")
     return schema
 
 
-def _reusable(spec: dict[str, Any]) -> dict[str, Any]:
+def _reusable(spec: dict[str, Any], *, selector: bool = False) -> dict[str, Any]:
     outer = {key: spec[key] for key in _ANNOTATIONS if key in spec}
     inner = {key: value for key, value in spec.items() if key not in _ANNOTATIONS}
     alternatives = [{"$ref": "#/$defs/VarReference"}, {"$ref": "#/$defs/ValueRange"}]
+    if selector:
+        alternatives.insert(0, {"$ref": "#/$defs/DatasetSelector"})
     return {**outer, "anyOf": [inner, *alternatives]}
 
 
-__all__ = ["VALUE_RANGE", "VAR_REFERENCE", "accept_reuse_values", "check_item_models"]
+__all__ = [
+    "DATASET_SELECTOR",
+    "VALUE_RANGE",
+    "VAR_REFERENCE",
+    "accept_reuse_values",
+    "check_item_models",
+]

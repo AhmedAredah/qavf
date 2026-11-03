@@ -61,7 +61,8 @@ class ValueRange:
 
 
 class ItemPreparation:
-    """Applies ``defaults`` and expands ranges in the check items of a raw configuration."""
+    """Applies ``defaults``, expands ranges and reads a single ``datasets`` string as a
+    one-element list in the check items of a raw configuration."""
 
     def __init__(self, defaults: Any) -> None:
         self.defaults: Mapping[str, Any] = defaults if isinstance(defaults, Mapping) else {}
@@ -107,6 +108,8 @@ class ItemPreparation:
                 raise ValueError(f"{path}.{key}: {exc}") from None
             if expanded is not None:
                 prepared[key] = expanded.values()
+        if isinstance(prepared.get("datasets"), str):
+            prepared["datasets"] = [prepared["datasets"]]
         return prepared
 
 

@@ -164,12 +164,12 @@
   </div>
 
   <h2>Datasets</h2>
-  {% if metadata.datasets %}
+  {% if datasets %}
   <div class="card scroll">
     <table>
       <thead><tr><th>Dataset</th><th class="num">Rows</th><th class="num">Columns</th><th>Source</th></tr></thead>
       <tbody>
-      {% for dataset in metadata.datasets %}
+      {% for dataset in datasets %}
         <tr>
           <td class="mono">{{ dataset.name }}</td>
           <td class="num">{{ "{:,}".format(dataset.rows) if dataset.rows is not none else "not materialized" }}</td>

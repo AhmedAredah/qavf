@@ -43,6 +43,7 @@ from qavf.engine.compilation import (
     plugin_status,
 )
 from qavf.engine.context import DataContext, DatasetNotAvailableError
+from qavf.engine.derived_names import shown_datasets, shown_value
 from qavf.engine.registry import Finding, Rule, RuleRegistry
 from qavf.engine.resources import ResourceLimitError, retained_size
 from qavf.engine.row_locator import RowLocator
@@ -84,6 +85,30 @@ _RECORDED_PACKAGES = (
     "deepdiff",
     "scipy",
 )
+
+
+def _shown_names(result: RuleResult) -> RuleResult:
+    """``result`` of a check relating many datasets, with the datasets it derived
+    (consensus, pooled data, members' assessed rows) shown as their role or member."""
+    return result.model_copy(
+        update={
+            "datasets": shown_datasets(result.datasets),
+            "check": shown_value(result.check),
+            "message": shown_value(result.message),
+            "parameters": shown_value(result.parameters),
+            "affected_records": shown_value(result.affected_records),
+            "metrics": shown_value(result.metrics),
+            "checks": [
+                check.model_copy(
+                    update={
+                        "datasets": shown_datasets(check.datasets),
+                        "parameters": shown_value(check.parameters),
+                    }
+                )
+                for check in result.checks
+            ],
+        }
+    )
 
 
 class QARunner:
@@ -976,7 +1001,7 @@ class QARunner:
             evidence_truncated = True
         if status is Status.FAIL and not count:
             complete = False
-        return RuleResult(
+        result = RuleResult(
             rule_id=rule.rule_id,
             name=rule.name,
             description=(rule.binding.description if rule.binding else None) or rule.description,
@@ -1015,6 +1040,7 @@ class QARunner:
             metrics=metrics,
             datasets=list(finding.datasets if finding and finding.datasets else rule.requires),
         )
+        return _shown_names(result) if getattr(rule.params, "group", None) else result
 
     def _sample(
         self, affected: pl.DataFrame | Sequence[Mapping[str, Any]] | None

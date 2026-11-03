@@ -195,6 +195,7 @@ class AcrossExpansion:
         result = []
         for index, item in enumerate(items):
             listed = item.get("datasets") if isinstance(item, Mapping) else None
+            listed = [listed] if isinstance(listed, str) else listed
             if isinstance(listed, list) and all(isinstance(entry, str) for entry in listed):
                 where = f"{path}[{index}].datasets"
                 item = {**item, "datasets": expand_dataset_names(listed, names, where)}

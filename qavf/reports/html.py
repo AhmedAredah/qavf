@@ -16,6 +16,7 @@ from jinja2 import Environment, PackageLoader, select_autoescape
 from markupsafe import Markup
 
 from qavf.audit_codec import iter_audit_json
+from qavf.engine.derived_names import is_derived
 from qavf.engine.severity import Severity, Status
 from qavf.reports.charts import BarRow, Segment, horizontal_bars
 from qavf.reports.models import (
@@ -251,6 +252,7 @@ def _presentation(
         report=report,
         summary=summary,
         metadata=report.metadata,
+        datasets=[d for d in report.metadata.datasets if not is_derived(d.name)],
         verdict=analysis.acceptance.verdict,
         fail_on=analysis.acceptance.fail_on,
         failures=failures,
