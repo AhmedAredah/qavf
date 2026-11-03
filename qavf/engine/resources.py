@@ -289,7 +289,10 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
                     raise ResourceLimitError("frame store has been closed")
             if key in self:
                 del self[key]
-            self._evict_for(size)
+            with self.lock:
+                admissible = self._admissible(size)
+            if admissible:
+                self._evict_for(size)
             with self.lock:
                 retained = size <= self.limit - self.bytes and self.retained_budget.reserve(size)
                 if retained:
@@ -303,6 +306,32 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
                 with self.lock:
                     self._publish_spill(key, spill)
                     self.sizes[key] = size
+
+    def _admissible(self, size: int, replacing: Iterable[str] = ()) -> bool:
+        """Whether spilling entries could let ``size`` bytes stay in memory (lock held).
+
+        A frame larger than the cache, or than the retained budget even with every
+        entry spilled, can never be retained: it is spilled directly, and the
+        in-memory entries keep their place.
+        """
+        replaced = set(replacing)
+        evictable = sum(self.sizes[key] for key in self.data if key not in replaced)
+        pinned = self.bytes - evictable
+        return pinned + size <= self.limit and size <= self.retained_budget.remaining + evictable
+
+    def _room(self, sizes: Iterable[int], replacing: Iterable[str]) -> int:
+        """The bytes eviction should free for a group of ``sizes`` (lock held).
+
+        Only frames that can fit the cache count, and never more than spilling
+        every other entry can free, so an oversized member churns nothing.
+        """
+        replaced = set(replacing)
+        evictable = sum(self.sizes[key] for key in self.data if key not in replaced)
+        achievable = min(
+            self.limit - (self.bytes - evictable), self.retained_budget.remaining + evictable
+        )
+        wanted = sum(size for size in sizes if size <= self.limit)
+        return max(0, min(wanted, achievable))
 
     def _evict_for(self, size: int, replacing: Iterable[str] = ()) -> None:
         """Spill least recently used entries until ``size`` bytes fit (``_writes`` held).
@@ -345,8 +374,11 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
                     raise ResourceLimitError("frame store has been closed")
             # Newly loaded data takes the place of the least recently used, as a
             # single insertion does; it is not left on disk because the cache is full.
-            wanted = sum(frame.estimated_size() for frame in frames.values())
-            self._evict_for(int(min(wanted, self.limit)), replacing=frames)
+            sizes = [int(frame.estimated_size()) for frame in frames.values()]
+            with self.lock:
+                wanted = self._room(sizes, frames)
+            if wanted:
+                self._evict_for(wanted, replacing=frames)
             with self.lock:
                 available = max(0, self.limit - self.bytes)
             staging = FrameStore(
