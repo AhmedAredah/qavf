@@ -32,7 +32,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from pydantic.fields import FieldInfo
 
-from qavf.checks.items import CheckItem, ExpressionItem, SqlItem
+from qavf.checks.items import CheckItem, ExpressionItem, SqlItem, settings_required_when_enabled
 from qavf.checks.placement import (
     BLOCK_SECTIONS,
     CheckSettingError,
@@ -1374,16 +1374,6 @@ def derived_datasets(settings: QAVFSettings) -> dict[str, DerivedParams]:
     return derived
 
 
-def _settings_required_when_enabled(schema: dict[str, Any]) -> None:
-    """A check switched off (``enabled: false``) may omit its required settings."""
-    required = [name for name in schema.get("required", ()) if name != "check"]
-    if not required:
-        return
-    schema["required"] = ["check"]
-    schema["if"] = {"properties": {"enabled": {"const": False}}, "required": ["enabled"]}
-    schema["else"] = {"required": required}
-
-
 def unsupported_where(check: str) -> str:
     """Why a check item cannot take ``where``, and what selects its rows instead."""
     return (
@@ -1409,7 +1399,7 @@ def _item_model(definition: CheckDefinition) -> type[BaseModel]:
         __config__=ConfigDict(
             extra="forbid",
             title=definition.name,
-            json_schema_extra=_settings_required_when_enabled,
+            json_schema_extra=settings_required_when_enabled,
         ),
         __doc__=f"{definition.name} ({definition.rule_id}). {definition.summary}",
         check=(

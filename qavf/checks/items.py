@@ -20,6 +20,16 @@ COMMON_FIELDS = ("check", "name", "severity", "where", "tags", "enabled", "descr
 """Fields every check item accepts; everything else is the check's own settings."""
 
 
+def settings_required_when_enabled(schema: dict[str, Any]) -> None:
+    """A check switched off (``enabled: false``) may omit its required settings."""
+    required = [name for name in schema.get("required", ()) if name != "check"]
+    if not required:
+        return
+    schema["required"] = ["check"]
+    schema["if"] = {"properties": {"enabled": {"const": False}}, "required": ["enabled"]}
+    schema["else"] = {"required": required}
+
+
 class CheckItem(BaseModel):
     """One configured check: ``{check: missing_periods, series: {...}, expected: [...]}``.
 
@@ -112,7 +122,9 @@ class CheckDefaults(BaseModel):
 class ExpressionItem(CheckItem):
     """``expression``: a SQL condition every row of the dataset satisfies (INP-006)."""
 
-    model_config = ConfigDict(extra="forbid", title="ExpressionItem")
+    model_config = ConfigDict(
+        extra="forbid", title="ExpressionItem", json_schema_extra=settings_required_when_enabled
+    )
 
     check: Literal["expression"]  # type: ignore[assignment]
     expr: str
@@ -127,7 +139,9 @@ class ExpressionItem(CheckItem):
 class SqlItem(CheckItem):
     """``sql``: a query returning offending rows across any datasets (INP-007)."""
 
-    model_config = ConfigDict(extra="forbid", title="SqlItem")
+    model_config = ConfigDict(
+        extra="forbid", title="SqlItem", json_schema_extra=settings_required_when_enabled
+    )
 
     check: Literal["sql"]  # type: ignore[assignment]
     name: str = Field(min_length=1)
@@ -215,5 +229,6 @@ __all__ = [
     "TagPolicy",
     "checks_union",
     "dataset_item_id",
+    "settings_required_when_enabled",
     "top_level_item_id",
 ]

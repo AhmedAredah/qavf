@@ -150,3 +150,13 @@ def test_documented_row_check_configurations_match_the_native_schema(name, text,
     if not _native_document(text) or not _runtime_accepts(text, tmp_path):
         pytest.skip("not a configuration the native backend runs")
     assert not _errors(NATIVE, _document(text)), name
+
+
+@pytest.mark.parametrize("schema", [FULL, NATIVE], ids=["full", "native"])
+def test_both_schemas_accept_disabled_row_check_stubs(schema):
+    stubs = {
+        "datasets": {"d": {"checks": [{"check": "expression", "enabled": False}]}},
+        "checks": [{"check": "sql", "enabled": False}],
+    }
+    assert not _errors(schema, stubs)
+    assert _errors(schema, {"datasets": {"d": {"checks": [{"check": "expression"}]}}})
