@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from qavf.parameters import Count
+from qavf.plugins.contracts import ExtensionContract
 from qavf.plugins.transactions import (
     LOCK,
     installed_origin,
@@ -391,8 +392,11 @@ class SourceRegistry:
         """Register a source class. Usable as a decorator.
 
         Raises:
+            TypeError: if the class is not a concrete :class:`DataSource` subclass
+                with a ``kind`` and a pydantic ``Params`` model.
             ValueError: if a different class already uses the same ``type``.
         """
+        ExtensionContract("source", DataSource, "kind", "type").check(source_cls)
         with LOCK:
             sources = mapping(self, "_sources")
             existing = sources.get(source_cls.kind)
@@ -500,19 +504,30 @@ class SourceRegistry:
                 name: source for name, source in sources.items() if not origins.get(name, False)
             }
 
+    def _lookup(self, source_type: object) -> type[DataSource] | None:
+        """The visible source class of ``source_type``, without copying the registry."""
+        with LOCK:
+            sources = mapping(self, "_sources")
+            found = sources.get(source_type) if isinstance(source_type, str) else None
+            if found is None:
+                return None
+            if self._entry_points_enabled or installed_visible() or installed_origin():
+                return found
+            return None if mapping(self, "_origins").get(source_type, False) else found
+
     def get(self, source_type: str) -> type[DataSource]:
         """Return the class for ``source_type``.
 
         Raises:
             KeyError: for an unknown type.
         """
-        try:
-            return self._visible()[source_type]
-        except KeyError:
+        found = self._lookup(source_type)
+        if found is None:
             available = ", ".join(sorted(self._visible()))
             raise KeyError(
                 redact_text(f"unknown source type {source_type!r}; available: {available}")
-            ) from None
+            )
+        return found
 
     def build(self, config: Mapping[str, Any], env: SourceEnvironment) -> DataSource:
         """Validate ``config`` against the source's parameters and instantiate it.
@@ -542,7 +557,7 @@ class SourceRegistry:
         return iter(sorted(self._visible().values(), key=lambda s: s.kind))
 
     def __contains__(self, source_type: object) -> bool:
-        return source_type in self._visible()
+        return self._lookup(source_type) is not None
 
     def __len__(self) -> int:
         return len(self._visible())

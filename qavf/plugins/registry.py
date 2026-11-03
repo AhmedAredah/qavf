@@ -30,9 +30,10 @@ from threading import RLock
 from types import ModuleType
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 
 from qavf.parameters import RuleParams
+from qavf.plugins.contracts import ExtensionContract
 from qavf.plugins.transactions import (
     LOCK,
     installed_origin,
@@ -134,16 +135,7 @@ class ComponentRegistry[C: Component]:
                 no ``name``.
             ValueError: if a different class already uses the same name.
         """
-        if not (inspect.isclass(component) and issubclass(component, self.base)):
-            raise TypeError(f"a {self.kind} must subclass {self.base.__name__}")
-        if inspect.isabstract(component):
-            raise TypeError(f"{component.__name__} is abstract and cannot be registered")
-        name = getattr(component, "name", None)
-        if not isinstance(name, str) or not name:
-            raise TypeError(f"{component.__name__} has no {self.kind} name")
-        params = getattr(component, "Params", None)
-        if not (isinstance(params, type) and issubclass(params, BaseModel)):
-            raise TypeError(f"{component.__name__}.Params must be a pydantic model")
+        name = ExtensionContract(self.kind, self.base, "name").check(component)
         with LOCK:
             components = mapping(self, "_components")
             installed = mapping(self, "_installed")

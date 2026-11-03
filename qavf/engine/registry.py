@@ -57,6 +57,7 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.severity import Severity
 from qavf.parameters import RuleParams as RuleParams
+from qavf.plugins.contracts import ExtensionContract
 from qavf.plugins.transactions import (
     LOCK as _registration_lock,
 )
@@ -306,6 +307,7 @@ class Rule[P: RuleParams](ABC):
 
 
 _REQUIRED_METADATA = ("rule_id", "check_name", "name", "description", "category")
+_RULE_CONTRACT = ExtensionContract("rule", Rule, "rule_id", "id", _REQUIRED_METADATA)
 
 
 class RuleRegistry:
@@ -324,18 +326,13 @@ class RuleRegistry:
         """Register a rule class. Usable as a decorator.
 
         Raises:
-            TypeError: if the class is abstract or lacks required metadata.
+            TypeError: if the class is not a concrete :class:`Rule` subclass, its
+                ``Params`` is not a pydantic model or it lacks required metadata.
             ValueError: if a *different* class already uses the same ``rule_id``.
         """
+        _RULE_CONTRACT.check(rule_cls)
         with _registration_lock:
             rules = mapping(self, "_rules")
-            if inspect.isabstract(rule_cls):
-                raise TypeError(f"{rule_cls.__name__} is abstract and cannot be registered")
-            missing = [attr for attr in _REQUIRED_METADATA if not getattr(rule_cls, attr, None)]
-            if missing:
-                raise TypeError(
-                    f"{rule_cls.__name__} is missing rule metadata: {', '.join(missing)}"
-                )
             existing = rules.get(rule_cls.rule_id)
             if existing is not None and not _same_class(existing, rule_cls):
                 raise ValueError(
@@ -523,6 +520,16 @@ class RuleRegistry:
         with transaction():
             yield
 
+    def _lookup(self, rule_id: object) -> type[Rule] | None:
+        """The visible rule registered under ``rule_id``, without copying the registry."""
+        with _registration_lock:
+            rule = mapping(self, "_rules").get(rule_id) if isinstance(rule_id, str) else None
+            if rule is None:
+                return None
+            if self._entry_points_enabled or installed_visible() or installed_origin():
+                return rule
+            return None if mapping(self, "_origins").get(rule_id, False) else rule
+
     def _visible(self) -> dict[str, type[Rule]]:
         with _registration_lock:
             rules = mapping(self, "_rules")
@@ -538,10 +545,10 @@ class RuleRegistry:
         Raises:
             KeyError: if no such rule exists.
         """
-        try:
-            return self._visible()[rule_id]
-        except KeyError:
-            raise KeyError(f"unknown rule id {rule_id!r}") from None
+        rule = self._lookup(rule_id)
+        if rule is None:
+            raise KeyError(f"unknown rule id {rule_id!r}")
+        return rule
 
     def create(
         self,
@@ -560,7 +567,7 @@ class RuleRegistry:
         return iter(sorted(self._visible().values(), key=lambda rule: rule.rule_id))
 
     def __contains__(self, rule_id: object) -> bool:
-        return rule_id in self._visible()
+        return self._lookup(rule_id) is not None
 
     def __len__(self) -> int:
         return len(self._visible())
