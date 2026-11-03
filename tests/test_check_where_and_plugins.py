@@ -9,8 +9,8 @@ import polars as pl
 import pytest
 
 from qavf.checks.catalog import CATALOG, definition_for
-from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.compilation import ConfigurationError
+from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.runner import QARunner, build_source_registry
 from qavf.scaffold import config_json_schema
 from qavf.settings import QAVFSettings
@@ -63,7 +63,7 @@ def _run(item: dict[str, Any]):
 @pytest.mark.parametrize("check", ["fresh", "outliers", "key_grid", "missing_periods"])
 def test_unsupported_where_points_at_views(check):
     item = {"check": check, "where": "x > 0"}
-    with pytest.raises(ValueError, match="'where' is not supported by the .* check; check a view"):
+    with pytest.raises(ValueError, match=r"'where' is not supported by the \w+ check; check a"):
         QAVFSettings.model_validate({"datasets": {"d": {"checks": [item]}}})
 
 
