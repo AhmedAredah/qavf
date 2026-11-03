@@ -777,3 +777,44 @@ def test_backends_agree_on_included_files_and_vars(tmp_path):
     problems = _differences(_normalized(native_report), _normalized(full_report))
     assert not problems, "\n".join(problems)
     assert {r.item_name for r in native_report.results_for("INP-007")} == {"a over 3"}
+
+
+class _NoReads:
+    """Stands in for the native input reader: constructing it means a read began."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        raise AssertionError("the native backend began reading inputs")
+
+
+def _snapshot_config(directory: Path) -> dict[str, Any]:
+    import duckdb
+
+    database = directory / "live.duckdb"
+    with duckdb.connect(str(database)) as con:
+        con.execute("CREATE TABLE a AS SELECT 1 AS epoch")
+        con.execute("CREATE TABLE b AS SELECT 1 AS epoch")
+    table = {"columns": {"epoch": {"dtype": "int"}}}
+    return {
+        "connections": {"live": {"type": "duckdb", "path": str(database), "snapshot": True}},
+        "datasets": {
+            name: {
+                "source": {"type": "database", "connection": "live", "table": name},
+                "schema": table,
+            }
+            for name in ("a", "b")
+        },
+    }
+
+
+def test_native_backend_refuses_a_snapshot_it_cannot_keep(tmp_path, monkeypatch):
+    """EP-01: snapshot: true is refused before any read, never silently dropped."""
+    from qavf.optional import OptionalDependencyError
+
+    config = _snapshot_config(tmp_path)
+    monkeypatch.setattr("qavf.core.runner.InputReader", _NoReads)
+    with pytest.raises(OptionalDependencyError, match=r"connections.live.snapshot.*polars"):
+        validate(config=config, backend="duckdb")
+    report = validate(config=config, backend="polars")
+    assert report.verdict() == "passed"
+    notes = {dataset.name: dataset.notes.get("snapshot") for dataset in report.metadata.datasets}
+    assert {note["connection"] for note in notes.values()} == {"live"}
