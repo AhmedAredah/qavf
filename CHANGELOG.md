@@ -161,6 +161,10 @@ Reports written by earlier versions still load.
 - Crosswalks keep temporal zone ids exact: two `Datetime(ns)` ids 1 ns apart, or the
   two instants of a DST fold, had merged in validation, `compose` and
   `aggregate_up`, so a valid crosswalk was rejected as not summing to 1.
+- A zone layer `path` obeys the run's memory target: GeoParquet is read through the
+  common input reader (as a path crosswalk is), and an `ST_Read` file's size is
+  checked before the fetch and the file verified unchanged after it. The path form
+  had been read directly, outside admission and source identity.
 
 ## [Unreleased]
 

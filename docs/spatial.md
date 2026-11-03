@@ -60,7 +60,7 @@ A zone layer is polygons with an id, from a configured dataset or a local file:
 ```text
 {dataset: zones, id: taz}                       # any dataset: an id and a WKB or WKT column
 {dataset: zones, id: taz, geometry: wkt}        # the geometry column's name
-{path: zones/taz.parquet, id: taz}              # GeoParquet (WKB), read by Polars
+{path: zones/taz.parquet, id: taz}              # GeoParquet (WKB), read like any input file
 {path: zones/taz.geojson, id: taz}              # GeoJSON, shapefile, GeoPackage: ST_Read
 {path: zones/net.gpkg, layer: zones, id: taz}   # one layer of a multi-layer file
 {path: zones/taz.shp, id: TAZ, crs: EPSG:2277}  # the layer's CRS (EPSG:4326 by default)
@@ -72,6 +72,15 @@ self-intersection, an unclosed ring) is refused, which leaves whatever needed it
 assessed; `repair: true` replaces each invalid geometry with `ST_MakeValid` (kept
 polygonal) and records it. Zones are ordered by id, and that *zone order* breaks
 every tie deterministically, whatever the file order.
+
+A layer `path` is read under the run's resources like any other input. GeoParquet
+goes through the same projected, budgeted reader as primary inputs and path
+crosswalks (memory target, source policy and identity; only the id and geometry
+columns are read). An `ST_Read` file's size is estimated in DuckDB and checked
+against `memory_budget_bytes` before any row is fetched (which reads the layer an
+extra time when a target is set), the fetched result is checked again, and the file
+and its same-stem companions (`.dbf`, `.shx`, `.prj`) must be unchanged after the
+read.
 
 ## Coordinate reference systems
 

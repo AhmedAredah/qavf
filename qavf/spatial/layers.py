@@ -3,8 +3,9 @@
 A layer is written ``{dataset: zones, id: taz}`` (any configured dataset with an
 id column and a WKB or WKT geometry column, e.g. a GeoParquet file or a query)
 or ``{path: zones.geojson, id: taz}``: GeoParquet (``.parquet``, geometry as
-WKB) is read by Polars, every other file (GeoJSON, shapefile, GeoPackage, ...)
-by DuckDB's ``ST_Read``. ``crs`` declares the layer's CRS (``EPSG:4326`` by
+WKB) is read like any input file (memory target, source policy and identity),
+every other file (GeoJSON, shapefile, GeoPackage, ...) by DuckDB's ``ST_Read``
+with its size admitted before the fetch. ``crs`` declares the layer's CRS (``EPSG:4326`` by
 default); a file that declares a different one is refused.
 
 Loading for geometry (:func:`load_zones`) validates every zone: ids must be
@@ -151,6 +152,72 @@ def _native_crs(con: Any, path: Path, layer: ZoneLayer) -> str | None:
     return None
 
 
+def _project_parquet(ctx: DataContext | None, path: Path, columns: list[str]) -> pl.DataFrame:
+    """A GeoParquet projection read like any other input: memory admission, the
+    run's source policy and source identity, as a crosswalk ``path`` is."""
+    from qavf.inputs.auxiliary import project_input
+    from qavf.inputs.descriptors import File
+
+    data = File(str(path), format="parquet", columns=columns)
+    if ctx is not None:
+        return _storage(project_input(ctx, data, columns))
+    from qavf.engine.context import DataContext
+
+    with DataContext() as owner:
+        return _storage(project_input(owner, data, columns))
+
+
+def _storage(frame: pl.DataFrame) -> pl.DataFrame:
+    """Extension columns (GeoParquet's ``geoarrow.wkb``) as their storage (WKB binary)."""
+    extensions = [name for name, dtype in frame.schema.items() if dtype.is_extension()]
+    return frame.with_columns(pl.col(c).to_physical() for c in extensions) if extensions else frame
+
+
+class _NativeLayerRead:
+    """One ``ST_Read`` fetch of a layer file under the run's resource policy.
+
+    The fetch's size is estimated in DuckDB and admitted against the memory
+    target before any row reaches Polars, the result is admitted again, and the
+    file (with its shapefile companions) must be unchanged after the read.
+    """
+
+    def __init__(self, ctx: DataContext | None, con: Any, path: Path, layer: ZoneLayer) -> None:
+        self.ctx, self.con, self.path, self.layer = ctx, con, path, layer
+
+    def files(self) -> tuple[Path, ...]:
+        """The layer file and any sibling with its stem (``.dbf``, ``.shx``, ``.prj``...)."""
+        stem = self.path.stem
+        siblings = sorted(p for p in self.path.parent.iterdir() if p.stem == stem and p.is_file())
+        return tuple(dict.fromkeys([self.path, *siblings]))
+
+    def fetch(self, select: str, sizes: str) -> pl.DataFrame:
+        """``SELECT {select}`` from the layer; ``sizes`` is its byte-size expression."""
+        from qavf.sources.local_files import LocalManifest
+
+        label = f"zone layer {self.layer.label()!r}"
+        source = _st_read(self.path, self.layer)
+        manifest = LocalManifest.capture(self.files(), _file_stat)
+        if self.ctx is not None and self.ctx.memory_budget_bytes is not None:
+            estimate = fetch(self.con, f"SELECT coalesce(sum({sizes}), 0) AS size FROM {source}")
+            self.ctx.check_retained_bytes(label, int(estimate["size"][0] or 0))
+        frame = fetch(self.con, f"SELECT {select} FROM {source}")
+        if self.ctx is not None:
+            self.ctx.check_materialization(label, frame)
+        manifest.verify(_file_stat)
+        return frame
+
+
+def _file_stat(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino
+
+
+def _id_size(column: str) -> str:
+    """DuckDB estimate of one id's bytes (text by length, others 8 bytes)."""
+    quoted = quote_identifier(column)
+    return f"coalesce(strlen(CAST({quoted} AS VARCHAR)), 0) + 8"
+
+
 def _checked_ids(frame: pl.DataFrame, layer: ZoneLayer) -> pl.DataFrame:
     if absent := [c for c in (layer.id,) if c not in frame.columns]:
         raise ValueError(f"zone layer {layer.label()!r} lacks column(s) {', '.join(absent)}")
@@ -178,12 +245,14 @@ def zone_ids(ctx: DataContext | None, layer: ZoneLayer) -> pl.Series:
         frame = ctx.project(layer.dataset, [layer.id])
     elif not layer.native:
         assert layer.path is not None
-        frame = pl.read_parquet(_path(ctx, layer.path), columns=[layer.id])
+        frame = _project_parquet(ctx, _path(ctx, layer.path), [layer.id])
     else:
         assert layer.path is not None
         path = _path(ctx, layer.path)
         with spatial_connection(ctx) as con:
-            frame = fetch(con, f"SELECT {quote_identifier(layer.id)} FROM {_st_read(path, layer)}")
+            frame = _NativeLayerRead(ctx, con, path, layer).fetch(
+                quote_identifier(layer.id), _id_size(layer.id)
+            )
     return _checked_ids(frame, layer)[layer.id].sort()
 
 
@@ -206,15 +275,14 @@ def layer_frame(ctx: DataContext | None, layer: ZoneLayer, con: Any) -> pl.DataF
         path = _path(ctx, layer.path)
         if layer.native:
             check_declared(layer.crs, _native_crs(con, path, layer), f"zone layer {path.name!r}")
-            frame = fetch(
-                con,
-                f"SELECT {quote_identifier(layer.id)}, "
-                f"ST_AsWKB({quote_identifier(column)})::BLOB AS {quote_identifier(column)} "
-                f"FROM {_st_read(path, layer)}",
+            wkb = f"ST_AsWKB({quote_identifier(column)})::BLOB"
+            frame = _NativeLayerRead(ctx, con, path, layer).fetch(
+                f"{quote_identifier(layer.id)}, {wkb} AS {quote_identifier(column)}",
+                f"{_id_size(layer.id)} + coalesce(octet_length({wkb}), 0)",
             )
         else:
             check_declared(layer.crs, _parquet_crs(path, column), f"zone layer {path.name!r}")
-            frame = pl.read_parquet(path, columns=[layer.id, column])
+            frame = _project_parquet(ctx, path, [layer.id, column])
     if column not in frame.columns:
         raise ValueError(f"zone layer {layer.label()!r} lacks the geometry column {column!r}")
     dtype = frame.schema[column]

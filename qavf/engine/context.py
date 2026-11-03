@@ -717,6 +717,11 @@ class DataContext:
         """Apply the configured target to a completed typed result."""
         self._check_materialization(name, frame)
 
+    @property
+    def memory_budget_bytes(self) -> int | None:
+        """The run's memory target for materialized results (``None``: none set)."""
+        return self._resources.memory_bytes
+
     def check_retained_bytes(self, name: str, size: int) -> None:
         """Admit measured aggregate state without exposing the resource owner."""
         self._check_retained_bytes(name, size)
