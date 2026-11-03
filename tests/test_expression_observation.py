@@ -14,7 +14,7 @@ from qavf.sources.query import QuerySource
 
 def spec(*expressions, **values):
     return DatasetSpec.model_validate(
-        {"expressions": [{"expr": value} for value in expressions], **values}
+        {"checks": [{"check": "expression", "expr": value} for value in expressions], **values}
     )
 
 

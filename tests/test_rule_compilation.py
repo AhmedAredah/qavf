@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from qavf.checks.items import CheckItem
 from qavf.engine.compilation import (
     ConfigurationError,
     RulePlan,
@@ -12,7 +13,7 @@ from qavf.engine.compilation import (
 )
 from qavf.engine.registry import Finding, Rule, RuleParams, RuleRegistry
 from qavf.engine.runner import QARunner
-from qavf.settings import QAVFSettings, RuleSettings
+from qavf.settings import QAVFSettings
 from qavf.sources.base import SourceRegistry
 
 
@@ -26,6 +27,7 @@ class TargetParams(RuleParams):
 
 class NeedsConfiguration(Rule[RequiredParams]):
     rule_id = "A-NEEDS"
+    check_name = "a_needs"
     name = "Needs configuration"
     description = "Required parameter fixture"
     category = "compilation"
@@ -37,6 +39,7 @@ class NeedsConfiguration(Rule[RequiredParams]):
 
 class OptionalRule(Rule):
     rule_id = "B-OPTIONAL"
+    check_name = "b_optional"
     name = "Optional rule"
     description = "Exclusion fixture"
     category = "compilation"
@@ -47,6 +50,7 @@ class OptionalRule(Rule):
 
 class TargetRule(Rule[TargetParams]):
     rule_id = "Z-TARGET"
+    check_name = "z_target"
     name = "Target rule"
     description = "Late validation fixture"
     category = "compilation"
@@ -64,7 +68,7 @@ def inputs():
     for rule in (TargetRule, OptionalRule, NeedsConfiguration):
         registry.register(rule)
     settings = QAVFSettings.model_validate(
-        {"plugins": {"entry_points": False}, "rules": {TargetRule.rule_id: {}}}
+        {"plugins": {"entry_points": False}, "checks": [{"check": "z_target"}]}
     )
     return settings, registry, SourceRegistry()
 
@@ -77,29 +81,21 @@ def test_compilation_returns_owned_immutable_diagnostics_without_reading_sources
 
     monkeypatch.setattr(SourceRegistry, "build", forbidden)
     compiled = compile_rules(settings, registry, sources)
-    assert tuple(rule.rule_id for rule in compiled.rules) == ("B-OPTIONAL", "Z-TARGET")
-    assert compiled.needs_configuration == {"A-NEEDS": ("threshold",)}
+    # Only configured checks run: unconfigured rules are not planned at all.
+    assert tuple(rule.rule_id for rule in compiled.rules) == ("Z-TARGET",)
+    assert compiled.rules[0].key == "checks[0]"
     assert compiled.excluded == {}
-    with pytest.raises(TypeError):
-        compiled.needs_configuration["A-NEEDS"] = ("changed",)
     with pytest.raises(TypeError):
         compiled.excluded["B-OPTIONAL"] = "changed"
     with pytest.raises(FrozenInstanceError):
         compiled.rules = ()
-    settings.engine.run_unconfigured_rules = False
-    newer = compile_rules(settings, registry, sources)
-    assert newer.needs_configuration == {}
-    assert compiled.needs_configuration == {"A-NEEDS": ("threshold",)}
 
 
 def test_plan_owns_diagnostics_instead_of_borrowing_constructor_mappings():
-    needed = {"A-NEEDS": ("threshold",)}
-    excluded = {"B-OPTIONAL": "disabled"}
-    plan = RulePlan((), needed, excluded)
-    needed.clear()
-    excluded["B-OPTIONAL"] = "changed"
-    assert plan.needs_configuration == {"A-NEEDS": ("threshold",)}
-    assert plan.excluded == {"B-OPTIONAL": "disabled"}
+    excluded = {"b_optional": "disabled"}
+    plan = RulePlan((), excluded)
+    excluded["b_optional"] = "changed"
+    assert plan.excluded == {"b_optional": "disabled"}
 
 
 @pytest.mark.parametrize("previous_success", [False, True])
@@ -108,22 +104,20 @@ def test_failed_compilation_never_publishes_partial_runner_diagnostics(previous_
     settings, registry, sources = inputs()
     runner = QARunner(settings, registry, sources)
     if previous_success:
-        assert len(runner.plan()) == 2
-    previous_needed = dict(runner.needs_configuration)
+        assert len(runner.plan()) == 1
     previous_excluded = dict(runner.excluded)
-    settings.rules["B-OPTIONAL"] = RuleSettings(enabled=False)
-    settings.rules["Z-TARGET"] = RuleSettings(
-        params={"limit": "invalid" if failure == "parameters" else -1}
-    )
-    with pytest.raises(ConfigurationError, match="Z-TARGET"):
+    settings.checks = [
+        CheckItem(check="b_optional", enabled=False),
+        CheckItem.model_validate(
+            {"check": "z_target", "limit": "invalid" if failure == "parameters" else -1}
+        ),
+    ]
+    with pytest.raises(ConfigurationError, match=r"checks\[1\]"):
         runner.plan()
-    assert runner.needs_configuration == previous_needed
     assert runner.excluded == previous_excluded
-    settings.rules["Z-TARGET"] = RuleSettings(params={"limit": 2})
-    settings.engine.run_unconfigured_rules = False
+    settings.checks[1] = CheckItem.model_validate({"check": "z_target", "limit": 2})
     assert [rule.rule_id for rule in runner.plan()] == ["Z-TARGET"]
-    assert runner.needs_configuration == {}
-    assert set(runner.excluded) == {"A-NEEDS", "B-OPTIONAL"}
+    assert runner.excluded == {"b_optional": "disabled in the configuration"}
 
 
 def test_supplied_empty_registries_do_not_trigger_discovery(monkeypatch):

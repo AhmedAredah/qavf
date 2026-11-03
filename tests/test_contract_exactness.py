@@ -143,10 +143,10 @@ def test_expressions_isolate_errors_and_retain_names():
     report = run(
         Dataset(
             pa.table({"x": [1]}),
-            expressions=[
-                {"name": "broken", "expr": "unknown > 0"},
-                {"name": "A", "expr": "x < 0"},
-                {"name": "B", "expr": "x < 0"},
+            checks=[
+                {"check": "expression", "name": "broken", "expr": "unknown > 0"},
+                {"check": "expression", "name": "A", "expr": "x < 0"},
+                {"check": "expression", "name": "B", "expr": "x < 0"},
             ],
         )
     )

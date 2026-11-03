@@ -75,7 +75,7 @@ def test_native_schema_and_rule_listing_without_optional_backend(tmp_path):
     schema = json.loads(destination.read_text())
     assert schema["x-qavf-backend"] == "duckdb"
     assert "properties" in schema and "$defs" in schema
-    rules = _core_cli("list-rules", "--format", "json")
+    rules = _core_cli("list-checks", "--format", "json")
     assert rules.returncode == 0, rules.stderr
     assert {rule["rule_id"] for rule in json.loads(rules.stdout)} == set(
         backend_capabilities("duckdb").rule_ids

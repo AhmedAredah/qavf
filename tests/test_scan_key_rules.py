@@ -8,6 +8,7 @@ import pytest
 from qavf import Query, Status, validate
 from qavf.engine.context import DataContext
 from qavf.engine.observation import Observations
+from qavf.testing import checks_config
 
 
 def run_rule(tmp_path, backend, frames, rule, *, datasets=None, params=None, limit=1):
@@ -46,20 +47,21 @@ def run_rule(tmp_path, backend, frames, rule, *, datasets=None, params=None, lim
     ):
         report = validate(
             inputs,
-            config={
-                "plugins": {"entry_points": False},
-                "engine": {
-                    "parallel": False,
-                    "run_unconfigured_rules": False,
-                    "max_affected_records": limit,
-                },
-                "datasets": datasets or {name: {} for name in frames},
-                "rules": {rule: {"params": params or {}}},
-            },
+            config=checks_config(
+                {
+                    "plugins": {"entry_points": False},
+                    "engine": {
+                        "parallel": False,
+                        "max_affected_records": limit,
+                    },
+                    "datasets": datasets or {name: {} for name in frames},
+                    "rules": {rule: {"params": params or {}}},
+                }
+            ),
         )
-    assert all(result.status in (Status.PASS, Status.FAIL) for result in report.results), [
-        result.message for result in report.results
-    ]
+    assert all(
+        result.status in (Status.PASS, Status.FAIL, Status.SKIPPED) for result in report.results
+    ), [result.message for result in report.results]
     results = report.results_for(rule)
     assert results
     assert all(len(result.affected_records) <= limit for result in results)

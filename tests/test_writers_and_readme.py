@@ -138,7 +138,7 @@ def test_credentials_are_masked_in_reports_and_logs(caplog, tmp_path, monkeypatc
         {
             "datasets": {"remote": {}},
             "connections": {"pg": {"type": "duckdb", "path": "unused.duckdb"}},
-            "assertions": [{"name": "remote db", "sql": "SELECT * FROM pg.main.t"}],
+            "checks": [{"check": "sql", "name": "remote db", "sql": "SELECT * FROM pg.main.t"}],
             "plugins": {"entry_points": False},
         }
     )
@@ -256,10 +256,13 @@ def _section(title: str) -> str:
 
 
 def test_readme_rule_table_matches_the_registry() -> None:
-    rows = re.findall(r"^\| ([A-Z]+-\d{3}) \| (\w+)\*? \|", _section("Rules"), flags=re.MULTILINE)
+    rows = re.findall(
+        r"^\| `(\w+)` \| ([A-Z]+-\d{3}) \| (\w+)\*? \|", _section("Checks"), flags=re.MULTILINE
+    )
     registry = discovered_rules(entry_points=False)
-    assert {rule_id for rule_id, _ in rows} == {rule.rule_id for rule in registry}
-    for rule_id, severity in rows:
+    assert {rule_id for _, rule_id, _ in rows} == {rule.rule_id for rule in registry}
+    for check_name, rule_id, severity in rows:
+        assert registry.get(rule_id).check_name == check_name, rule_id
         assert registry.get(rule_id).default_severity.value == severity, rule_id
 
 

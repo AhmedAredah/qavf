@@ -21,7 +21,7 @@ from qavf.engine.registry import Finding, Rule, RuleRegistry
 from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.settings import QAVFSettings, load_settings
-from qavf.testing import make_settings, rule_results, run_rule
+from qavf.testing import make_settings, rule_results, run_rule, with_checks
 
 
 # =========================================================================
@@ -179,6 +179,7 @@ def test_blank_source_parameters_are_rejected(source) -> None:
 
 class _ZeroDimMetric(Rule):
     rule_id: ClassVar[str] = "T-ZERO-D"
+    check_name: ClassVar[str] = "t_zero_d"
     name: ClassVar[str] = "Zero-dimensional metric"
     description: ClassVar[str] = "Returns a 0-D NumPy array as a metric."
     category: ClassVar[str] = "test"
@@ -189,6 +190,7 @@ class _ZeroDimMetric(Rule):
 
 class _BadEvidence(Rule):
     rule_id: ClassVar[str] = "T-BAD-EVIDENCE"
+    check_name: ClassVar[str] = "t_bad_evidence"
     name: ClassVar[str] = "Unserialisable evidence"
     description: ClassVar[str] = "Returns evidence the engine cannot convert."
     category: ClassVar[str] = "test"
@@ -199,6 +201,7 @@ class _BadEvidence(Rule):
 
 class _Fine(Rule):
     rule_id: ClassVar[str] = "T-FINE"
+    check_name: ClassVar[str] = "t_fine"
     name: ClassVar[str] = "Fine"
     description: ClassVar[str] = "Always passes."
     category: ClassVar[str] = "test"
@@ -211,7 +214,7 @@ def test_result_conversion_errors_are_isolated_per_rule() -> None:
     registry = RuleRegistry()
     for rule in (_ZeroDimMetric, _BadEvidence, _Fine):
         registry.register(rule)
-    report = QARunner(make_settings(), registry).run(frames={})
+    report = QARunner(with_checks(make_settings(), registry), registry).run(frames={})
     assert report.get("T-ZERO-D").status is Status.PASS
     assert report.get("T-ZERO-D").metrics == {"value": 7.0}
     assert report.get("T-FINE").status is Status.PASS

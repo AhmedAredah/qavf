@@ -64,7 +64,7 @@ def _config(directory: Path, mode: str) -> dict:
         },
         "engine": {"parallel": False, "native_threads": 1},
         "datasets": {"unused": {"source": {"type": "query", "sql": "SELECT 1 AS x"}}},
-        "rules": {"ISOLATION-PROBE": {"params": {"mode": mode, "directory": str(directory)}}},
+        "checks": [{"check": "isolation_probe", "mode": mode, "directory": str(directory)}],
     }
 
 

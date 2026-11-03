@@ -258,11 +258,11 @@ def test_expression_input_failure_preserves_other_dataset_violation():
     }
     config = {
         "plugins": {"entry_points": False},
-        "engine": {"parallel": False, "run_unconfigured_rules": False},
+        "engine": {"parallel": False},
         "datasets": {
-            name: {"expressions": [{"expr": "x > 0", "name": "positive"}]} for name in frames
+            name: {"checks": [{"check": "expression", "expr": "x > 0", "name": "positive"}]}
+            for name in frames
         },
-        "rules": {"INP-006": {}},
     }
     report = validate(frames, config=config)
     results = {r.check: str(r.status) for r in report.results_for("INP-006")}
@@ -277,7 +277,7 @@ def test_expression_process_control_is_not_swallowed(exception):
     with (
         DataContext(
             frames={"d": pl.DataFrame({"x": [1]}).lazy().map_batches(stopped)},
-            specs={"d": spec({"expressions": [{"expr": "x > 0"}]})},
+            specs={"d": spec({"checks": [{"check": "expression", "expr": "x > 0"}]})},
         ) as ctx,
         pytest.raises(exception),
     ):

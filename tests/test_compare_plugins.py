@@ -281,12 +281,13 @@ def test_documented_plugin_example_runs():
 
 
 def test_documented_comparison_configuration_validates():
+    from qavf.checks.compiler import compile_checks
     from qavf.compare.spec import StepConfig
-    from qavf.rules.comparison_checks import DatasetComparisonRule
 
     steps, configuration = _blocks("comparison.md", "yaml")
     settings = QAVFSettings.model_validate(yaml.safe_load(configuration))
-    rule = DatasetComparisonRule(settings.rules["CMP-001"].params)
+    (compiled,) = compile_checks(settings)
+    rule = compiled.rule()
     assert rule.configuration_errors(settings) == []
     for step in yaml.safe_load(steps)["steps"]:
         assert StepConfig.model_validate(step).step == "shift_time"

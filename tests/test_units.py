@@ -9,19 +9,21 @@ from pydantic import ValidationError
 from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.settings import ColumnSpec, QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 
 
 def _run(frames, datasets, rules):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "datasets": datasets,
-            "rules": rules,
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {},
+                "datasets": datasets,
+                "rules": rules,
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames=frames)
 

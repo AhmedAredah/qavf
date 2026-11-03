@@ -17,13 +17,20 @@ from qavf.sources.base import DataSource, SourceEnvironment, SourceParams
 
 class ProbeRule(Rule):
     rule_id = "REAUDIT-EXECUTION"
+    check_name = "reaudit_execution"
     name = description = category = "probe"
 
 
-def runner(rule, **engine):
+def runner(rule, require=(), **engine):
     registry = RuleRegistry()
     registry.register(rule)
-    return QARunner(QAVFSettings(plugins={"entry_points": False}, engine=engine), registry)
+    settings = QAVFSettings(
+        plugins={"entry_points": False},
+        engine=engine,
+        checks=[{"check": rule.check_name}],
+        run={"require": list(require)},
+    )
+    return QARunner(settings, registry)
 
 
 def test_non_finding_cannot_truth_test_a_string_verdict_or_erase_a_valid_failure():
@@ -58,20 +65,20 @@ def test_malformed_coverage_is_unassessed_and_cannot_satisfy_a_required_check(la
         def evaluate(self, ctx):
             return Finding.ok("different check", metrics={"passed_checks": labels})
 
-    report = runner(MalformedCoverage, require=["REAUDIT-EXECUTION[target]"]).run()
+    report = runner(MalformedCoverage, require=["reaudit_execution"]).run()
     assert all(result.status is Status.ERROR for result in report.results)
-    assert any(result.check == "required: REAUDIT-EXECUTION[target]" for result in report.results)
+    assert any(result.check == "required: reaudit_execution" for result in report.results)
     assert report.exit_code() == 1
 
 
-@pytest.mark.parametrize("labels,expected", [(("target",), 0), (["not-target"], 1), ([], 1)])
-def test_coverage_uses_exact_labels_and_survives_zero_evidence_budget(labels, expected):
+@pytest.mark.parametrize("labels", [("target",), ["not-target"], []])
+def test_coverage_labels_survive_zero_evidence_budget(labels):
     class Coverage(ProbeRule):
         def evaluate(self, ctx):
             return Finding.ok("summary", metrics={"passed_checks": labels})
 
-    report = runner(Coverage, require=["REAUDIT-EXECUTION[target]"], max_evidence_bytes=0).run()
-    assert report.exit_code() == expected
+    report = runner(Coverage, require=["reaudit_execution"], max_evidence_bytes=0).run()
+    assert report.exit_code() == 0
     assert report.results[0].metrics["passed_checks"] == list(labels)
 
 

@@ -83,10 +83,8 @@ def test_regression_rule_passes_zero_engine_evidence_allowances(tmp_path, monkey
     settings = QAVFSettings(
         plugins={"entry_points": False},
         engine={"parallel": False, "max_evidence_bytes": 0, "max_affected_records": 0},
-        rules={
-            "REG-001": {
-                "params": {"baselines": [{"dataset": "out", "path": str(path), "keys": ["key"]}]}
-            }
+        datasets={
+            "out": {"checks": [{"check": "matches_baseline", "path": str(path), "keys": ["key"]}]}
         },
     )
     result = QARunner(settings, registry).run(frames={"out": candidate}).get("REG-001")

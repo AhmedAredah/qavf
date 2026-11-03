@@ -13,23 +13,25 @@ import polars as pl
 import pytest
 from pydantic import ValidationError
 
-from qavf.engine.runner import ConfigurationError, QARunner
+from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.settings import ColumnCheck, ColumnSpec, QAVFSettings, SchemaSpec
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 
 
 def _run(frames, datasets, **config):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False, "parallel": False},
-            "rules": {"INP-003": {}, "INP-004": {}, "INP-005": {}},
-            "datasets": datasets,
-            **config,
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": False},
+                "rules": {"INP-003": {}, "INP-004": {}, "INP-005": {}},
+                "datasets": datasets,
+                **config,
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames=frames)
 
@@ -241,14 +243,12 @@ def test_one_to_one_requires_unique_child_keys() -> None:
 
 
 # ------------------------------------------------------------------ selection typos
-def test_dataset_selection_typos_fail_at_plan_time() -> None:
-    settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "datasets": {"counts": {}},
-            "rules": {"INP-003": {"params": {"datasets": ["cuonts"]}}},
-        }
-    )
-    with pytest.raises(ConfigurationError, match="cuonts"):
-        QARunner(settings, REGISTRY).plan()
+def test_dataset_name_typos_fail_when_the_configuration_is_read() -> None:
+    with pytest.raises(ValueError, match="unknown dataset 'cuonts'"):
+        QAVFSettings.model_validate(
+            {
+                "plugins": {"entry_points": False},
+                "datasets": {"counts": {}},
+                "checks": [{"check": "coverage", "datasets": ["cuonts"], "entity": "id"}],
+            }
+        )

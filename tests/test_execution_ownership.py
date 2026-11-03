@@ -157,6 +157,7 @@ def test_pandas_wrappers_do_not_retain_numpy_dtype_metadata(placement):
 
 class _ReadsSQL(Rule):
     rule_id = "CLEANUP-PROBE"
+    check_name = "cleanup_probe"
     name = "worker cleanup"
     description = "deadline worker connection lifetime"
     category = "test"
@@ -174,6 +175,7 @@ def _deadline_runner(*rules, timeout=10):
         {
             "plugins": {"entry_points": False},
             "engine": {"parallel": False, "rule_timeout_s": timeout, "timeout_grace_s": 0.01},
+            "checks": [{"check": rule.check_name} for rule in registry],
         }
     )
     return QARunner(settings, registry)
@@ -264,7 +266,12 @@ def test_deadline_worker_cleanup_errors_are_explicit_outcomes(monkeypatch, bound
 
 def test_deadline_worker_reuses_connection_for_queued_rules(monkeypatch):
     rules = [
-        type(f"ReadsSQL{index}", (_ReadsSQL,), {"rule_id": f"SQL-{index}"}) for index in range(3)
+        type(
+            f"ReadsSQL{index}",
+            (_ReadsSQL,),
+            {"rule_id": f"SQL-{index}", "check_name": f"sql_{index}"},
+        )
+        for index in range(3)
     ]
     with DataContext(connection_slots=1) as ctx:
         original = ctx._resources.acquire
@@ -285,7 +292,12 @@ def test_deadline_worker_reuses_connection_for_queued_rules(monkeypatch):
 @pytest.mark.parametrize("error", [RuntimeError, SystemExit])
 def test_deadline_worker_exception_does_not_abandon_queued_rules(monkeypatch, error):
     rules = [
-        type(f"ReadsSQL{index}", (_ReadsSQL,), {"rule_id": f"SQL-{index}"}) for index in range(3)
+        type(
+            f"ReadsSQL{index}",
+            (_ReadsSQL,),
+            {"rule_id": f"SQL-{index}", "check_name": f"sql_{index}"},
+        )
+        for index in range(3)
     ]
     execute = _deadline_runner(*rules)
     original = execute._execute

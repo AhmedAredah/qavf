@@ -57,6 +57,7 @@ def test_summary_and_failure_have_structured_column_contracts():
 def test_identity_is_outcome_ledger_even_when_evidence_budget_is_zero():
     class Check(Rule):
         rule_id = "CUSTOM"
+        check_name = "custom"
         name = description = "Plugin check"
         category = "custom"
 
@@ -73,7 +74,8 @@ def test_identity_is_outcome_ledger_even_when_evidence_budget_is_zero():
 
     registry = RuleRegistry()
     registry.register(Check)
-    report = QARunner(QAVFSettings(engine={"max_evidence_bytes": 0}), registry).run()
+    settings = QAVFSettings(engine={"max_evidence_bytes": 0}, checks=[{"check": Check.check_name}])
+    report = QARunner(settings, registry).run()
     result = report.results[0]
     assert result.parameters["ge"] == Decimal("1.2")
     assert result.metrics == {}
@@ -86,6 +88,7 @@ def test_identity_is_outcome_ledger_even_when_evidence_budget_is_zero():
 def test_duplicate_evidence_completeness_survives_zero_byte_budget():
     class Check(Rule):
         rule_id = "DUPLICATE"
+        check_name = "duplicate"
         name = description = "Duplicate keys"
         category = "custom"
 
@@ -102,7 +105,8 @@ def test_duplicate_evidence_completeness_survives_zero_byte_budget():
 
     registry = RuleRegistry()
     registry.register(Check)
-    report = QARunner(QAVFSettings(engine={"max_evidence_bytes": 0}), registry).run()
+    settings = QAVFSettings(engine={"max_evidence_bytes": 0}, checks=[{"check": Check.check_name}])
+    report = QARunner(settings, registry).run()
     result = report.results[0]
     assert result.affected_count == 1
     assert result.evidence_complete is False and result.evidence_truncated

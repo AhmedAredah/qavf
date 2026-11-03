@@ -78,7 +78,7 @@ def _columns_scenario(directory: Path) -> dict[str, Any]:
                 "foreign_keys": [
                     {"columns": ["cust"], "ref_dataset": "cust", "ref_columns": ["cid"]}
                 ],
-                "expressions": [{"expr": "qty <= 2", "name": "small_qty"}],
+                "checks": [{"check": "expression", "expr": "qty <= 2", "name": "small_qty"}],
             },
             "cust": {
                 "path": customers,
@@ -203,14 +203,14 @@ def _structure_scenario(directory: Path) -> dict[str, Any]:
                     "max_rows": 2,
                     "evidence_columns": "all",
                 },
-                "expressions": [{"expr": "amount > 5", "null_as": "fail"}],
+                "checks": [{"check": "expression", "expr": "amount > 5", "null_as": "fail"}],
             },
             "absent": {"path": str(directory / "absent.csv"), "required": False},
             "missing": {"path": str(directory / "missing.csv")},
         },
-        "assertions": [
-            {"name": "few_rows", "sql": "SELECT * FROM shaped WHERE amount > 6"},
-            {"name": "none", "sql": "SELECT * FROM shaped WHERE amount > 100"},
+        "checks": [
+            {"check": "sql", "name": "few_rows", "sql": "SELECT * FROM shaped WHERE amount > 6"},
+            {"check": "sql", "name": "none", "sql": "SELECT * FROM shaped WHERE amount > 100"},
         ],
     }
 
@@ -242,10 +242,10 @@ def _passing_scenario(directory: Path) -> dict[str, Any]:
                     },
                     "primary_key": ["id"],
                 },
-                "expressions": [{"expr": "v >= 0"}],
+                "checks": [{"check": "expression", "expr": "v >= 0"}],
             }
         },
-        "assertions": [{"name": "empty", "sql": "SELECT * FROM clean WHERE v < 0"}],
+        "checks": [{"check": "sql", "name": "empty", "sql": "SELECT * FROM clean WHERE v < 0"}],
     }
 
 
@@ -318,7 +318,10 @@ def _references_scenario(directory: Path) -> dict[str, Any]:
                     },
                     {"columns": ["a"], "ref_dataset": "gone", "ref_columns": ["a"]},
                 ],
-                "expressions": [{"expr": "nope > 1", "name": "broken"}, {"expr": "v < 6"}],
+                "checks": [
+                    {"check": "expression", "expr": "nope > 1", "name": "broken"},
+                    {"check": "expression", "expr": "v < 6"},
+                ],
             },
             "parent": {
                 "path": parent,
@@ -329,12 +332,12 @@ def _references_scenario(directory: Path) -> dict[str, Any]:
             "gone": {
                 "path": str(directory / "gone.csv"),
                 "schema": {"columns": {"a": {"dtype": "int"}}, "primary_key": ["a"]},
-                "expressions": [{"expr": "a > 0"}],
+                "checks": [{"check": "expression", "expr": "a > 0"}],
             },
         },
-        "assertions": [
-            {"name": "broken", "sql": "SELECT * FROM nowhere"},
-            {"name": "rows", "sql": "SELECT a FROM child WHERE v > 4"},
+        "checks": [
+            {"check": "sql", "name": "broken", "sql": "SELECT * FROM nowhere"},
+            {"check": "sql", "name": "rows", "sql": "SELECT a FROM child WHERE v > 4"},
         ],
     }
 
@@ -416,7 +419,52 @@ def _parquet_scenario(directory: Path) -> dict[str, Any]:
     }
 
 
+def _named_checks_scenario(directory: Path) -> dict[str, Any]:
+    """Check items with their own severity, name, where and enabled settings."""
+    rows = _write(directory, "rows.csv", "id,a,b,kind\n1,1,2,x\n2,5,3,y\n3,4,4,x\n4,,1,y\n")
+    return {
+        "datasets": {
+            "rows": {
+                "path": rows,
+                "schema": {
+                    "columns": {"id": {"dtype": "int"}, "a": {"dtype": "int", "nullable": True}}
+                },
+                "checks": [
+                    {"check": "expression", "expr": "a <= b", "name": "a within b"},
+                    {
+                        "check": "expression",
+                        "expr": "a <= b",
+                        "severity": "INFO",
+                        "null_as": "fail",
+                    },
+                    {
+                        "check": "expression",
+                        "expr": "a < b",
+                        "name": "x rows strictly",
+                        "where": "kind = 'x'",
+                        "severity": "CRITICAL",
+                        "description": "only x rows",
+                    },
+                    {"check": "expression", "expr": "a > 100", "name": "off", "enabled": False},
+                ],
+            }
+        },
+        "checks": [
+            {"check": "sql", "name": "big a", "sql": "SELECT * FROM rows WHERE a > 4"},
+            {
+                "check": "sql",
+                "name": "big a again",
+                "severity": "WARNING",
+                "sql": "SELECT * FROM rows WHERE a > 4",
+            },
+            {"check": "sql", "name": "none", "sql": "SELECT * FROM rows WHERE a > 40"},
+        ],
+        "run": {"require": ["a within b", "none", "rows"]},
+    }
+
+
 SCENARIOS = {
+    "named_checks": _named_checks_scenario,
     "columns": _columns_scenario,
     "statistics": _statistics_scenario,
     "keys": _keys_scenario,

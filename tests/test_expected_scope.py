@@ -17,19 +17,21 @@ from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.rules.spatial_checks import SpatialMetric
 from qavf.settings import QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 
 
 def _run(frames, rules):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False, "parallel": False},
-            "datasets": {name: {} for name in frames},
-            "rules": rules,
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": False},
+                "datasets": {name: {} for name in frames},
+                "rules": rules,
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames=frames)
 

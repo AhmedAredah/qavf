@@ -797,7 +797,9 @@ def test_f20_unordered_samples_stream_and_count_exactly(monkeypatch) -> None:
     monkeypatch.setattr(context, "sample_statement", _no_staging)
     monkeypatch.setattr(BoundedSample, "read", counted)
     frame = pl.DataFrame({"x": [-1, 2, -3, 4], "payload": ["p"] * 4})
-    report = validate({"d": Dataset(frame, expressions=[{"name": "positive", "expr": "x > 0"}])})
+    report = validate(
+        {"d": Dataset(frame, checks=[{"check": "expression", "name": "positive", "expr": "x > 0"}])}
+    )
     [failed] = [r for r in report.results_for("INP-006") if r.status is Status.FAIL]
     assert failed.affected_count == 2 and counted.calls >= 1
 

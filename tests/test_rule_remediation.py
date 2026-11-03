@@ -10,6 +10,8 @@ import pytest
 
 from qavf import ResourceLimits, validate
 from qavf.engine.context import DataContext
+from qavf.engine.registry import RuleRegistry
+from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.engine.sqlite_store import Store
 from qavf.rules import temporal_checks
@@ -17,21 +19,23 @@ from qavf.rules._outlier_batches import scan_target
 from qavf.rules.helpers import normalize_missing
 from qavf.rules.statistical_checks import OutlierTarget
 from qavf.scalars import normalize_scalar
-from qavf.settings import ColumnSpec
+from qavf.settings import ColumnSpec, QAVFSettings
 from qavf.stats import OutlierMethod
+from qavf.testing import checks_config, discovered_rules
 
 
 def assessed(data, schema, rule="INP-003", *, evidence=3):
-    return validate(
-        {"d": data},
-        config={
+    """Run only ``rule`` (schema contracts otherwise all run on the dataset)."""
+    registry = RuleRegistry()
+    registry.register(discovered_rules(entry_points=False).get(rule))
+    settings = QAVFSettings.model_validate(
+        {
             "plugins": {"entry_points": False},
-            "engine": {"parallel": False, "run_unconfigured_rules": False},
+            "engine": {"parallel": False, "max_affected_records": evidence},
             "datasets": {"d": {"schema": schema}},
-            "rules": {rule: {}},
-        },
-        resources=ResourceLimits(evidence_rows=evidence),
+        }
     )
+    return QARunner(settings, registry).run(frames={"d": data})
 
 
 @pytest.mark.parametrize("evidence", [0, 1, 5])
@@ -227,28 +231,30 @@ def test_corrected_trends_hydrate_only_admitted_evidence(monkeypatch, rows, byte
     )
     report = validate(
         {"d": frame},
-        config={
-            "plugins": {"entry_points": False},
-            "engine": {"parallel": False, "run_unconfigured_rules": False},
-            "rules": {
-                "TMP-002": {
-                    "params": {
-                        "series": [
-                            {
-                                "dataset": "d",
-                                "value": "v",
-                                "group_by": ["g"],
-                                "expected_trend": "increasing",
-                            }
-                        ],
-                        "correction": correction,
+        config=checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": False},
+                "rules": {
+                    "TMP-002": {
+                        "params": {
+                            "series": [
+                                {
+                                    "dataset": "d",
+                                    "value": "v",
+                                    "group_by": ["g"],
+                                    "expected_trend": "increasing",
+                                }
+                            ],
+                            "correction": correction,
+                        }
                     }
-                }
-            },
-        },
+                },
+            }
+        ),
         resources=ResourceLimits(evidence_rows=rows, evidence_bytes=byte_limit),
     )
-    [result] = report.results
+    [result] = [r for r in report.results if r.rule_id == "TMP-002"]
     assert result.status is Status.FAIL
     assert result.affected_count == 25
     expected = rows if byte_limit else 0
@@ -266,20 +272,24 @@ def test_deferred_evidence_spill_refusal_preserves_complete_failure_count(monkey
     frame = pl.DataFrame({"year": [0, 1, 2], "v": [3, 2, 1]})
     report = validate(
         {"d": frame},
-        config={
-            "plugins": {"entry_points": False},
-            "engine": {"parallel": False, "run_unconfigured_rules": False},
-            "rules": {
-                "TMP-002": {
-                    "params": {
-                        "series": [{"dataset": "d", "value": "v", "expected_trend": "increasing"}],
-                        "correction": "bh",
+        config=checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": False},
+                "rules": {
+                    "TMP-002": {
+                        "params": {
+                            "series": [
+                                {"dataset": "d", "value": "v", "expected_trend": "increasing"}
+                            ],
+                            "correction": "bh",
+                        }
                     }
-                }
-            },
-        },
+                },
+            }
+        ),
     )
-    [result] = report.results
+    [result] = [r for r in report.results if r.rule_id == "TMP-002"]
     assert result.status is Status.FAIL
     assert result.affected_count == result.total_records == 1
     assert result.affected_records == []
@@ -303,28 +313,30 @@ def test_corrected_trend_evidence_preserves_nanosecond_group_identities(dtype, e
     )
     report = validate(
         {"d": frame},
-        config={
-            "plugins": {"entry_points": False},
-            "engine": {"parallel": False, "run_unconfigured_rules": False},
-            "rules": {
-                "TMP-002": {
-                    "params": {
-                        "series": [
-                            {
-                                "dataset": "d",
-                                "value": "v",
-                                "group_by": ["g"],
-                                "expected_trend": "increasing",
-                            }
-                        ],
-                        "correction": "bh",
-                        "alpha": 0.1,
+        config=checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": False},
+                "rules": {
+                    "TMP-002": {
+                        "params": {
+                            "series": [
+                                {
+                                    "dataset": "d",
+                                    "value": "v",
+                                    "group_by": ["g"],
+                                    "expected_trend": "increasing",
+                                }
+                            ],
+                            "correction": "bh",
+                            "alpha": 0.1,
+                        }
                     }
-                }
-            },
-        },
+                },
+            }
+        ),
     )
-    [result] = report.results
+    [result] = [r for r in report.results if r.rule_id == "TMP-002"]
     assert result.status is Status.FAIL
     assert result.affected_count == result.total_records == 2
     assert [record["g"] for record in result.affected_records] == expected

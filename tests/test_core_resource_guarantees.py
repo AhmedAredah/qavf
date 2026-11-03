@@ -58,9 +58,8 @@ def test_records_metrics_and_diagnostic_share_evidence_budget():
     assert payload <= 50
 
 
-def test_source_failure_cannot_disappear_when_availability_rule_is_disabled(tmp_path):
+def test_source_failure_is_reported_by_each_configured_contract(tmp_path):
     settings = {
-        "rules": {"INP-001": {"enabled": False}},
         "datasets": {
             "good": {"schema": {"columns": {"x": {"dtype": "int"}}}},
             "bad": {
@@ -75,7 +74,6 @@ def test_source_failure_cannot_disappear_when_availability_rule_is_disabled(tmp_
         r.rule_id == "INP-002" and r.datasets == ["bad"] and r.status == Status.ERROR
         for r in report.results
     )
-    assert all(r.rule_id != "INP-001" for r in report.results)
 
 
 def test_disabled_assertion_is_not_executed(monkeypatch):
@@ -86,8 +84,14 @@ def test_disabled_assertion_is_not_executed(monkeypatch):
     report = validate(
         pa.table({"x": [1]}),
         config={
-            "rules": {"INP-007": {"enabled": False}},
-            "assertions": [{"name": "disabled", "sql": "SELECT * FROM absent"}],
+            "checks": [
+                {
+                    "check": "sql",
+                    "name": "disabled",
+                    "sql": "SELECT * FROM absent",
+                    "enabled": False,
+                }
+            ]
         },
         backend="duckdb",
     )
@@ -95,7 +99,7 @@ def test_disabled_assertion_is_not_executed(monkeypatch):
     assert all(r.rule_id != "INP-007" for r in report.results)
 
 
-def test_key_execution_error_does_not_depend_on_column_rule_being_enabled(monkeypatch):
+def test_key_execution_error_does_not_depend_on_column_contracts(monkeypatch):
     def broken(self):
         raise RuntimeError("native key operator failed")
 
@@ -103,27 +107,11 @@ def test_key_execution_error_does_not_depend_on_column_rule_being_enabled(monkey
     report = validate(
         pa.table({"x": [1]}),
         schema={"primary_key": ["x"]},
-        config={"rules": {"INP-003": {"enabled": False}}},
         backend="duckdb",
     )
     assert report.exit_code() != 0
     assert any(r.rule_id == "INP-004" and r.status == Status.ERROR for r in report.results)
-    assert all(r.rule_id != "INP-003" for r in report.results)
-
-
-def test_only_availability_does_not_compile_disabled_column_contracts(monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError("disabled check compiler was called")
-
-    monkeypatch.setattr("qavf.core.runner.DatasetChecks", forbidden)
-    report = validate(
-        pa.table({"x": [1]}),
-        schema={"columns": {"x": {"ge": 0}}},
-        config={"engine": {"run_unconfigured_rules": False}, "rules": {"INP-001": {}}},
-        backend="duckdb",
-    )
-    assert report.exit_code() == 0
-    assert [r.rule_id for r in report.results] == ["INP-001"]
+    assert all(r.status is not Status.ERROR for r in report.results if r.rule_id == "INP-003")
 
 
 def test_core_report_redacts_credentials_in_configuration_and_parameters():

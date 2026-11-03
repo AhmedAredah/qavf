@@ -88,6 +88,7 @@ def test_isolation_preserves_automatic_per_connection_thread_sharing(tmp_path, m
         body += (
             f"class Probe{number}(Rule):\n"
             f"    rule_id = 'THREAD-{number}'\n"
+            f"    check_name = 'thread_{number}'\n"
             "    name = 'Thread policy'\n"
             "    description = 'Observe owned query connection allowance'\n"
             "    category = 'test'\n"
@@ -101,6 +102,7 @@ def test_isolation_preserves_automatic_per_connection_thread_sharing(tmp_path, m
     config = {
         "datasets": {"data": {"source": {"type": "query", "sql": "SELECT 1 AS x"}}},
         "plugins": {"packages": [], "paths": [str(plugin)], "entry_points": False},
+        "checks": [{"check": "thread_0"}, {"check": "thread_1"}],
     }
     observed = []
     for isolated in (False, True):

@@ -316,10 +316,19 @@ def test_row_expressions(demo) -> None:
     )
     datasets = {
         "crashes": {
-            "expressions": [
-                {"expr": "fatal <= crashes", "name": "fatal within total", "severity": "CRITICAL"},
-                {"expr": "site_id IN (SELECT site_id FROM sites)", "name": "known site"},
-                {"expr": "no_such_column > 0", "name": "broken"},
+            "checks": [
+                {
+                    "check": "expression",
+                    "expr": "fatal <= crashes",
+                    "name": "fatal within total",
+                    "severity": "CRITICAL",
+                },
+                {
+                    "check": "expression",
+                    "expr": "site_id IN (SELECT site_id FROM sites)",
+                    "name": "known site",
+                },
+                {"check": "expression", "expr": "no_such_column > 0", "name": "broken"},
             ]
         }
     }
@@ -334,9 +343,9 @@ def test_row_expressions(demo) -> None:
 
 def test_expression_null_handling() -> None:
     frame = pl.DataFrame({"a": [1, None], "b": [0, 0]})
-    lenient = {"t": {"expressions": [{"expr": "a > b"}]}}
+    lenient = {"t": {"checks": [{"check": "expression", "expr": "a > b"}]}}
     assert run_rule("INP-006", {"t": frame}, datasets=lenient).status is Status.PASS
-    strict = {"t": {"expressions": [{"expr": "a > b", "null_as": "fail"}]}}
+    strict = {"t": {"checks": [{"check": "expression", "expr": "a > b", "null_as": "fail"}]}}
     assert run_rule("INP-006", {"t": frame}, datasets=strict).affected_count == 1
 
 

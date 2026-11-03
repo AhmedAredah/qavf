@@ -14,12 +14,14 @@ from qavf.reports.models import QAReport
 from qavf.sources.base import SourceEnvironment, SourceError
 from qavf.sources.file import FileSource
 from qavf.sources.parameters import FileParams
+from qavf.testing import checks_config
 
 from .support.adapters import BACKENDS, adapted_frames
 
 
 class _HealthyRule(Rule):
     rule_id = "ASSURANCE-HEALTHY"
+    check_name = "assurance_healthy"
     name = "Independent successful assessment"
     description = "A passing sibling must not conceal a blocked assessment"
     category = "assurance"
@@ -33,6 +35,7 @@ def _runner(evaluate: Callable[..., Any], *, hash_inputs: bool = False, **engine
 
     class Probe(Rule):
         rule_id = "ASSURANCE-PROBE"
+        check_name = "assurance_probe"
         name = "Injected plugin"
         description = "Exercise the public finding contract"
         category = "assurance"
@@ -44,11 +47,19 @@ def _runner(evaluate: Callable[..., Any], *, hash_inputs: bool = False, **engine
     registry.register(Probe)
     registry.register(_HealthyRule)
     return QARunner(
-        QAVFSettings(
-            plugins={"entry_points": False},
-            engine={"parallel": False, "require": [Probe.rule_id], **engine},
-            rules={Probe.rule_id: {"severity": "INFO"}, _HealthyRule.rule_id: {}},
-            report={"hash_inputs": hash_inputs},
+        QAVFSettings.model_validate(
+            checks_config(
+                {
+                    "plugins": {"entry_points": False},
+                    "engine": {"parallel": False, **engine},
+                    "checks": [
+                        {"check": Probe.check_name, "severity": "INFO"},
+                        {"check": _HealthyRule.check_name},
+                    ],
+                    "run": {"require": [Probe.check_name]},
+                    "report": {"hash_inputs": hash_inputs},
+                }
+            )
         ),
         registry,
     )

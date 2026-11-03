@@ -31,6 +31,7 @@ SCHEMA = {"columns": {"x": {"dtype": "int", "ge": 0}}}
 
 class EagerQueryRule(Rule):
     rule_id: ClassVar[str] = "CUSTOM-EAGER"
+    check_name: ClassVar[str] = "custom_eager"
     name: ClassVar[str] = "Eager query consumer"
     description: ClassVar[str] = "Exercise the explicit materialization boundary."
     category: ClassVar[str] = "custom"
@@ -44,8 +45,8 @@ def _register_eager(monkeypatch):
     monkeypatch.setattr(default_registry, "_rules", dict(default_registry._rules))
     default_registry.register(EagerQueryRule)
     return {
-        "rules": {EagerQueryRule.rule_id: {}},
-        "engine": {"run_unconfigured_rules": False, "parallel": False},
+        "checks": [{"check": EagerQueryRule.check_name}],
+        "engine": {"parallel": False},
         "plugins": {"entry_points": False},
     }
 
@@ -92,15 +93,16 @@ from qavf import Query, Rule, Finding, register, validate
 @register
 class Eager(Rule):
     rule_id='CUSTOM-EAGER-SUBPROCESS'
+    check_name='custom_eager_subprocess'
     name='eager'
     description='query materialization'
     category='test'
     def evaluate(self, ctx):
         return Finding.ok('loaded', total_records=ctx.get('data').height)
 report=validate(Query('SELECT 1 AS x'), config={
-    'rules': {Eager.rule_id:{}},
+    'checks': [{'check': Eager.check_name}],
     'plugins': {'entry_points':False},
-    'engine': {'parallel':False,'run_unconfigured_rules':False},
+    'engine': {'parallel':False},
 })
 if report.exit_code() != 0 or report.results[0].total_records != 1:
     raise RuntimeError(report.model_dump_json())
@@ -288,6 +290,7 @@ def _plugin_rule(name, rule_id, description="A normal plugin."):
         {
             "__module__": "custom_plugin",
             "rule_id": rule_id,
+            "check_name": f"{name.lower()}_check",
             "name": name,
             "description": description,
             "category": "custom",
@@ -324,10 +327,12 @@ def test_plugin_ids_and_multiline_metadata_roundtrip_yaml_and_schema(tmp_path):
     path = tmp_path / "q.yaml"
     path.write_text(text, encoding="utf-8")
     settings = load_settings(path)
-    assert set(settings.rules) == {rule.rule_id for rule in registry}
-    assert len(QARunner(settings, registry).plan()) == len(registry)
+    for rule in registry:
+        assert rule.check_name in text
+    assert QARunner(settings, registry).plan() == []  # nothing configured
     schema = config_json_schema(registry, build_source_registry(QAVFSettings()))
-    assert set(schema["$defs"]["Rules"]["properties"]) == set(settings.rules)
+    names = {f"Check_{rule.check_name}" for rule in registry}
+    assert names <= set(schema["$defs"])
     assert jsonschema.Draft202012Validator(schema).is_valid(yaml.safe_load(text))
     assert config_json_schema(registry, SourceRegistry())["title"]
 

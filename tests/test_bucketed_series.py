@@ -11,7 +11,7 @@ import pytest
 from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.settings import QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 NY = ZoneInfo("America/New_York")
@@ -20,12 +20,14 @@ NY = ZoneInfo("America/New_York")
 def _run(rule, frame, series=None, **params):
     spec = {"dataset": "s", "value": "v", "time_column": "t", **(series or {})}
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "datasets": {"s": {}},
-            "rules": {rule: {"params": {"series": [spec], **params}}},
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {},
+                "datasets": {"s": {}},
+                "rules": {rule: {"params": {"series": [spec], **params}}},
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames={"s": frame}).results_for(rule)
 

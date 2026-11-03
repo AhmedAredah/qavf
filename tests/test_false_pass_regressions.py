@@ -22,6 +22,7 @@ import pytest
 from qavf import validate
 from qavf.engine.severity import Status
 from qavf.reports.models import QAReport
+from qavf.testing import checks_config
 
 
 def _check(
@@ -32,16 +33,17 @@ def _check(
 ) -> QAReport:
     return validate(
         inputs,
-        config={
-            "datasets": datasets or {key: {} for key in inputs},
-            "plugins": {"entry_points": False},
-            "engine": {
-                "parallel": False,
-                "run_unconfigured_rules": False,
-                "fail_on": "WARNING",
-            },
-            "rules": {rule: {"params": params or {}}},
-        },
+        config=checks_config(
+            {
+                "datasets": datasets or {key: {} for key in inputs},
+                "plugins": {"entry_points": False},
+                "engine": {
+                    "parallel": False,
+                    "fail_on": "WARNING",
+                },
+                "rules": {rule: {"params": params or {}}},
+            }
+        ),
     )
 
 
@@ -123,7 +125,7 @@ def test_expression_missing_policy_is_independent_of_input_adapter(
                 # The missing row is permitted by the column contract, so only
                 # the expression's explicit NULL policy decides its outcome.
                 "schema": {"columns": {"x": {"nullable": True, **column}}},
-                "expressions": [{"expr": expression, "null_as": null_as}],
+                "checks": [{"check": "expression", "expr": expression, "null_as": null_as}],
             }
         },
     )
@@ -137,7 +139,15 @@ def test_expression_normalizes_referenced_dataset_before_subquery() -> None:
         "INP-006",
         {"d": pl.DataFrame({"x": [0]}), "ref": pl.DataFrame({"y": [-999]})},
         datasets={
-            "d": {"expressions": [{"expr": 'x >= (SELECT max(y) FROM "ref")', "null_as": "fail"}]},
+            "d": {
+                "checks": [
+                    {
+                        "check": "expression",
+                        "expr": 'x >= (SELECT max(y) FROM "ref")',
+                        "null_as": "fail",
+                    }
+                ]
+            },
             "ref": {"schema": {"columns": {"y": {"nullable": True, "missing_values": [-999]}}}},
         },
     )
@@ -160,7 +170,9 @@ def test_sql_expression_rejects_ambiguous_case_distinct_columns(
     report = _check(
         "INP-006",
         {"d": source},
-        datasets={"d": {"expressions": [{"expr": '"X" <= 1', "null_as": "fail"}]}},
+        datasets={
+            "d": {"checks": [{"check": "expression", "expr": '"X" <= 1', "null_as": "fail"}]}
+        },
     )
     (result,) = report.results_for("INP-006")
     # DuckDB identifiers are case-insensitive, even when quoted. Checking x=0
@@ -174,7 +186,9 @@ def test_sql_expression_accepts_an_unambiguous_uppercase_column() -> None:
     report = _check(
         "INP-006",
         {"d": pl.DataFrame({"X": [10]})},
-        datasets={"d": {"expressions": [{"expr": '"X" <= 1', "null_as": "fail"}]}},
+        datasets={
+            "d": {"checks": [{"check": "expression", "expr": '"X" <= 1', "null_as": "fail"}]}
+        },
     )
     (result,) = report.results_for("INP-006")
     assert result.status is Status.FAIL

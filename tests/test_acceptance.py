@@ -14,7 +14,7 @@ import pytest
 
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding, Rule, RuleRegistry
-from qavf.engine.runner import ConfigurationError, QARunner
+from qavf.engine.runner import QARunner
 from qavf.engine.severity import Severity, Status
 from qavf.regression import compare_frames
 from qavf.testing import make_settings, rule_results, run_rule
@@ -48,15 +48,9 @@ def test_optional_absent_dataset_is_not_an_error(registry) -> None:
         )
 
 
-def test_unknown_category_filters_are_configuration_errors(registry) -> None:
-    with pytest.raises(ConfigurationError, match="unknown categor"):
-        QARunner(make_settings(include_categories=["audti"]), registry).plan()
-    with pytest.raises(ConfigurationError, match="unknown categor"):
-        QARunner(make_settings(exclude_categories=["nope"]), registry).plan()
-
-
 class _Noop(Rule):
     rule_id: ClassVar[str] = "T-NOOP"
+    check_name: ClassVar[str] = "t_noop"
     name: ClassVar[str] = "Noop"
     description: ClassVar[str] = "Never applies."
     category: ClassVar[str] = "test"
@@ -67,6 +61,7 @@ class _Noop(Rule):
 
 class _NeedsD(Rule):
     rule_id: ClassVar[str] = "T-NEEDS-D"
+    check_name: ClassVar[str] = "t_needs_d"
     name: ClassVar[str] = "Needs d"
     description: ClassVar[str] = "Requires dataset d."
     category: ClassVar[str] = "test"
@@ -95,9 +90,9 @@ def test_a_run_that_assessed_nothing_is_incomplete() -> None:
 
 def test_explicitly_configured_rule_with_missing_data_is_unassessed() -> None:
     registry = _registry(_NeedsD, _Noop)
-    implicit = QARunner(make_settings(), registry).run(frames={}).get("T-NEEDS-D")
-    assert implicit.status is Status.SKIPPED  # auto-discovered and inapplicable: fine
-    settings = make_settings(rules={"T-NEEDS-D": {}})
+    implicit = QARunner(make_settings(), registry).run(frames={})
+    assert implicit.results_for("T-NEEDS-D") == []  # not configured: it does not run
+    settings = make_settings(rules={"T-NEEDS-D": {}}, registry=registry)
     explicit = QARunner(settings, registry).run(frames={}).get("T-NEEDS-D")
     assert explicit.status is Status.ERROR and explicit.severity >= Severity.ERROR
 
@@ -151,7 +146,7 @@ def test_foreign_key_to_an_unavailable_dataset_is_unassessed(small, registry) ->
 # A later missing dependency must not erase an earlier failure
 # =========================================================================
 def _expressions(*exprs: str, **dataset) -> dict:
-    return {"t": {"expressions": [{"expr": e} for e in exprs]}, **dataset}
+    return {"t": {"checks": [{"check": "expression", "expr": e} for e in exprs]}, **dataset}
 
 
 def test_string_literals_and_comments_are_not_dataset_dependencies(tmp_path, registry) -> None:
@@ -348,8 +343,14 @@ def test_incomplete_runs_are_visible_in_cli_and_html(tmp_path, capsys) -> None:
     from qavf.settings import load_settings
 
     config = {
-        "rules": {"TMP-001": {"params": {"series": [{"dataset": "gone", "value": "v"}]}}},
-        "engine": {"include_categories": ["temporal"], "parallel": False},
+        "datasets": {
+            "gone": {
+                "path": str(tmp_path / "missing.csv"),
+                "required": False,
+                "checks": [{"check": "change_rate", "series": {"value": "v"}}],
+            }
+        },
+        "engine": {"parallel": False},
         "plugins": {"entry_points": False},
         "report": {"output_dir": "out"},
     }
@@ -361,7 +362,7 @@ def test_incomplete_runs_are_visible_in_cli_and_html(tmp_path, capsys) -> None:
     assert "QA incomplete" in render_html(report)
     assert report.model_dump(mode="json")["summary"]["assessed"] == 0
 
-    config["engine"]["fail_on_incomplete"] = False
+    config["run"] = {"fail_on_incomplete": False}
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
     assert main(["run", "-c", str(path)]) == EXIT_OK
     assert "QA INCOMPLETE" in capsys.readouterr().out

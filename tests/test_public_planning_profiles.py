@@ -22,14 +22,14 @@ def test_explain_does_not_read_files_or_invoke_loaders(tmp_path):
         assert result.datasets[0].observed_schema is None
         assert result.datasets[0].source_evaluations is None
         assert result.datasets[0].declared_columns == ("x",)
+        # Schema contracts always run; nothing else is configured.
         assert {rule.rule_id for rule in result.rules} == {
             "INP-001",
             "INP-002",
             "INP-003",
             "INP-004",
             "INP-005",
-            "INP-006",
-            "INP-007",
+            "INP-009",
         }
 
 
@@ -60,10 +60,13 @@ def test_explain_does_not_import_configured_plugin_code(tmp_path):
     result = explain(
         Loader(lambda: None),
         schema=SCHEMA,
-        config={"plugins": {"entry_points": False, "paths": [plugin]}, "rules": {"CUSTOM-001": {}}},
+        config={
+            "plugins": {"entry_points": False, "paths": [plugin]},
+            "checks": [{"check": "custom_001"}],
+        },
     )
     assert not result.complete
-    assert any("CUSTOM-001" in reason for reason in result.unresolved)
+    assert any("custom_001" in reason for reason in result.unresolved)
     assert not marker.exists()
 
 
@@ -86,30 +89,14 @@ def test_analysis_profile_requires_explicit_comparison_before_loader_runs(profil
     def forbidden():
         raise AssertionError("invalid configuration must be rejected before loading")
 
-    with pytest.raises(ValueError, match="requires configured"):
+    with pytest.raises(ValueError, match="requires a configured"):
         validate(Loader(forbidden), schema=SCHEMA, config=CONFIG, profile=profile)
-
-
-def test_profile_does_not_override_disabled_validity_rule():
-    with pytest.raises(ValueError, match="conflicts with disabled INP-003"):
-        validate(
-            Loader(lambda: None),
-            schema=SCHEMA,
-            config=CONFIG | {"rules": {"INP-003": {"enabled": False}}},
-            profile="validity",
-        )
 
 
 def test_change_profile_checks_invalid_but_unchanged_data():
     frame = pl.DataFrame({"id": [1], "x": [-1]})
     schema = {"primary_key": ["id"], **SCHEMA}
-    config = CONFIG | {
-        "rules": {
-            "CMP-001": {
-                "params": {"comparisons": [{"baseline": "a", "candidate": "b", "keys": ["id"]}]}
-            }
-        }
-    }
+    config = CONFIG | {"checks": [{"check": "compare", "datasets": ["a", "b"], "keys": ["id"]}]}
     report = validate(
         {"a": Dataset(frame, schema=schema), "b": Dataset(frame, schema=schema)},
         config=config,
@@ -144,6 +131,7 @@ def registered_rule(monkeypatch):
 
     class RegisteredRule(Rule):
         rule_id = "CUSTOM-900"
+        check_name = "custom_900"
         name = "Registered check"
         description = "A process-registered check without a discovery module."
         category = "input"
@@ -165,13 +153,14 @@ def registered_rule(monkeypatch):
 
 def test_explain_discloses_registered_rules_without_running_configuration_hooks(registered_rule):
     hooks, rule, _ = registered_rule
-    plan = explain(Loader(lambda: None), schema=SCHEMA, config=CONFIG)
+    config = CONFIG | {"checks": [{"check": rule.check_name}]}
+    plan = explain(Loader(lambda: None), schema=SCHEMA, config=config)
     assert not plan.complete
-    assert any(rule.rule_id in reason for reason in plan.unresolved)
+    assert any(rule.check_name in reason for reason in plan.unresolved)
     assert rule.rule_id not in {entry.rule_id for entry in plan.rules}
     assert hooks == []
 
-    resolved = explain(Loader(lambda: None), schema=SCHEMA, config=CONFIG, load_plugins=True)
+    resolved = explain(Loader(lambda: None), schema=SCHEMA, config=config, load_plugins=True)
     assert resolved.complete
     assert rule.rule_id in {entry.rule_id for entry in resolved.rules}
     assert hooks == ["configuration", "dependencies"]
@@ -180,9 +169,8 @@ def test_explain_discloses_registered_rules_without_running_configuration_hooks(
 @pytest.mark.parametrize(
     "engine,profile",
     [
-        ({"run_unconfigured_rules": False}, None),
-        ({"include_categories": ["temporal"]}, None),
-        ({"exclude_categories": ["input"]}, None),
+        ({}, None),
+        ({"max_workers": 1}, None),
         ({}, "validity"),
     ],
 )
@@ -205,7 +193,7 @@ def test_registered_builtin_collision_is_unresolved_even_if_rule_not_selected(re
     plan = explain(
         Loader(lambda: None),
         schema=SCHEMA,
-        config=CONFIG | {"engine": {"run_unconfigured_rules": False}},
+        config=CONFIG | {"engine": {}},
     )
     assert not plan.complete
     assert any("INP-003" in reason and "conflicts" in reason for reason in plan.unresolved)

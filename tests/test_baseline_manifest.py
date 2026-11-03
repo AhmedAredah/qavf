@@ -14,7 +14,7 @@ from qavf.engine.severity import Status
 from qavf.regression import accept_baseline, read_manifest, verify_baseline
 from qavf.regression.baselines import manifest_path
 from qavf.settings import QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 FRAME = pl.DataFrame({"k": [2, 1, 3], "v": [20.0, 10.0, 30.0]})
 
@@ -22,12 +22,14 @@ FRAME = pl.DataFrame({"k": [2, 1, 3], "v": [20.0, 10.0, 30.0]})
 def _reg001(frames, path, **params):
     spec = {"dataset": "out", "path": str(path), "keys": ["k"]}
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "datasets": {"out": {}},
-            "rules": {"REG-001": {"params": {"baselines": [spec], **params}}},
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {},
+                "datasets": {"out": {}},
+                "rules": {"REG-001": {"params": {"baselines": [spec], **params}}},
+            }
+        )
     )
     return (
         QARunner(settings, discovered_rules(entry_points=False)).run(frames=frames).get("REG-001")

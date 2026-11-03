@@ -16,8 +16,7 @@ from qavf.profiling.accumulator import ProfileAccumulator
 from qavf.rules._regex import sql_compatible
 
 CONFIG = {
-    "engine": {"parallel": False, "run_unconfigured_rules": False},
-    "rules": {"INP-003": {}},
+    "engine": {"parallel": False},
     "plugins": {"entry_points": False},
 }
 

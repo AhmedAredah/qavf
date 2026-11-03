@@ -52,6 +52,7 @@ def test_nested_supported_secret_cannot_reappear_in_final_provenance():
 
     class Simple(Rule):
         rule_id = "TEST-SECRET"
+        check_name = "test_secret"
         name = description = category = "test"
 
         def evaluate(self, ctx):

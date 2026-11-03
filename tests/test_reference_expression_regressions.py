@@ -79,13 +79,14 @@ def test_parent_na_tokens_cannot_resolve_ordinary_child_values(backend):
 
 @pytest.mark.parametrize("backend", ["duckdb", "polars"])
 def test_duplicate_expression_labels_do_not_replace_contract_identity(backend):
+    # Item names are unique within a list; expressions without a name share their label.
     report = validate(
         Dataset(
             pa.table({"x": [1]}),
-            expressions=[
-                {"name": "same", "expr": "x > 0"},
-                {"name": "same", "expr": "x < 0"},
-                {"name": "same", "expr": "unknown > 0"},
+            checks=[
+                {"check": "expression", "expr": "x > 0", "description": "same"},
+                {"check": "expression", "expr": "x < 0", "description": "same"},
+                {"check": "expression", "expr": "unknown > 0", "description": "same"},
             ],
         ),
         backend=backend,
@@ -100,7 +101,7 @@ def test_duplicate_expression_labels_do_not_replace_contract_identity(backend):
     assert sorted((s, p["expr"]) for s, p in ledger) == sorted(
         [("PASS", "x > 0"), ("FAIL", "x < 0"), ("ERROR", "unknown > 0")]
     )
-    assert all(p["name"] == "same" for _, p in ledger)
+    assert all(p["description"] == "same" for _, p in ledger)
 
 
 @pytest.mark.parametrize("backend", ["duckdb", "polars"])

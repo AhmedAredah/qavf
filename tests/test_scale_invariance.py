@@ -21,6 +21,7 @@ from qavf.regression.compare_outputs import compare_frames
 from qavf.rules.spatial_checks import GroupComparisonParams
 from qavf.settings import QAVFSettings
 from qavf.stats import OutlierMethod, detect_outliers, flag_outliers
+from qavf.testing import checks_config
 
 METHODS = [OutlierMethod.ZSCORE, OutlierMethod.MODIFIED_ZSCORE, OutlierMethod.IQR]
 
@@ -126,12 +127,14 @@ METRIC = {"dataset": "m", "value": "v", "entity_column": "e"}
 def _spa002(groups: dict[str, list[str]] | None = None, frame: pl.DataFrame = ENTITIES, **params):
     config = {"metrics": [METRIC], **({"groups": groups} if groups is not None else {}), **params}
     settings = QAVFSettings.model_validate(
-        {
-            "datasets": {"m": {}},
-            "rules": {"SPA-002": {"params": config}},
-            "engine": {"run_unconfigured_rules": False},
-            "plugins": {"entry_points": False},
-        }
+        checks_config(
+            {
+                "datasets": {"m": {}},
+                "rules": {"SPA-002": {"params": config}},
+                "engine": {},
+                "plugins": {"entry_points": False},
+            }
+        )
     )
     from qavf.testing import discovered_rules
 
@@ -169,16 +172,21 @@ def test_without_groups_all_entities_form_one_group() -> None:
 # =========================================================================
 def _tmp001(values: list[float], years: list[int], limit: float):
     settings = QAVFSettings.model_validate(
-        {
-            "datasets": {"s": {}},
-            "rules": {
-                "TMP-001": {
-                    "params": {"series": [{"dataset": "s", "value": "v"}], "max_change_rate": limit}
-                }
-            },
-            "engine": {"run_unconfigured_rules": False},
-            "plugins": {"entry_points": False},
-        }
+        checks_config(
+            {
+                "datasets": {"s": {}},
+                "rules": {
+                    "TMP-001": {
+                        "params": {
+                            "series": [{"dataset": "s", "value": "v"}],
+                            "max_change_rate": limit,
+                        }
+                    }
+                },
+                "engine": {},
+                "plugins": {"entry_points": False},
+            }
+        )
     )
     from qavf.testing import discovered_rules
 
@@ -218,19 +226,21 @@ def test_group_ratio_exactly_at_the_limit_passes() -> None:
 # =========================================================================
 def _temporal(rule: str, frame: pl.DataFrame, **params):
     settings = QAVFSettings.model_validate(
-        {
-            "datasets": {"s": {}},
-            "rules": {
-                rule: {
-                    "params": {
-                        "series": [{"dataset": "s", "value": "v", "group_by": ["g"]}],
-                        **params,
+        checks_config(
+            {
+                "datasets": {"s": {}},
+                "rules": {
+                    rule: {
+                        "params": {
+                            "series": [{"dataset": "s", "value": "v", "group_by": ["g"]}],
+                            **params,
+                        }
                     }
-                }
-            },
-            "engine": {"run_unconfigured_rules": False},
-            "plugins": {"entry_points": False},
-        }
+                },
+                "engine": {},
+                "plugins": {"entry_points": False},
+            }
+        )
     )
     from qavf.testing import discovered_rules
 

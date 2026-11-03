@@ -22,12 +22,14 @@ from qavf.sources.base import (
     SourceNotFoundError,
     SourceParams,
 )
+from qavf.testing import checks_config, with_checks
 
 RELEASE = threading.Event()
 
 
 class _Hangs(Rule):
     rule_id: ClassVar[str] = "SLOW-1"
+    check_name: ClassVar[str] = "slow_1"
     name: ClassVar[str] = "Hangs"
     description: ClassVar[str] = "Blocks until released."
     category: ClassVar[str] = "test"
@@ -39,6 +41,7 @@ class _Hangs(Rule):
 
 class _Quick(Rule):
     rule_id: ClassVar[str] = "FAST-1"
+    check_name: ClassVar[str] = "fast_1"
     name: ClassVar[str] = "Quick"
     description: ClassVar[str] = "Returns at once."
     category: ClassVar[str] = "test"
@@ -58,14 +61,17 @@ def _registry(*rules) -> RuleRegistry:
 def test_a_rule_past_its_deadline_is_unassessed_and_the_report_is_produced(parallel) -> None:
     RELEASE.clear()
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"parallel": parallel, "max_workers": 2, "rule_timeout_s": 0.3},
-            "rules": {"SLOW-1": {}, "FAST-1": {}},
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": parallel, "max_workers": 2, "rule_timeout_s": 0.3},
+            }
+        )
     )
     started = time.monotonic()
-    report = QARunner(settings, _registry(_Hangs, _Quick)).run()
+    report = QARunner(
+        with_checks(settings, _registry(_Hangs, _Quick)), _registry(_Hangs, _Quick)
+    ).run()
     elapsed = time.monotonic() - started
     RELEASE.set()  # let the abandoned daemon thread finish
     assert elapsed < 5
@@ -77,13 +83,20 @@ def test_a_rule_past_its_deadline_is_unassessed_and_the_report_is_produced(paral
 
 def test_the_deadline_does_not_affect_rules_that_finish(registry) -> None:
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"rule_timeout_s": 30},
-            "rules": {"FAST-1": {}},
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"rule_timeout_s": 30},
+            }
+        )
     )
-    assert QARunner(settings, _registry(_Quick)).run().get("FAST-1").status is Status.PASS
+    assert (
+        QARunner(with_checks(settings, _registry(_Quick)), _registry(_Quick))
+        .run()
+        .get("FAST-1")
+        .status
+        is Status.PASS
+    )
 
 
 # ------------------------------------------------------------------ retries
@@ -189,6 +202,7 @@ class _Slow(DataSource):
 
 class _Reads(Rule):
     rule_id: ClassVar[str] = "READ-1"
+    check_name: ClassVar[str] = "read_1"
     name: ClassVar[str] = "Reads"
     description: ClassVar[str] = "Reads a dataset."
     category: ClassVar[str] = "test"
@@ -199,9 +213,11 @@ class _Reads(Rule):
 
 
 def test_rule_timing_includes_and_reports_data_loading() -> None:
-    settings = QAVFSettings.model_validate(
-        {"plugins": {"entry_points": False}, "rules": {"READ-1": {}}}
-    )
+    settings = QAVFSettings.model_validate({"plugins": {"entry_points": False}})
     ctx = DataContext(sources={"slow": _Slow(_SlowParams(), SourceEnvironment())})
-    result = QARunner(settings, _registry(_Reads)).run(ctx=ctx).get("READ-1")
+    result = (
+        QARunner(with_checks(settings, _registry(_Reads)), _registry(_Reads))
+        .run(ctx=ctx)
+        .get("READ-1")
+    )
     assert result.load_time_s >= 0.19 and result.execution_time_s >= result.load_time_s

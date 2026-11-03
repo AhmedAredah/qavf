@@ -146,7 +146,7 @@ def test_demo_project_clean_and_defective(tmp_path, capsys) -> None:
         main(["run", "-c", str(tmp_path / "bad" / "qavf.yaml"), "--no-parallel"]) == EXIT_QA_FAILED
     )
     out = capsys.readouterr().out
-    assert "INP-003 [counts.aadt: ge 0]" in out and "QA FAILED" in out
+    assert "column_limits · counts (INP-003) [counts.aadt: ge 0]" in out and "QA FAILED" in out
     assert (tmp_path / "bad" / "qa_output" / "qa_report.html").is_file()
     assert main(["demo", str(tmp_path / "bad")]) == EXIT_USAGE  # not empty
     assert main(["demo", str(tmp_path / "x"), "--defects", "nope"]) == EXIT_USAGE
@@ -182,7 +182,9 @@ def test_each_demo_defect_is_detected(defect: str, tmp_path) -> None:
     report = QARunner(load_settings(write_demo_project(tmp_path, [defect]))).run()
     failed = {r.rule_id for r in report.results if r.status is Status.FAIL}
     expected = EXPECTED[defect] if HAS_STATS else EXPECTED[defect] - {"TMP-002", "TMP-003"}
-    unassessed = {r.label: r.message for r in report.results if r.status is Status.ERROR}
+    unassessed = {
+        f"{r.rule_id} [{r.check}]": r.message for r in report.results if r.status is Status.ERROR
+    }
     assert set(unassessed) == UNNORMALISABLE.get(defect, set()), f"{defect}: {unassessed}"
     assert expected <= failed, f"{defect}: expected {expected}, failed {failed}"
 
@@ -205,23 +207,26 @@ UNNORMALISABLE["duplicate_count"] = {"REG-001 [counts]"}
 def test_cli_overrides_and_errors(tmp_path, capsys) -> None:
     config = write_demo_project(tmp_path, ["declining_site"])
     settings = yaml.safe_load(config.read_text())
-    settings["rules"]["REG-001"]["enabled"] = False  # leaves only WARNING findings
+    for item in settings["datasets"]["counts"]["checks"]:
+        if item["check"] == "matches_baseline":
+            item["enabled"] = False  # leaves only WARNING findings
     config.write_text(yaml.safe_dump(settings))
     assert main(["run", "-c", str(config)]) == EXIT_OK
     assert main(["run", "-c", str(config), "--fail-on", "WARNING"]) == EXIT_QA_FAILED
     assert main(["run", "-c", str(tmp_path / "absent.yaml")]) == EXIT_USAGE
     settings = yaml.safe_load(config.read_text())
-    settings["rules"]["NOPE-1"] = {}
+    settings["checks"].append({"check": "nope"})
     config.write_text(yaml.safe_dump(settings))
     assert main(["run", "-c", str(config)]) == EXIT_USAGE
-    assert "unknown rule id" in capsys.readouterr().err
+    assert "unknown check 'nope'" in capsys.readouterr().err
 
 
 def test_cli_list_compare_baseline_profile(tmp_path, capsys) -> None:
     for fmt in ("table", "markdown", "json"):
-        assert main(["list-rules", "--format", fmt]) == EXIT_OK
+        assert main(["list-checks", "--format", fmt]) == EXIT_OK
     out = capsys.readouterr().out
-    assert "INP-003" in out and "| INP-003 |" in out and '"rule_id": "INP-003"' in out
+    assert "missing_periods    TMP-004" in out and "| `missing_periods` | TMP-004 |" in out
+    assert '"check_name": "missing_periods"' in out
 
     write_demo_project(tmp_path / "a", clean=True)
     write_demo_project(tmp_path / "b", ["aadt_spike"])

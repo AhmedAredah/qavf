@@ -86,6 +86,7 @@ def test_complete_compound_secret_is_masked(text):
 def test_error_secrets_never_cross_report_or_log_boundary(caplog, tmp_path):
     class Secrets(Rule):
         rule_id = "AUDIT"
+        check_name = "audit"
         name = "audit"
         description = "test"
         category = "test"
@@ -227,6 +228,7 @@ def test_mapping_keys_do_not_collide_during_either_json_path():
 def test_effective_config_digest_distinguishes_nonfinite_and_null():
     class Pass(Rule):
         rule_id = "AUDIT"
+        check_name = "audit"
         name = "audit"
         description = "test"
         category = "test"

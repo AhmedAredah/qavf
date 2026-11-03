@@ -133,13 +133,27 @@ def test_native_metadata_provenance_and_timing(tmp_path):
 def test_native_require_marks_disabled_and_missing_contracts_incomplete():
     report = validate(
         pa.table({"x": [1]}),
-        config={"engine": {"require": ["INP-004"]}, "rules": {"INP-004": {"enabled": False}}},
+        config={
+            "datasets": {
+                "data": {
+                    "checks": [
+                        {
+                            "check": "expression",
+                            "expr": "x > 0",
+                            "name": "positive",
+                            "enabled": False,
+                        }
+                    ]
+                }
+            },
+            "run": {"require": ["positive"]},
+        },
         backend="duckdb",
     )
     assert report.acceptance.verdict == "incomplete"
-    result = next(r for r in report.results if r.check == "required: INP-004")
+    result = next(r for r in report.results if r.check == "required: positive")
     assert result.status is Status.ERROR and not result.affected_count_exact
-    assert "excluded: disabled in the configuration" in result.message
+    assert "disabled in the configuration" in result.message
 
 
 def test_cooperative_native_deadline_discards_partial_assessment(monkeypatch):

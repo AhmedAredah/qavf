@@ -5,6 +5,7 @@ from typing import Any
 
 from qavf import Status, validate
 from qavf.reports.models import RuleResult
+from qavf.testing import checks_config
 
 
 def run_checks(
@@ -19,23 +20,24 @@ def run_checks(
     """Run one configured rule, failing loudly on unexpected unassessed results."""
     report = validate(
         inputs,
-        config={
-            "datasets": dict(datasets or {name: {} for name in inputs}),
-            "plugins": {"entry_points": False},
-            "engine": {
-                "parallel": False,
-                "run_unconfigured_rules": False,
-                "max_affected_records": evidence_rows,
-            },
-            "rules": {rule_id: {"params": dict(params or {})}},
-        },
+        config=checks_config(
+            {
+                "datasets": dict(datasets or {name: {} for name in inputs}),
+                "plugins": {"entry_points": False},
+                "engine": {
+                    "parallel": False,
+                    "max_affected_records": evidence_rows,
+                },
+                "rules": {rule_id: {"params": dict(params or {})}},
+            }
+        ),
     )
     results = report.results_for(rule_id)
     assert results, [result.message for result in report.results]
     if assessed_only:
-        assert all(result.status in (Status.PASS, Status.FAIL) for result in report.results), [
-            result.message for result in report.results
-        ]
+        assert all(
+            result.status in (Status.PASS, Status.FAIL, Status.SKIPPED) for result in report.results
+        ), [result.message for result in report.results]
     return results
 
 

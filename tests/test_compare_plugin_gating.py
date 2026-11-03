@@ -17,7 +17,6 @@ import pytest
 from pydantic import ValidationError
 
 from qavf import (
-    ExecutionLimitError,
     File,
     QARunner,
     QAVFSettings,
@@ -29,6 +28,7 @@ from qavf import (
 from qavf.compare.registry import registries
 from qavf.engine.compilation import ConfigurationError
 from qavf.execution.os_limits import SUPPORTED_PLATFORMS
+from qavf.testing import checks_config
 
 MODULE = "qavf_gating_fake_level"
 PLUGIN = '''
@@ -92,17 +92,21 @@ FRAME = pl.DataFrame({"k": [1, 2], "v": [1, 2]})
 
 
 def _config(entry_points: bool, **plugins):
-    return {
-        "rules": {
-            "CMP-001": {
-                "params": {
-                    "comparisons": [{"baseline": "a", "candidate": "b", "levels": ["fake_parity"]}]
+    return checks_config(
+        {
+            "rules": {
+                "CMP-001": {
+                    "params": {
+                        "comparisons": [
+                            {"baseline": "a", "candidate": "b", "levels": ["fake_parity"]}
+                        ]
+                    }
                 }
-            }
-        },
-        "plugins": {"entry_points": entry_points, **plugins},
-        "engine": {"run_unconfigured_rules": False},
-    }
+            },
+            "plugins": {"entry_points": entry_points, **plugins},
+            "engine": {},
+        }
+    )
 
 
 def test_disabled_plugins_are_never_imported_by_compare_datasets(plugin):
@@ -125,18 +129,13 @@ def test_enabled_plugins_resolve_in_compare_datasets(plugin):
 
 
 def test_cmp001_obeys_plugins_entry_points(plugin):
-    with pytest.raises(ConfigurationError, match="unknown comparison level 'fake_parity'"):
+    # Without plugins, the comparison is checked when the configuration is read.
+    with pytest.raises(ValueError, match="unknown comparison level 'fake_parity'"):
         validate({"a": FRAME, "b": FRAME}, config=_config(False))
     report = validate(
         {"a": FRAME, "b": FRAME},
         config=_config(False, required=[])
-        | {
-            "rules": {
-                "CMP-001": {
-                    "params": {"comparisons": [{"baseline": "a", "candidate": "b", "keys": ["k"]}]}
-                }
-            }
-        },
+        | {"checks": [{"check": "compare", "datasets": ["a", "b"], "keys": ["k"]}]},
     )
     assert report.verdict() == "passed"
     assert not any(key.startswith("compare.") for key in report.metadata.plugins)
@@ -151,11 +150,15 @@ def test_cmp001_obeys_plugins_entry_points(plugin):
 
 def test_required_comparison_plugin_respects_entry_points(plugin):
     required = {"required": ["compare.levels:fake"]}
-    settings = QAVFSettings.model_validate({"plugins": {"entry_points": False, **required}})
+    settings = QAVFSettings.model_validate(
+        checks_config({"plugins": {"entry_points": False, **required}})
+    )
     with pytest.raises(ConfigurationError, match="not installed"):
         QARunner(settings).plan()
     assert _imported(plugin) == []
-    settings = QAVFSettings.model_validate({"plugins": {"entry_points": True, **required}})
+    settings = QAVFSettings.model_validate(
+        checks_config({"plugins": {"entry_points": True, **required}})
+    )
     QARunner(settings).plan()
     assert _imported(plugin) == [os.getpid()]
 
@@ -184,8 +187,8 @@ def test_isolated_workers_honour_the_same_choice(plugin, tmp_path):
     assert result.status is Status.PASS
     before = len(_imported(plugin))
     config["plugins"]["entry_points"] = False
-    # The worker compiles the configuration; its configuration error is reported
-    # through the isolation boundary, and no process imported the plugin.
-    with pytest.raises(ExecutionLimitError, match="unknown comparison level 'fake_parity'"):
+    # Without plugins the configuration is invalid before any process starts, and
+    # no process imported the plugin.
+    with pytest.raises(ValueError, match="unknown comparison level 'fake_parity'"):
         validate(config=config, resources=limits)
     assert len(_imported(plugin)) == before

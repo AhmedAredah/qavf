@@ -36,9 +36,8 @@ def test_common_checks_return_reductions_under_small_materialization_budget(kind
     settings = QAVFSettings.model_validate(
         {
             "plugins": {"entry_points": False},
-            "engine": {"parallel": False, "run_unconfigured_rules": False},
+            "engine": {"parallel": False},
             "datasets": datasets,
-            "rules": {"INP-003": {}},
         }
     )
     report = validate(

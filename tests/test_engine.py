@@ -41,6 +41,7 @@ class _Params(RuleParams):
 
 class _AlwaysFails(Rule):
     rule_id: ClassVar[str] = "T-FAIL"
+    check_name: ClassVar[str] = "t_fail"
     name: ClassVar[str] = "Always fails"
     description: ClassVar[str] = "Test rule."
     category: ClassVar[str] = "test"
@@ -54,6 +55,7 @@ class _AlwaysFails(Rule):
 
 class _Crashes(Rule):
     rule_id: ClassVar[str] = "T-CRASH"
+    check_name: ClassVar[str] = "t_crash"
     name: ClassVar[str] = "Crashes"
     description: ClassVar[str] = "Test rule."
     category: ClassVar[str] = "test"
@@ -65,6 +67,7 @@ class _Crashes(Rule):
 
 class _NeedsData(Rule):
     rule_id: ClassVar[str] = "T-NEEDS"
+    check_name: ClassVar[str] = "t_needs"
     name: ClassVar[str] = "Needs data"
     description: ClassVar[str] = "Test rule."
     category: ClassVar[str] = "other"
@@ -76,6 +79,7 @@ class _NeedsData(Rule):
 
 class _MultiCheck(Rule):
     rule_id: ClassVar[str] = "T-MULTI"
+    check_name: ClassVar[str] = "t_multi"
     name: ClassVar[str] = "Several checks"
     description: ClassVar[str] = "Test rule."
     category: ClassVar[str] = "test"
@@ -126,6 +130,7 @@ def test_discovers_rules_from_plugin_path(tmp_path) -> None:
 
             class Plugged(Rule):
                 rule_id = "PLUG-1"
+                check_name = "plug_1"
                 name = "Plugged"
                 description = "From a file."
                 category = "plugin"
@@ -149,6 +154,7 @@ def test_register_rejects_duplicates_and_incomplete_rules() -> None:
 
     class Clash(_Crashes):
         rule_id: ClassVar[str] = "T-FAIL"
+        check_name: ClassVar[str] = "t_fail"
 
     with pytest.raises(ValueError, match="duplicate rule id"):
         registry.register(Clash)
@@ -170,8 +176,10 @@ def test_register_rejects_duplicates_and_incomplete_rules() -> None:
 
 # --------------------------------------------------------------------- runner
 def test_runner_turns_outcomes_into_results() -> None:
-    settings = make_settings(max_affected_records=3)
-    report = QARunner(settings, _registry(_AlwaysFails, _Crashes, _NeedsData)).run(frames={})
+    registry = _registry(_AlwaysFails, _Crashes, _NeedsData)
+    rules = {"T-FAIL": {}, "T-CRASH": {}, "T-NEEDS": {}}
+    settings = make_settings(rules=rules, registry=registry, max_affected_records=3)
+    report = QARunner(settings, registry).run(frames={})
 
     failed = report.get("T-FAIL")
     assert failed.status is Status.FAIL and failed.severity is Severity.WARNING
@@ -181,9 +189,10 @@ def test_runner_turns_outcomes_into_results() -> None:
     assert crashed.status is Status.ERROR and "boom" in crashed.message
     assert crashed.severity is Severity.ERROR  # escalated: unassessed is never harmless
 
-    assert report.get("T-NEEDS").status is Status.SKIPPED
+    # A configured check whose dataset is unavailable is not assessed, never skipped.
+    assert report.get("T-NEEDS").status is Status.ERROR
     summary = report.summary
-    assert (summary.failed, summary.errored, summary.skipped, summary.passed) == (1, 1, 1, 0)
+    assert (summary.failed, summary.errored, summary.skipped, summary.passed) == (1, 2, 0, 0)
     assert report.exit_code(Severity.ERROR) == 1
     # The crashed rule left data unassessed: incomplete even when no failure meets the
     # threshold, and that fails the run unless fail_on_incomplete is switched off.
@@ -192,44 +201,40 @@ def test_runner_turns_outcomes_into_results() -> None:
 
 
 def test_multi_check_rules_grade_each_check_separately() -> None:
-    report = QARunner(make_settings(), _registry(_MultiCheck)).run(frames={})
+    registry = _registry(_MultiCheck)
+    settings = make_settings(rules={"T-MULTI": {}}, registry=registry)
+    report = QARunner(settings, registry).run(frames={})
     results = report.results_for("T-MULTI")
     assert [(r.check, r.status, r.severity) for r in results] == [
         ("a", Status.FAIL, Severity.WARNING),
         ("b", Status.FAIL, Severity.ERROR),
         ("c", Status.PASS, Severity.ERROR),
     ]
-    assert results[0].label == "T-MULTI [a]"
+    assert results[0].label == "t_multi (T-MULTI) [a]"
     assert report.get("T-MULTI").check == "b"  # most severe failure
     assert report.get("T-MULTI", check="c").status is Status.PASS
     (advice,) = report.recommendations()
     assert advice.checks == ["b", "a"]
 
 
-def test_plan_honours_overrides_and_filters() -> None:
+def test_plan_honours_overrides_and_runs_only_configured_checks() -> None:
     registry = _registry(_AlwaysFails, _Crashes, _NeedsData)
     rules = {
         "T-FAIL": {"severity": "critical", "params": {"limit": 5}},
         "T-CRASH": {"enabled": False},
     }
-    plan = QARunner(make_settings(rules=rules), registry).plan()
-    assert [rule.rule_id for rule in plan] == ["T-FAIL", "T-NEEDS"]
+    plan = QARunner(make_settings(rules=rules, registry=registry), registry).plan()
+    assert [rule.rule_id for rule in plan] == ["T-FAIL"]
     assert plan[0].severity is Severity.CRITICAL and plan[0].params.limit == 5
 
-    only = QARunner(make_settings(rules=rules, run_unconfigured_rules=False), registry)
-    assert [rule.rule_id for rule in only.plan()] == ["T-FAIL"]
-    included = QARunner(make_settings(include_categories=["other"]), registry)
-    assert [rule.rule_id for rule in included.plan()] == ["T-NEEDS"]
-    excluded = QARunner(make_settings(exclude_categories=["test"]), registry)
-    assert [rule.rule_id for rule in excluded.plan()] == ["T-NEEDS"]
 
-
-def test_plan_rejects_unknown_rules_and_bad_params() -> None:
+def test_plan_rejects_unknown_checks_and_bad_settings() -> None:
     registry = _registry(_AlwaysFails)
-    with pytest.raises(ConfigurationError, match="unknown rule id"):
-        QARunner(make_settings(rules={"TYPO-1": {}}), registry).plan()
-    with pytest.raises(ConfigurationError, match="T-FAIL"):
-        QARunner(make_settings(rules={"T-FAIL": {"params": {"limit": "many"}}}), registry).plan()
+    with pytest.raises(ConfigurationError, match="unknown check 'typo'"):
+        QARunner(make_settings(datasets={"d": {"checks": [{"check": "typo"}]}}), registry).plan()
+    settings = make_settings(rules={"T-FAIL": {"params": {"limit": "many"}}}, registry=registry)
+    with pytest.raises(ConfigurationError, match=r"checks\[0\]\.limit"):
+        QARunner(settings, registry).plan()
 
 
 def test_parallel_and_sequential_runs_agree(demo, registry: RuleRegistry) -> None:

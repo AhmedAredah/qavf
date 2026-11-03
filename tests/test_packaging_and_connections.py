@@ -48,6 +48,7 @@ def plugin_package(tmp_path, monkeypatch):
 
         class {cls}(Rule):
             rule_id: ClassVar[str] = "{rule_id}"
+            check_name: ClassVar[str] = "rule_id"
             name: ClassVar[str] = "n"
             description: ClassVar[str] = "d"
             category: ClassVar[str] = "c"
@@ -178,6 +179,7 @@ def test_an_explicitly_empty_registry_runs_nothing() -> None:
 
 class _Late(Rule):
     rule_id: ClassVar[str] = "PKG-LATE"
+    check_name: ClassVar[str] = "pkg_late"
     name: ClassVar[str] = "Late"
     description: ClassVar[str] = "Registered after discovery."
     category: ClassVar[str] = "test"

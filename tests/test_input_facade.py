@@ -73,7 +73,7 @@ def test_metadata_or_loading_policy_does_not_imply_acceptance_contract(options):
         validate(item)
 
 
-@pytest.mark.parametrize("options", [{"schema": {}}, {"foreign_keys": []}, {"expressions": []}])
+@pytest.mark.parametrize("options", [{"schema": {}}, {"foreign_keys": []}, {"checks": []}])
 def test_explicit_empty_contracts_retain_existing_empty_config_semantics(options):
     report = validate(Dataset(pl.DataFrame({"x": [1]}), **options))
     assert not report.incomplete
@@ -125,6 +125,7 @@ def test_free_form_tuple_semantics_survive_while_nested_models_revalidate(
 
     class TupleConsumer(Rule):
         rule_id: ClassVar[str] = "FACADE-TUPLES"
+        check_name: ClassVar[str] = "facade_tuples"
         name: ClassVar[str] = "Tuple configuration"
         description: ClassVar[str] = "Plugin settings retain tuple and list distinctions."
         category: ClassVar[str] = "test"
@@ -140,9 +141,9 @@ def test_free_form_tuple_semantics_survive_while_nested_models_revalidate(
     raw = {
         "datasets": {"data": {"schema": contract}},
         "extensions": {"probe": {"value": expected}},
-        "rules": {TupleConsumer.rule_id: {}},
+        "checks": [{"check": TupleConsumer.check_name}],
         "plugins": {"entry_points": False},
-        "engine": {"run_unconfigured_rules": False, "parallel": False},
+        "engine": {"parallel": False},
     }
     config = QAVFSettings.model_validate(raw) if form == "settings" else raw
     if invalid_contract:

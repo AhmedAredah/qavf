@@ -21,6 +21,7 @@ from qavf.settings import DatasetSpec, QAVFSettings
 from qavf.sources.base import DataSource, SourceEnvironment, SourceParams
 from qavf.sources.file import FileSource
 from qavf.sources.parameters import FileParams
+from qavf.testing import with_checks
 
 QUERY = "SELECT sum(x) FROM (SELECT range x FROM range(300000) ORDER BY hash(range))"
 
@@ -46,6 +47,7 @@ def test_native_spill_works_without_precreating_directories(tmp_path):
 def test_runner_budgets_for_actual_rule_concurrency(parallel, expected_slots):
     class Native(Rule):
         rule_id = "TEST-NATIVE"
+        check_name = "test_native"
         name = description = "Native query"
         category = "custom"
 
@@ -59,7 +61,7 @@ def test_runner_budgets_for_actual_rule_concurrency(parallel, expected_slots):
     settings = QAVFSettings(
         engine={"parallel": parallel, "native_threads": 1, "memory_budget_bytes": 64 * 1024**2}
     )
-    report = QARunner(settings, registry).run()
+    report = QARunner(with_checks(settings, registry), registry).run()
     assert report.exit_code() == 0
 
 
@@ -87,6 +89,7 @@ def test_path_plugin_module_and_plan_identity_stable_between_processes(tmp_path)
     path.write_text("""from qavf.engine.registry import Rule,Finding
 class Check(Rule):
  rule_id='STABLE'
+ check_name='stable'
  name=description='Stable'
  category='custom'
  def evaluate(self,ctx): return Finding.ok('done')

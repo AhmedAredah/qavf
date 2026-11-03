@@ -23,6 +23,7 @@ class ProbeParams(RuleParams):
 
 class ExecutionProbe(Rule[ProbeParams]):
     rule_id = "ISOLATION-PROBE"
+    check_name = "isolation_probe"
     name = "Independent execution probe"
     description = "Exercise an execution boundary with an observable real workload."
     category = "test"

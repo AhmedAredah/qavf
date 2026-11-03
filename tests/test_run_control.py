@@ -84,7 +84,7 @@ def _config(tmp_path) -> dict:
 
 
 def _slow_config(tmp_path) -> dict:
-    return _config(tmp_path) | {"assertions": [{"name": "slow", "sql": SLOW_SQL}]}
+    return _config(tmp_path) | {"checks": [{"check": "sql", "name": "slow", "sql": SLOW_SQL}]}
 
 
 @pytest.mark.parametrize("backend", BACKENDS)

@@ -77,8 +77,8 @@ def test_not_null_belongs_in_a_check() -> None:
 # =========================================================================
 @pytest.mark.parametrize("kind", ["csv", "frame", "lazy"])
 def test_row_expression_failures_carry_their_rows(tmp_path, kind) -> None:
-    expressions = [{"expr": "t.x IS NULL OR status = 'open'"}]
-    [violated] = _failed(_source(kind, tmp_path), "INP-006", expressions=expressions)
+    expressions = [{"check": "expression", "expr": "t.x IS NULL OR status = 'open'"}]
+    [violated] = _failed(_source(kind, tmp_path), "INP-006", checks=expressions)
     assert violated.affected_count == 1
     assert [(r["id"], r["_row"]) for r in violated.affected_records] == [(5, 4)]
 

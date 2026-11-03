@@ -23,10 +23,13 @@ from qavf.reports.html import render_html
 from qavf.reports.models import QAReport
 from qavf.settings import QAVFSettings
 from qavf.sources.base import DataSource, SourceEnvironment, SourceParams
+from qavf.testing import checks_config
 
 
 def _settings(**config) -> QAVFSettings:
-    return QAVFSettings.model_validate({"plugins": {"entry_points": False}, **config})
+    return QAVFSettings.model_validate(
+        checks_config({"plugins": {"entry_points": False}, **config})
+    )
 
 
 def _run(registry, frames, **config) -> QAReport:
@@ -179,13 +182,17 @@ def test_json_report_records_effective_configuration_and_rules(registry) -> None
     report = _run(
         registry,
         {"g": pl.DataFrame({"v": [1]})},
-        datasets={"g": {"schema": {"columns": {"v": {"ge": 0}}}}},
-        rules={"STA-001": {"enabled": False}},
+        datasets={
+            "g": {
+                "schema": {"columns": {"v": {"ge": 0}}},
+                "checks": [{"check": "outliers", "column": "v", "enabled": False}],
+            }
+        },
     )
     metadata = json.loads(report.model_dump_json())["metadata"]
     config = metadata["config"]
     assert config["datasets"]["g"]["schema"]["columns"]["v"]["ge"] == 0
-    assert config["rules"]["STA-001"]["enabled"] is False
+    assert config["datasets"]["g"]["checks"][0]["enabled"] is False
     assert re.fullmatch(r"[0-9a-f]{64}", metadata["config_digest"])
     rules = {rule["rule_id"]: rule for rule in metadata["rules"]}
     assert "STA-001" not in rules and "INP-003" in rules
@@ -224,8 +231,7 @@ def test_recorded_configuration_is_redacted(registry) -> None:
     )
     # Recording the configuration needs no data: run nothing, so nothing is fetched.
     # (Secrets inside load-error messages are covered with source provenance.)
-    settings.engine.run_unconfigured_rules = False
-    report = QARunner(settings, registry).run(frames={})
+    report = QARunner(settings, RuleRegistry()).run(frames={})
     text = report.model_dump_json()
     for secret in ("hunter2", "s3cret", "abc123", "zzz"):
         assert secret not in text, secret
@@ -335,6 +341,7 @@ class _SlowSource(DataSource):
 
 class _Noop(Rule):
     rule_id: ClassVar[str] = "NOOP-1"
+    check_name: ClassVar[str] = "noop_1"
     name: ClassVar[str] = "Noop"
     description: ClassVar[str] = "Reads nothing."
     category: ClassVar[str] = "test"
@@ -346,7 +353,7 @@ class _Noop(Rule):
 def test_metadata_does_not_load_unused_sources() -> None:
     registry = RuleRegistry()
     registry.register(_Noop)
-    settings = _settings(rules={"NOOP-1": {}})
+    settings = _settings(checks=[{"check": "noop_1"}])
     ctx = DataContext(sources={"unused": _SlowSource(_SlowParams(), SourceEnvironment())})
     _SlowSource.loads = 0
     report = QARunner(settings, registry).run(ctx=ctx)

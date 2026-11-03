@@ -13,6 +13,7 @@ import pytest
 from qavf import File, ResourceLimits, Status, compare_datasets, validate
 from qavf.compare import DatasetComparison
 from qavf.execution.os_limits import SUPPORTED_PLATFORMS
+from qavf.testing import checks_config
 
 NY = ZoneInfo("America/New_York")
 
@@ -454,42 +455,44 @@ def test_configuration_errors_fail_before_reading_data(level, message):
 def test_cmp001_runs_temporal_levels_from_configuration():
     v1 = _daily(date(2025, 1, 1), 14)
     v2 = v1.with_columns(pl.col("x") * 2)
-    config = {
-        "datasets": {"v1": {}, "v2": {}},
-        "rules": {
-            "CMP-001": {
-                "params": {
-                    "comparisons": [
-                        {
-                            "name": "daily",
-                            "baseline": "v1",
-                            "candidate": "v2",
-                            "levels": [
-                                {
-                                    "level": "temporal",
-                                    "time_column": "t",
-                                    "bucket": "day",
-                                    "group_by": ["site"],
-                                    "measures": ["sum(x)"],
-                                },
-                                {
-                                    "level": "series_shape",
-                                    "severity": "WARNING",
-                                    "time_column": "t",
-                                    "bucket": "day",
-                                    "group_by": ["site"],
-                                    "measure": "sum(x)",
-                                    # A doubled sawtooth: its slope change is material
-                                    # but not significant; this test pins thresholds.
-                                    "decision": "material",
-                                },
-                            ],
-                        }
-                    ]
+    config = checks_config(
+        {
+            "datasets": {"v1": {}, "v2": {}},
+            "rules": {
+                "CMP-001": {
+                    "params": {
+                        "comparisons": [
+                            {
+                                "name": "daily",
+                                "baseline": "v1",
+                                "candidate": "v2",
+                                "levels": [
+                                    {
+                                        "level": "temporal",
+                                        "time_column": "t",
+                                        "bucket": "day",
+                                        "group_by": ["site"],
+                                        "measures": ["sum(x)"],
+                                    },
+                                    {
+                                        "level": "series_shape",
+                                        "severity": "WARNING",
+                                        "time_column": "t",
+                                        "bucket": "day",
+                                        "group_by": ["site"],
+                                        "measure": "sum(x)",
+                                        # A doubled sawtooth: its slope change is material
+                                        # but not significant; this test pins thresholds.
+                                        "decision": "material",
+                                    },
+                                ],
+                            }
+                        ]
+                    }
                 }
-            }
-        },
-    }
+            },
+        }
+    )
     report = validate({"v1": v1, "v2": v2}, config=config)
     results = {r.check: r for r in report.results_for("CMP-001")}
     assert results["daily: temporal: sum(x)"].status is Status.FAIL

@@ -179,7 +179,7 @@ def test_raw_na_expression_is_not_silently_null(backend):
                     }
                 }
             },
-            expressions=[{"expr": "x IS NOT NULL", "null_as": "fail"}],
+            checks=[{"check": "expression", "expr": "x IS NOT NULL", "null_as": "fail"}],
         ),
         backend=backend,
     )

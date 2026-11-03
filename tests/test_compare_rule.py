@@ -11,7 +11,6 @@ import yaml
 
 from qavf import File, QAReport, ResourceLimits, Severity, Status, compare_datasets, validate
 from qavf.cli import EXIT_OK, EXIT_QA_FAILED, EXIT_USAGE, main
-from qavf.engine.compilation import ConfigurationError
 from qavf.execution.os_limits import SUPPORTED_PLATFORMS
 from qavf.reports.html import render_html
 
@@ -35,9 +34,9 @@ V2 = pl.DataFrame(
 
 def _config(**comparison):
     spec = {
+        "check": "compare",
         "name": "aadt v1 vs v2",
-        "baseline": "v1",
-        "candidate": "v2",
+        "datasets": ["v1", "v2"],
         "keys": ["site"],
         "columns": {"aadt_k": "aadt"},
         "units": {"aadt": {"factor": 1000}},
@@ -59,8 +58,8 @@ def _config(**comparison):
     return {
         # A dataset-level rename is applied before the comparison sees the data.
         "datasets": {"v1": {"rename": {"SiteID": "site"}}, "v2": {}},
-        "rules": {"CMP-001": {"params": {"comparisons": [spec]}}},
-        "engine": {"run_unconfigured_rules": False},
+        "checks": [spec],
+        "run": {},
     }
 
 
@@ -95,7 +94,7 @@ def test_cmp001_failures_keep_level_severity_evidence_and_reports():
 
 def test_cmp001_unassessable_checks_are_errors_and_satisfy_no_requirement():
     config = _config(columns={"not_there": "aadt"})
-    config["engine"]["require"] = ["CMP-001[aadt v1 vs v2: records: values]"]
+    config["run"]["require"] = ["aadt v1 vs v2"]
     report = validate({"v1": V1, "v2": V2}, config=config)
     results = _results(report)
     assert {r.status for r in results.values()} == {Status.ERROR}
@@ -111,11 +110,11 @@ def test_cmp001_unavailable_dataset_is_not_assessed():
 
 
 def test_cmp001_configuration_errors_fail_before_any_data_is_read():
-    config = _config(baseline="nope")
-    with pytest.raises(ConfigurationError, match="unknown dataset 'nope'"):
+    config = _config(datasets=["nope", "v2"])
+    with pytest.raises(ValueError, match=r"checks\[0\]\.datasets: unknown dataset 'nope'"):
         validate({"v1": V1, "v2": V2}, config=config)
     config = _config(levels=["records"], keys=[])
-    with pytest.raises(ConfigurationError, match="needs the comparison's 'keys'"):
+    with pytest.raises(ValueError, match="needs the comparison's 'keys'"):
         validate({"v1": V1, "v2": V2}, config=config)
 
 
@@ -133,7 +132,7 @@ def test_cmp001_from_a_configuration_file_and_the_cli(tmp_path):
     assert any(r["rule_id"] == "CMP-001" for r in data["results"])
     V2.with_columns(pl.col("aadt") * 2).write_parquet(tmp_path / "v2.parquet")
     assert main(["run", "-c", str(path)]) == EXIT_QA_FAILED
-    config["rules"]["CMP-001"]["params"]["comparisons"][0]["levels"] = ["mystery"]
+    config["checks"][0]["levels"] = ["mystery"]
     path.write_text(yaml.safe_dump(config), encoding="utf-8")
     assert main(["run", "-c", str(path)]) == EXIT_USAGE
 

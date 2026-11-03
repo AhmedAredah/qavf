@@ -11,6 +11,7 @@ import duckdb
 import polars as pl
 import pytest
 
+from qavf.checks import CheckItem, RunSettings
 from qavf.engine.context import DataContext
 from qavf.engine.registry import Finding, Rule, RuleRegistry
 from qavf.engine.resources import ResourceLimitError, RunResources
@@ -19,6 +20,7 @@ from qavf.engine.severity import Status
 from qavf.settings import ConnectionSpec, QAVFSettings
 from qavf.sources.base import DataSource, SourceEnvironment, SourceError, SourceParams
 from qavf.sources.file import FileSource
+from qavf.testing import with_checks
 
 
 def settings(**engine):
@@ -222,6 +224,7 @@ def test_timeout_never_replaces_occupied_worker_or_accumulates_next_run():
 
     class Slow(Rule):
         rule_id = "S"
+        check_name = "s"
         name = "slow"
         description = "audit"
         category = "audit"
@@ -239,11 +242,11 @@ def test_timeout_never_replaces_occupied_worker_or_accumulates_next_run():
 
     registry = RuleRegistry()
     for i in range(4):
-        registry.register(type(f"Slow{i}", (Slow,), {"rule_id": f"S-{i}"}))
+        registry.register(type(f"Slow{i}", (Slow,), {"rule_id": f"S-{i}", "check_name": f"s_{i}"}))
     cfg = settings(max_workers=1, rule_timeout_s=0.02, timeout_grace_s=0)
     try:
-        report = QARunner(cfg, registry).run()
-        second = QARunner(cfg, registry).run()
+        report = QARunner(with_checks(cfg, registry), registry).run()
+        second = QARunner(with_checks(cfg, registry), registry).run()
         assert peak == 1 and entered.is_set()
         assert all(result.status is Status.ERROR for result in report.results + second.results)
     finally:
@@ -258,6 +261,7 @@ def test_native_timeout_cleanup_does_not_wait_for_udf():
 
     class Native(Rule):
         rule_id = "NATIVE"
+        check_name = "native"
         name = "native"
         description = "audit"
         category = "audit"
@@ -271,7 +275,9 @@ def test_native_timeout_cleanup_does_not_wait_for_udf():
 
     registry.register(Native)
     started = time.monotonic()
-    report = QARunner(settings(rule_timeout_s=0.03, timeout_grace_s=0), registry).run()
+    report = QARunner(
+        with_checks(settings(rule_timeout_s=0.03, timeout_grace_s=0), registry), registry
+    ).run()
     assert time.monotonic() - started < 0.3
     assert report.get("NATIVE").status is Status.ERROR
     time.sleep(0.45)
@@ -282,6 +288,7 @@ def test_evidence_budget_truncates_without_changing_exact_count():
 
     class Large(Rule):
         rule_id = "LARGE"
+        check_name = "large"
         name = "large"
         description = "audit"
         category = "audit"
@@ -295,7 +302,7 @@ def test_evidence_budget_truncates_without_changing_exact_count():
             )
 
     registry.register(Large)
-    report = QARunner(settings(max_evidence_bytes=200), registry).run()
+    report = QARunner(with_checks(settings(max_evidence_bytes=200), registry), registry).run()
     result = report.get("LARGE")
     assert result.affected_count == 999 and result.status is Status.FAIL
     assert result.affected_records == [] and result.metrics == {}
@@ -307,6 +314,7 @@ def test_zero_evidence_bytes_preserves_coverage_outcomes():
 
     class Covered(Rule):
         rule_id = "COVER"
+        check_name = "cover"
         name = "coverage"
         description = "audit"
         category = "audit"
@@ -317,7 +325,9 @@ def test_zero_evidence_bytes_preserves_coverage_outcomes():
             )
 
     registry.register(Covered)
-    cfg = settings(max_evidence_bytes=0, require=["COVER[one]"])
+    cfg = settings(max_evidence_bytes=0).model_copy(
+        update={"checks": [CheckItem(check="cover")], "run": RunSettings(require=["cover"])}
+    )
     report = QARunner(cfg, registry).run()
     assert report.get("COVER").status is Status.PASS
     assert report.get("COVER").metrics["passed_checks"] == ["one", "two"]
@@ -329,6 +339,7 @@ def test_complete_report_budget_trims_optional_evidence_and_fails_closed():
 
     class Large(Rule):
         rule_id = "BIG"
+        check_name = "big"
         name = "large"
         description = "audit"
         category = "audit"
@@ -337,12 +348,12 @@ def test_complete_report_budget_trims_optional_evidence_and_fails_closed():
             return Finding.fail("bad", affected=[{"value": "x" * 20000}], affected_count=20)
 
     registry.register(Large)
-    report = QARunner(settings(max_report_bytes=10000), registry).run()
+    report = QARunner(with_checks(settings(max_report_bytes=10000), registry), registry).run()
     assert report.get("BIG").affected_count == 20 and report.get("BIG").status is Status.FAIL
     assert report.get("BIG").affected_records == []
     assert len(report.model_dump_json().encode()) <= 10000
     with pytest.raises(ResourceLimitError, match="outcome ledger"):
-        QARunner(settings(max_report_bytes=1), registry).run()
+        QARunner(with_checks(settings(max_report_bytes=1), registry), registry).run()
 
 
 def test_plugin_error_log_redacts_credentials(caplog):
@@ -350,6 +361,7 @@ def test_plugin_error_log_redacts_credentials(caplog):
 
     class Crash(Rule):
         rule_id = "CRASH"
+        check_name = "crash"
         name = "crash"
         description = "audit"
         category = "audit"
@@ -358,7 +370,7 @@ def test_plugin_error_log_redacts_credentials(caplog):
             raise RuntimeError("password=secret")
 
     registry.register(Crash)
-    report = QARunner(settings(), registry).run()
+    report = QARunner(with_checks(settings(), registry), registry).run()
     assert report.get("CRASH").status is Status.ERROR
     assert "secret" not in caplog.text
 

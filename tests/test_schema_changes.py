@@ -18,7 +18,7 @@ from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.settings import QAVFSettings
 from qavf.stats import detect_outliers, flag_outliers, zscore_min_samples
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 co = sys.modules["qavf.regression.compare_outputs"]
 REGISTRY = discovered_rules(entry_points=False)
@@ -26,12 +26,14 @@ REGISTRY = discovered_rules(entry_points=False)
 
 def _run(frames, **config):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False, "parallel": False},
-            "datasets": {name: {} for name in frames},
-            **config,
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": False},
+                "datasets": {name: {} for name in frames},
+                **config,
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames=frames)
 

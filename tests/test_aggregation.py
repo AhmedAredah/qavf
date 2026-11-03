@@ -18,19 +18,21 @@ from qavf.rules.helpers import aggregate
 from qavf.rules.spatial_checks import SpatialMetric
 from qavf.rules.temporal_checks import SeriesSpec
 from qavf.settings import QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 
 
 def _run(frames, **config):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False, "parallel": False},
-            "datasets": {name: {} for name in frames},
-            **config,
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": False},
+                "datasets": {name: {} for name in frames},
+                **config,
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames=frames)
 

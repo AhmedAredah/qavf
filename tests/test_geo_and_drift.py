@@ -13,7 +13,7 @@ from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.rules.geo_checks import BoundingBox
 from qavf.settings import QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 HAS_SCIPY = importlib.util.find_spec("scipy") is not None
@@ -21,12 +21,14 @@ HAS_SCIPY = importlib.util.find_spec("scipy") is not None
 
 def _run(frames, rules):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "datasets": {name: {} for name in frames},
-            "rules": rules,
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {},
+                "datasets": {name: {} for name in frames},
+                "rules": rules,
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames=frames)
 

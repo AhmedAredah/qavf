@@ -20,11 +20,9 @@ def checked(source, schema, *, evidence=50):
         config={
             "plugins": {"entry_points": False},
             "engine": {
-                "run_unconfigured_rules": False,
                 "parallel": False,
                 "max_affected_records": evidence,
             },
-            "rules": {"INP-004": {}},
         },
     )
     results = report.results_for("INP-004")
@@ -255,8 +253,7 @@ def test_all_duplicate_positions_respect_evidence_byte_budget(backend):
         },
         config={
             "plugins": {"entry_points": False},
-            "engine": {"max_evidence_bytes": 4096, "run_unconfigured_rules": False},
-            "rules": {"INP-004": {}},
+            "engine": {"max_evidence_bytes": 4096},
         },
     )
     [result] = report.results_for("INP-004")
@@ -304,8 +301,7 @@ def test_duplicate_positions_preserve_nanosecond_key_identity(tmp_path, backend)
         {"data": Dataset(source, schema={"primary_key": ["stamp"]})},
         config={
             "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "rules": {"INP-004": {}},
+            "engine": {},
         },
     )
     [result] = report.results_for("INP-004")

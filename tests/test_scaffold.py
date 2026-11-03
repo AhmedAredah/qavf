@@ -26,8 +26,20 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_yaml_and_json_load_identically(tmp_path) -> None:
     document = {
         "project": "demo",
-        "datasets": {"a": {"path": "data/a.csv", "schema": {"primary_key": ["k"]}}},
-        "rules": {"TMP-001": {"severity": "error", "params": {"max_change_rate": 0.1}}},
+        "datasets": {
+            "a": {
+                "path": "data/a.csv",
+                "schema": {"primary_key": ["k"]},
+                "checks": [
+                    {
+                        "check": "change_rate",
+                        "series": {"value": "v"},
+                        "max": 0.1,
+                        "severity": "error",
+                    }
+                ],
+            }
+        },
         "report": {"json": False},
         "extensions": {"moves": {"version": "MOVES4"}},
     }
@@ -35,7 +47,7 @@ def test_yaml_and_json_load_identically(tmp_path) -> None:
     (tmp_path / "c.yaml").write_text(yaml.safe_dump(document))
     from_json, from_yaml = load_settings(tmp_path / "c.json"), load_settings(tmp_path / "c.yaml")
     assert from_json.model_dump() == from_yaml.model_dump()
-    assert from_json.rules["TMP-001"].severity is Severity.ERROR
+    assert from_json.datasets["a"].checks[0].severity is Severity.ERROR
     assert from_json.report.json_ is False and from_json.extensions["moves"]["version"] == "MOVES4"
     assert from_json.resolve("data/a.csv") == tmp_path / "data" / "a.csv"
 
@@ -73,7 +85,10 @@ def test_invalid_configurations_are_rejected(tmp_path) -> None:
             {"datasets": {"a": {"source": {"type": "database", "connection": "db", "table": "t"}}}},
             "unknown connection",
         ),
-        ({"assertions": [{"name": "x", "sql": "s"}, {"name": "x", "sql": "s"}]}, "unique"),
+        (
+            {"checks": [{"check": "sql", "name": "x", "sql": "s"}] * 2},
+            "'x' is already used in this list",
+        ),
     ]:
         with pytest.raises(ValidationError, match=match):
             QAVFSettings.model_validate(bad)
@@ -144,10 +159,19 @@ def test_render_config_lists_every_rule_and_loads(tmp_path, registry) -> None:
     path = tmp_path / "qavf.yaml"
     path.write_text(text, encoding="utf-8")
     settings = load_settings(path)
-    assert set(settings.rules) == {rule.rule_id for rule in registry}
+    for rule in registry:
+        assert rule.check_name in text
     assert settings.datasets["counts"].schema_spec.columns["x"].ge == 0
     settings.plugins.entry_points = False
-    assert len(QARunner(settings, registry).plan()) == len(registry)
+    # Only the schema contracts run until checks are configured.
+    assert {rule.check_name for rule in QARunner(settings, registry).plan()} == {
+        "datasets_available",
+        "schema",
+        "column_limits",
+        "unique_keys",
+        "references",
+        "not_applicable",
+    }
 
 
 def test_json_schema_validates_configurations(registry) -> None:
@@ -156,10 +180,20 @@ def test_json_schema_validates_configurations(registry) -> None:
     # Editors see YAML dates as strings; mirror that by round-tripping through JSON.
     good = json.loads(json.dumps(yaml.safe_load(demo_config()), default=str))
     assert not list(validator.iter_errors(good))
-    assert {"INP-003", "TMP-001", "REG-001"} <= set(schema["$defs"]["Rules"]["properties"])
+    assert {"Check_change_rate", "Check_matches_baseline", "ExpressionItem", "SqlItem"} <= set(
+        schema["$defs"]
+    )
+    series = {"value": "aadt"}
     for bad in (
-        {"rules": {"TMP-001": {"params": {"max_change_rate": "fast"}}}},
-        {"rules": {"TMP-001": {"params": {"typo": 1}}}},
+        {
+            "datasets": {
+                "a": {"checks": [{"check": "change_rate", "series": series, "max": "fast"}]}
+            }
+        },
+        {"datasets": {"a": {"checks": [{"check": "change_rate", "series": series, "typo": 1}]}}},
+        {"datasets": {"a": {"checks": [{"check": "coverage", "entity": "x"}]}}},
+        {"checks": [{"check": "missing_periods", "series": series}]},
+        {"checks": [{"check": "sql", "sql": "SELECT 1"}]},
         {"datasets": {"a": {"source": {"type": "file", "pth": "x"}}}},
         {"datasets": {"a": {"schema": {"columns": {"x": {"severity": "LOUD"}}}}}},
     ):

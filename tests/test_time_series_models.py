@@ -8,7 +8,7 @@ import pytest
 from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.settings import QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 SERIES = [{"dataset": "s", "value": "v", "group_by": ["site"], "time_column": "t"}]
@@ -16,12 +16,14 @@ SERIES = [{"dataset": "s", "value": "v", "group_by": ["site"], "time_column": "t
 
 def _run(rule, frame, **params):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "datasets": {"s": {}},
-            "rules": {rule: {"params": {"series": SERIES, **params}}},
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {},
+                "datasets": {"s": {}},
+                "rules": {rule: {"params": {"series": SERIES, **params}}},
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames={"s": frame}).get(rule)
 

@@ -158,12 +158,16 @@ def test_core_foreign_keys_expressions_and_sql_assertions():
         "child": Dataset(
             pa.table({"id": [7, 8], "n": [1, 2]}),
             foreign_keys=[{"columns": ["id"], "ref_dataset": "parent"}],
-            expressions=[{"expr": "n < 2"}],
+            checks=[{"check": "expression", "expr": "n < 2"}],
         ),
     }
     report = validate(
         inputs,
-        config={"assertions": [{"name": "too big", "sql": "select * from child where n = 2"}]},
+        config={
+            "checks": [
+                {"check": "sql", "name": "too big", "sql": "select * from child where n = 2"}
+            ]
+        },
         backend="duckdb",
     )
     assert {r.rule_id for r in report.results if r.failed} == {"INP-005", "INP-006", "INP-007"}
@@ -176,7 +180,7 @@ def test_core_explicit_unsupported_work_is_rejected_before_loader_runs():
     with pytest.raises(OptionalDependencyError, match=r"qavf\[polars\]"):
         validate(
             Loader(lambda: calls.append(True)),
-            config={"rules": {"REG-001": {"enabled": True}}},
+            config={"checks": [{"check": "coverage", "entity": "x"}]},
             backend="duckdb",
         )
     assert calls == []

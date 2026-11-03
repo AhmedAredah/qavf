@@ -4,30 +4,33 @@ import duckdb
 import polars as pl
 import pytest
 
-from qavf import Status, validate
+from qavf import Status
 from qavf.engine.context import DataContext
+from qavf.engine.registry import RuleRegistry
+from qavf.engine.runner import QARunner
 from qavf.rules.input_checks.keys import DuplicateKeyRule
-from qavf.settings import DatasetSpec
+from qavf.settings import DatasetSpec, QAVFSettings
 from qavf.sources.base import SourceEnvironment
 from qavf.sources.parameters import QueryParams
 from qavf.sources.query import QuerySource
+from qavf.testing import checks_config
 
 CONTRACT = {"primary_key": ["id"], "unique_keys": [["alternate"]], "unique_rows": True}
 
 
 def config(tmp_path, *, spill=False):
-    return {
-        "plugins": {"entry_points": False},
-        "engine": {
-            "parallel": False,
-            "run_unconfigured_rules": False,
-            "max_affected_records": 2,
-            "temp_directory": str(tmp_path / "owned"),
-            **({"cache_max_bytes": 0} if spill else {}),
-        },
-        "datasets": {"data": {"schema": CONTRACT}},
-        "rules": {"INP-004": {}},
-    }
+    return checks_config(
+        {
+            "plugins": {"entry_points": False},
+            "engine": {
+                "parallel": False,
+                "max_affected_records": 2,
+                "temp_directory": str(tmp_path / "owned"),
+                **({"cache_max_bytes": 0} if spill else {}),
+            },
+            "datasets": {"data": {"schema": CONTRACT}},
+        }
+    )
 
 
 @pytest.mark.parametrize("spill", [False, True])
@@ -44,9 +47,12 @@ def test_lazy_primary_alternate_and_whole_rows_share_one_observation(
         is_duplicate = duplicate_first if len(calls) == 1 else not duplicate_first
         return duplicates if is_duplicate else distinct
 
-    report = validate(
-        distinct.lazy().map_batches(observe, schema=distinct.schema),
-        config=config(tmp_path, spill=spill),
+    # Only the key contract runs, so the observation count is the key checks' own.
+    registry = RuleRegistry()
+    registry.register(DuplicateKeyRule)
+    settings = QAVFSettings.model_validate(config(tmp_path, spill=spill))
+    report = QARunner(settings, registry).run(
+        frames={"data": distinct.lazy().map_batches(observe, schema=distinct.schema)}
     )
     results = report.results_for("INP-004")
     assert len(calls) == 1

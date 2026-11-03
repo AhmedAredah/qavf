@@ -25,7 +25,7 @@ def test_named_contracts_keep_each_schema_reference_and_expression():
                 pl.DataFrame({"id": [1, 2], "x": [-1, 2]}),
                 schema=SCHEMA,
                 foreign_keys=[{"columns": ["id"], "ref_dataset": "parent"}],
-                expressions=[{"name": "positive expression", "expr": "x >= 0"}],
+                checks=[{"check": "expression", "name": "positive expression", "expr": "x >= 0"}],
             ),
             "parent": Dataset(
                 pl.DataFrame({"id": [1]}),

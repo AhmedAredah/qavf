@@ -9,10 +9,12 @@ from qavf import DataRequirements, Finding, QARunner, Rule
 from qavf.engine.planning import build_plan
 from qavf.engine.registry import RuleRegistry
 from qavf.settings import QAVFSettings
+from qavf.testing import checks_config
 
 
 class _Declared(Rule):
     rule_id = "TEST-A"
+    check_name = "test_a"
     name = "Declared reader"
     description = "A plugin with an explicit complete dependency contract."
     category = "test"
@@ -26,6 +28,7 @@ class _Declared(Rule):
 
 class _Both(_Declared):
     rule_id = "TEST-B"
+    check_name = "test_b"
 
     def data_requirements(self, settings):
         return DataRequirements(frozenset({"a", "b"}))
@@ -33,6 +36,7 @@ class _Both(_Declared):
 
 class _Opaque(_Declared):
     rule_id = "TEST-O"
+    check_name = "test_o"
     requires = ("a",)
 
     def data_requirements(self, settings):
@@ -60,47 +64,54 @@ def test_parallel_completion_releases_each_dataset_once():
 
 def test_builtin_nested_dataset_references_are_kept():
     settings = QAVFSettings.model_validate(
-        {
-            "datasets": {"counts": {}, "sites": {}, "baseline": {}, "unrelated": {}},
-            "engine": {"run_unconfigured_rules": False},
-            "plugins": {"entry_points": False},
-            "rules": {
-                "TMP-004": {
-                    "params": {
-                        "series": [{"dataset": "counts", "value": "x", "group_by": ["id"]}],
-                        "groups_from": "sites",
-                    }
+        checks_config(
+            {
+                "datasets": {"counts": {}, "sites": {}, "baseline": {}, "unrelated": {}},
+                "engine": {},
+                "plugins": {"entry_points": False},
+                "rules": {
+                    "TMP-004": {
+                        "params": {
+                            "series": [{"dataset": "counts", "value": "x", "group_by": ["id"]}],
+                            "groups_from": "sites",
+                        }
+                    },
+                    "STA-002": {
+                        "params": {
+                            "comparisons": [
+                                {"dataset": "counts", "reference": "baseline", "column": "x"}
+                            ]
+                        }
+                    },
                 },
-                "STA-002": {
-                    "params": {
-                        "comparisons": [
-                            {"dataset": "counts", "reference": "baseline", "column": "x"}
-                        ]
-                    }
-                },
-            },
-        }
+            }
+        )
     )
     rules = QARunner(settings).plan()
     plan = build_plan(rules, settings, settings.datasets)
     descriptions = {entry["rule_id"]: entry for entry in plan.describe()}
     assert descriptions["TMP-004"]["datasets"] == ["counts", "sites"]
     assert descriptions["STA-002"]["datasets"] == ["baseline", "counts"]
-    assert plan.complete("TMP-004") == {"sites"}
-    assert plan.complete("STA-002") == {"baseline", "counts"}
+    keys = {rule.rule_id: rule.key for rule in rules}
+    for rule in rules:  # schema contracts, which always run, finish first
+        if rule.binding is None:
+            plan.complete(rule.key)
+    assert plan.complete(keys["TMP-004"]) == {"sites"}
+    assert plan.complete(keys["STA-002"]) == {"baseline", "counts"}
 
 
 def test_arbitrary_input_sql_retains_all_datasets_conservatively():
     settings = QAVFSettings.model_validate(
         {
             "datasets": {"a": {}, "b": {}},
-            "engine": {"run_unconfigured_rules": False},
-            "rules": {"INP-007": {}},
+            "engine": {},
+            "checks": [{"check": "sql", "name": "anything", "sql": "SELECT 1 WHERE false"}],
         }
     )
     plan = build_plan(QARunner(settings).plan(), settings, settings.datasets)
-    assert plan.describe()[0]["datasets"] == ["a", "b"]
-    assert plan.describe()[0]["dependency_mode"] == "opaque"
+    (sql,) = [entry for entry in plan.describe() if entry["rule_id"] == "INP-007"]
+    assert sql["datasets"] == ["a", "b"]
+    assert sql["dependency_mode"] == "opaque"
 
 
 def test_invalid_column_dependency_cannot_authorize_early_release():

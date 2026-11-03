@@ -44,12 +44,11 @@ def test_input_category_discovery_runs_all_exported_rules_once():
                     "na_groups": [["id", "value"]],
                 },
                 "foreign_keys": [{"columns": ["id"], "ref_dataset": "parent"}],
-                "expressions": [{"expr": "value >= id"}],
+                "checks": [{"check": "expression", "expr": "value >= id"}],
             },
             "parent": {"schema": {"columns": {"id": {"dtype": "int"}}}},
         },
         assertions=[{"name": "nonnegative", "sql": 'SELECT * FROM "child" WHERE value < 0'}],
-        run_unconfigured_rules=False,
     )
     assert {result.rule_id for result in report.results} == {rule.rule_id for rule in expected}
     assert all(result.status is Status.PASS for result in report.results)
@@ -87,11 +86,9 @@ def test_foreign_key_findings_preserve_counts_severity_and_bounded_evidence(
                 },
                 "parent": {},
             },
-            "rules": {"INP-005": {}},
             "plugins": {"entry_points": False},
             "engine": {
                 "parallel": False,
-                "run_unconfigured_rules": False,
                 "max_affected_records": limit,
             },
         },

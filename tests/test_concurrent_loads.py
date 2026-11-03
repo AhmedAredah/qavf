@@ -23,7 +23,7 @@ from qavf.engine.context import DataContext
 from qavf.engine.runner import QARunner
 from qavf.settings import QAVFSettings
 from qavf.sources.base import DataSource, SourceEnvironment, SourceParams
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 compare_module = sys.modules["qavf.regression.compare_outputs"]
 comparison_execution = sys.modules["qavf.regression._comparison"]
@@ -161,15 +161,17 @@ def test_temporal_rules_share_one_aggregate_per_series(monkeypatch) -> None:
         {"g": ["a"] * 4, "year": [2020, 2021, 2022, 2023], "v": [1.0, 1.1, 1.2, 1.3]}
     )
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "datasets": {"s": {}},
-            "engine": {"run_unconfigured_rules": False, "parallel": True},
-            "rules": {
-                "TMP-001": {"params": {"series": series}},
-                "TMP-004": {"params": {"series": series}},
-            },
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "datasets": {"s": {}},
+                "engine": {"parallel": True},
+                "rules": {
+                    "TMP-001": {"params": {"series": series}},
+                    "TMP-004": {"params": {"series": series}},
+                },
+            }
+        )
     )
     report = QARunner(settings, REGISTRY).run(frames={"s": frame})
     assert all(not r.failed for r in report.results)
@@ -179,15 +181,17 @@ def test_temporal_rules_share_one_aggregate_per_series(monkeypatch) -> None:
 def test_unusable_shared_aggregates_are_reported_by_every_rule() -> None:
     series = [{"dataset": "s", "value": "missing_column"}]
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "datasets": {"s": {}},
-            "engine": {"run_unconfigured_rules": False},
-            "rules": {
-                "TMP-001": {"params": {"series": series}},
-                "TMP-004": {"params": {"series": series}},
-            },
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "datasets": {"s": {}},
+                "engine": {},
+                "rules": {
+                    "TMP-001": {"params": {"series": series}},
+                    "TMP-004": {"params": {"series": series}},
+                },
+            }
+        )
     )
     report = QARunner(settings, REGISTRY).run(frames={"s": pl.DataFrame({"year": [2020]})})
     blocked = {r.rule_id for r in report.results if "missing_column" in r.message}

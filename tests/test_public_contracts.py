@@ -13,7 +13,7 @@ from qavf.engine.runner import QARunner
 from qavf.redaction import redact
 from qavf.regression import accept_baseline, compare_frames, verify_baseline
 from qavf.settings import QAVFSettings
-from qavf.testing import rule_results
+from qavf.testing import checks_config, rule_results
 
 
 def test_exact_integer_bound_is_not_rounded_into_float_pass():
@@ -116,11 +116,13 @@ def test_overflowing_reconciliation_tolerance_does_not_pass():
 def test_owned_query_supports_eager_statistical_rules():
     report = validate(
         Query("SELECT i AS x FROM range(20) t(i)"),
-        config={
-            "rules": {"STA-001": {"params": {"targets": [{"dataset": "data", "value": "x"}]}}},
-            "engine": {"run_unconfigured_rules": False, "parallel": False},
-            "plugins": {"entry_points": False},
-        },
+        config=checks_config(
+            {
+                "rules": {"STA-001": {"params": {"targets": [{"dataset": "data", "value": "x"}]}}},
+                "engine": {"parallel": False},
+                "plugins": {"entry_points": False},
+            }
+        ),
     )
     assert all(r.status.value != "ERROR" for r in report.results)
 
@@ -128,6 +130,7 @@ def test_owned_query_supports_eager_statistical_rules():
 def test_evidence_budget_counts_persisted_float_tags():
     class EvidenceRule(Rule):
         rule_id = "AUD-001"
+        check_name = "aud_001"
         name = "Evidence"
         description = "Audit"
         category = "audit"
@@ -138,7 +141,11 @@ def test_evidence_budget_counts_persisted_float_tags():
     registry = RuleRegistry()
     registry.register(EvidenceRule)
     settings = QAVFSettings.model_validate(
-        {"engine": {"max_evidence_bytes": 12000}, "plugins": {"entry_points": False}}
+        {
+            "engine": {"max_evidence_bytes": 12000},
+            "plugins": {"entry_points": False},
+            "checks": [{"check": "aud_001"}],
+        }
     )
     result = QARunner(settings, registry).run().results[0]
     encoded = json.dumps(

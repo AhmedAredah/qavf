@@ -19,6 +19,7 @@ from qavf.compare import DatasetComparison
 from qavf.execution.os_limits import SUPPORTED_PLATFORMS
 from qavf.spatial import extension
 from qavf.spatial.extension import SpatialUnavailable
+from qavf.testing import checks_config
 
 
 def _support():
@@ -366,33 +367,35 @@ def test_a_missing_extension_leaves_geometry_checks_not_assessed(tmp_path, monke
 # ----------------------------------------------------------------- integration
 def test_cmp001_runs_spatial_levels_through_validate(tmp_path):
     zones = S.wkt_frame(S.grid_zones(N))
-    config = {
-        "datasets": {"v1": {}, "v2": {}, "zones": {}},
-        "rules": {
-            "CMP-001": {
-                "params": {
-                    "comparisons": [
-                        {
-                            "name": "trips",
-                            "baseline": "v1",
-                            "candidate": "v2",
-                            "steps": [
-                                {
-                                    "step": "assign_zones",
-                                    "x": "lon",
-                                    "y": "lat",
-                                    "layer": {"dataset": "zones"},
-                                }
-                            ],
-                            "levels": [{"level": "spatial", "severity": "WARNING"}],
-                        }
-                    ]
+    config = checks_config(
+        {
+            "datasets": {"v1": {}, "v2": {}, "zones": {}},
+            "rules": {
+                "CMP-001": {
+                    "params": {
+                        "comparisons": [
+                            {
+                                "name": "trips",
+                                "baseline": "v1",
+                                "candidate": "v2",
+                                "steps": [
+                                    {
+                                        "step": "assign_zones",
+                                        "x": "lon",
+                                        "y": "lat",
+                                        "layer": {"dataset": "zones"},
+                                    }
+                                ],
+                                "levels": [{"level": "spatial", "severity": "WARNING"}],
+                            }
+                        ]
+                    }
                 }
-            }
-        },
-        "engine": {"run_unconfigured_rules": False},
-        "plugins": {"entry_points": False},
-    }
+            },
+            "engine": {},
+            "plugins": {"entry_points": False},
+        }
+    )
     report = validate({"v1": _points(3), "v2": _points(4, 1.6), "zones": zones}, config=config)
     results = {r.check: r for r in report.results_for("CMP-001")}
     assert results["trips: spatial: lisa"].status is Status.FAIL
@@ -407,14 +410,14 @@ def test_cmp001_runs_spatial_levels_through_validate(tmp_path):
 def test_unknown_layer_datasets_are_configuration_errors():
     from qavf.engine.compilation import ConfigurationError
 
-    config = {
+    config = checks_config({
         "datasets": {"v1": {}, "v2": {}},
         "rules": {"CMP-001": {"params": {"comparisons": [{
             "baseline": "v1", "candidate": "v2",
             "steps": [{"step": "assign_zones", "x": "lon", "y": "lat",
                        "layer": {"dataset": "nowhere"}}],
         }]}}},
-    }  # fmt: skip
+    })  # fmt: skip
     with pytest.raises(ConfigurationError, match="unknown dataset 'nowhere'"):
         validate({"v1": _points(1), "v2": _points(1)}, config=config)
 
@@ -424,13 +427,14 @@ def test_documented_spatial_configuration_validates():
 
     import yaml
 
-    from qavf.rules.comparison_checks import DatasetComparisonRule
+    from qavf.checks.compiler import compile_checks
     from qavf.settings import QAVFSettings
 
     text = (Path(__file__).resolve().parents[1] / "docs" / "spatial.md").read_text("utf-8")
     (configuration,) = re.findall(r"```yaml\n(.*?)```", text, flags=re.DOTALL)
     settings = QAVFSettings.model_validate(yaml.safe_load(configuration))
-    rule = DatasetComparisonRule(settings.rules["CMP-001"].params)
+    (compiled,) = compile_checks(settings)
+    rule = compiled.rule()
     assert rule.configuration_errors(settings) == []
     assert rule.data_requirements(settings).datasets == {"trips_2024", "trips_2025", "zones"}
 

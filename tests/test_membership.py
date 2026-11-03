@@ -15,21 +15,23 @@ import numpy as np
 import polars as pl
 import pytest
 
-from qavf.engine.runner import ConfigurationError, QARunner
+from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.settings import QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 
 
 def _run(frames, *, parallel: bool = False, **config):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"parallel": parallel, **config.pop("engine", {})},
-            **config,
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": parallel, **config.pop("engine", {})},
+                **config,
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames=frames)
 
@@ -115,59 +117,51 @@ def test_passed_checks_are_listed_individually() -> None:
     assert report.get("INP-003", "t.a: ge 0, le 1").status is Status.FAIL
 
 
-def test_excluded_rules_are_recorded_with_the_reason() -> None:
+def test_disabled_checks_are_recorded_with_the_reason() -> None:
     report = _run(
         {"t": pl.DataFrame({"a": [1]})},
-        datasets={"t": {}},
-        rules={"STA-001": {"enabled": False}},
-        engine={"exclude_categories": ["temporal"]},
+        datasets={"t": {"checks": [{"check": "outliers", "column": "a", "enabled": False}]}},
     )
     excluded = report.metadata.excluded_rules
-    assert excluded["STA-001"] == "disabled in the configuration"
-    assert "exclude_categories" in excluded["TMP-001"]
-    assert "INP-001" not in excluded
+    assert excluded == {"outliers on t": "disabled in the configuration"}
     assert json.loads(report.model_dump_json())["metadata"]["excluded_rules"] == excluded
 
 
 @pytest.mark.parametrize(
-    ("config", "reason"),
+    ("checks", "reason"),
     [
-        ({"rules": {"INP-004": {"enabled": False}}}, "excluded"),
-        ({"engine": {"exclude_categories": ["input"]}}, "excluded"),
-        ({}, "skipped"),  # no primary key configured: INP-004 skips
+        ([{"check": "outliers", "column": "a", "name": "spread", "enabled": False}], "disabled"),
+        ([{"check": "outliers", "column": "nope", "name": "spread"}], "could not be assessed"),
     ],
 )
-def test_required_checks_that_were_not_assessed_make_the_run_incomplete(config, reason) -> None:
-    engine = {"require": ["INP-004"], **config.pop("engine", {})}
-    report = _run({"t": pl.DataFrame({"a": [1]})}, datasets={"t": {}}, engine=engine, **config)
-    [required] = [r for r in report.results if r.check == "required: INP-004"]
+def test_required_checks_that_were_not_assessed_make_the_run_incomplete(checks, reason) -> None:
+    report = _run(
+        {"t": pl.DataFrame({"a": [1]})},
+        datasets={"t": {"checks": checks}},
+        run={"require": ["spread"]},
+    )
+    [required] = [r for r in report.results if r.check == "required: spread"]
     assert required.status is Status.ERROR and reason in required.message
     assert report.verdict() == "incomplete"
 
 
 def test_required_checks_that_ran_add_nothing() -> None:
-    datasets = {"t": {"schema": {"primary_key": ["a"], "columns": {"a": {"ge": 0}}}}}
+    datasets = {
+        "t": {
+            "schema": {"primary_key": ["a"], "columns": {"a": {"ge": 0}}},
+            "checks": [{"check": "expression", "expr": "a > 0", "name": "positive"}],
+        }
+    }
     report = _run(
-        {"t": pl.DataFrame({"a": [1, 2]})},
-        datasets=datasets,
-        engine={"require": ["INP-004", "INP-003[t.a: ge 0]"]},
+        {"t": pl.DataFrame({"a": [1, 2]})}, datasets=datasets, run={"require": ["t", "positive"]}
     )
     assert not [r for r in report.results if (r.check or "").startswith("required:")]
     assert report.verdict() == "passed"
 
 
-def test_a_required_single_check_must_exist() -> None:
-    report = _run(
-        {"t": pl.DataFrame({"a": [1]})},
-        datasets={"t": {"schema": {"columns": {"a": {"ge": 0}}}}},
-        engine={"require": ["INP-003[t.a: le 5]"]},
-    )
-    assert report.verdict() == "incomplete"
-
-
-def test_unknown_required_rules_are_configuration_errors() -> None:
-    with pytest.raises(ConfigurationError, match="NOPE-1"):
-        _run({}, engine={"require": ["NOPE-1"]})
+def test_unknown_required_checks_are_configuration_errors() -> None:
+    with pytest.raises(ValueError, match="'NOPE-1' matches no check name or dataset"):
+        _run({}, run={"require": ["NOPE-1"]})
 
 
 # =========================================================================

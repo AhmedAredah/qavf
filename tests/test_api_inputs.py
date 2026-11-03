@@ -17,6 +17,7 @@ from qavf import Loader, Query, ResourceLimits, Status, validate
 from qavf.engine.runner import QARunner
 from qavf.inputs.adapters import _QueryInput
 from qavf.settings import QAVFSettings
+from qavf.testing import checks_config
 
 SCHEMA = {"columns": {"x": {"dtype": "int", "ge": 0}}}
 
@@ -93,11 +94,12 @@ def test_native_query_preserves_parameters_without_eager_load(monkeypatch):
     monkeypatch.setattr(_QueryInput, "load", fail_if_loaded)
     report = validate(
         Query("SELECT $value AS x", parameters={"value": -1}),
-        config={
-            "datasets": {"data": {"expressions": [{"expr": "x >= 0"}]}},
-            "engine": {"run_unconfigured_rules": False, "parallel": False},
-            "rules": {"INP-006": {}},
-        },
+        config=checks_config(
+            {
+                "datasets": {"data": {"checks": [{"check": "expression", "expr": "x >= 0"}]}},
+                "engine": {"parallel": False},
+            }
+        ),
     )
     assert any(r.status is Status.FAIL and r.affected_count == 1 for r in report.results)
     assert not any(r.status is Status.ERROR for r in report.results)

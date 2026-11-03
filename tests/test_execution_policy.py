@@ -12,6 +12,7 @@ from qavf.engine.registry import RuleRegistry
 from qavf.execution.errors import ExecutionLimitError
 from qavf.execution.protocol import bounded_chunks, read_request, request_bytes, write_result
 from qavf.inputs.descriptors import Query
+from qavf.testing import checks_config
 
 
 @pytest.mark.parametrize(
@@ -97,11 +98,12 @@ def test_direct_runner_path_override_is_rejected_before_execution(tmp_path):
 
 def test_request_preserves_tagged_values_and_policy_omission(tmp_path):
     settings = QAVFSettings.model_validate(
-        {
-            "engine": {"run_timeout_s": 3},
-            "datasets": {"d": {}},
-            "rules": {"CUSTOM-001": {"enabled": False}},
-        }
+        checks_config(
+            {
+                "engine": {"run_timeout_s": 3},
+                "datasets": {"d": {"checks": [{"check": "custom_001", "enabled": False}]}},
+            }
+        )
     )
     settings.source_path = tmp_path / "config.json"
     request = request_bytes(
@@ -111,7 +113,7 @@ def test_request_preserves_tagged_values_and_policy_omission(tmp_path):
     path.write_bytes(request)
     restored, inputs, options = read_request(path)
     assert restored.model_dump() == settings.model_dump()
-    assert "params" not in restored.rules["CUSTOM-001"].model_fields_set
+    assert restored.datasets["d"].checks[0].settings == {}
     assert restored.source_path == settings.source_path
     assert inputs["d"].parameters["v"] == Decimal("1.234567890123456789")
     assert options == {}

@@ -6,6 +6,7 @@ import polars as pl
 import pytest
 
 from qavf import Status, validate
+from qavf.testing import checks_config
 
 
 def _within(limits):
@@ -13,24 +14,26 @@ def _within(limits):
     zones = pl.DataFrame({"zone": ["study"], "geometry": ["POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))"]})
     report = validate(
         {"points": points, "zones": zones},
-        config={
-            "plugins": {"entry_points": False},
-            "engine": {"parallel": False, "run_unconfigured_rules": False},
-            "datasets": {"points": {}, "zones": {}},
-            "rules": {
-                "GEO-001": {
-                    "params": {
-                        "points": [
-                            {
-                                "dataset": "points",
-                                "within": {"dataset": "zones"},
-                                "assignment_limits": limits,
-                            }
-                        ]
+        config=checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": False},
+                "datasets": {"points": {}, "zones": {}},
+                "rules": {
+                    "GEO-001": {
+                        "params": {
+                            "points": [
+                                {
+                                    "dataset": "points",
+                                    "within": {"dataset": "zones"},
+                                    "assignment_limits": limits,
+                                }
+                            ]
+                        }
                     }
-                }
-            },
-        },
+                },
+            }
+        ),
     )
     return {result.check: result for result in report.results_for("GEO-001")}
 

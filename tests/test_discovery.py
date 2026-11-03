@@ -22,7 +22,7 @@ from qavf.cli import EXIT_OK, EXIT_USAGE, main
 from qavf.engine.registry import default_registry, registration_transaction
 from qavf.engine.runner import ConfigurationError, build_registry
 from qavf.scaffold import config_json_schema, profile_frame, render_config
-from qavf.settings import RuleSettings, SchemaSpec, load_settings
+from qavf.settings import SchemaSpec, load_settings
 from qavf.sources import DataSource, SourceParams, SourceRegistry
 
 
@@ -32,6 +32,7 @@ class Needed(RuleParams):
 
 class NeededRule(Rule[Needed]):
     rule_id: ClassVar[str] = "REV3-NEEDED"
+    check_name: ClassVar[str] = "rev3_needed"
     name: ClassVar[str] = "Needs configuration"
     description: ClassVar[str] = "Cannot run until a threshold is set."
     category: ClassVar[str] = "custom"
@@ -129,6 +130,7 @@ def _plugin_text(*, fail=True):
 @register
 class Partial(Rule):
     rule_id = 'REV3-PARTIAL'
+    check_name = "rev3_partial"
     name = 'Partial'
     description = 'A staged declaration'
     category = 'custom'
@@ -173,6 +175,7 @@ def test_failed_module_registration_also_discards_decorators(tmp_path):
         + """
 class Invalid(Rule):
     rule_id = 'REV3-INVALID'
+    check_name = "rev3_invalid"
     def evaluate(self, ctx):
         return Finding.ok('ok')
 """
@@ -214,7 +217,9 @@ def test_transaction_preserves_unrelated_concurrent_registration(fail):
     try:
         assert staged.wait(5)
         assert "REV3-NEEDED" not in default_registry
-        other = type("ConcurrentRule", (NeededRule,), {"rule_id": "REV3-OTHER"})
+        other = type(
+            "ConcurrentRule", (NeededRule,), {"rule_id": "REV3-OTHER", "check_name": "rev3_other"}
+        )
         default_registry.register(other)
     finally:
         finish.set()
@@ -229,11 +234,11 @@ def test_transaction_preserves_unrelated_concurrent_registration(fail):
 @pytest.mark.parametrize("explicit_params", [False, True])
 def test_disabled_required_params_have_identical_facade_semantics(tmp_path, form, explicit_params):
     default_registry.register(NeededRule)
-    rule = {"enabled": False}
+    item = {"check": NeededRule.check_name, "enabled": False}
     if explicit_params:
-        rule["params"] = {}
+        item["threshold"] = "not a number"
     raw = {
-        "rules": {NeededRule.rule_id: rule},
+        "checks": [item],
         "datasets": {"data": {"schema": {"min_rows": 1}}},
         "plugins": {"entry_points": False},
         "engine": {"parallel": False},
@@ -246,21 +251,15 @@ def test_disabled_required_params_have_identical_facade_semantics(tmp_path, form
         config.write_text(yaml.safe_dump(raw))
     frame = pl.DataFrame({"x": [1]})
     if explicit_params:
-        with pytest.raises(ConfigurationError, match="disabled rule"):
+        # Settings given for a disabled check are still checked, so a typo is caught now.
+        with pytest.raises(ConfigurationError, match=r"checks\[0\]\.threshold"):
             validate(frame, config=config)
     else:
         report = validate(frame, config=config)
         assert report.exit_code() == 0
-        assert report.metadata.excluded_rules[NeededRule.rule_id] == "disabled in the configuration"
-
-
-def test_omission_serializer_keeps_mutated_parameters_and_explicit_empty_mapping():
-    omitted = RuleSettings(enabled=False)
-    assert "params" not in RuleSettings.model_validate(omitted.model_dump()).model_fields_set
-    omitted.params["threshold"] = 2
-    assert omitted.model_dump()["params"] == {"threshold": 2}
-    explicit = RuleSettings.model_validate(RuleSettings(params={}).model_dump())
-    assert "params" in explicit.model_fields_set
+        assert report.metadata.excluded_rules[NeededRule.check_name] == (
+            "disabled in the configuration"
+        )
 
 
 class Aliased(RuleParams):
@@ -293,16 +292,13 @@ def test_plugin_scaffold_handles_aliases_and_conditional_defaults(params):
     registry.register(rule)
     text = render_config(registry)
     raw = yaml.safe_load(text)
-    entry = raw["rules"][rule.rule_id]
-    assert entry["enabled"] is False
-    assert "params" not in entry
+    assert rule.check_name in text
     assert QARunner(QAVFSettings.model_validate(raw), registry=registry).plan() == []
     schema = config_json_schema(registry, SourceRegistry())
     jsonschema.validate(raw, schema)
-    enabled = {"rules": {rule.rule_id: {"enabled": True}}}
+    unknown = {"checks": [{"check": rule.check_name, "unknown_setting": 1}]}
     with pytest.raises(jsonschema.ValidationError):
-        jsonschema.validate(enabled, schema)
-    assert "source" in text if params is not Conditional else "left or right" in text
+        jsonschema.validate(unknown, schema)
 
 
 @pytest.mark.parametrize("suffix", [".yaml", ".yml", ".json", ".JSON"])
@@ -352,6 +348,7 @@ def config_key_plugin():
 
     class KeySensitiveRule(Rule):
         rule_id: ClassVar[str] = "REV3-KEYS"
+        check_name: ClassVar[str] = "rev3_keys"
         name: ClassVar[str] = "Configuration key semantics"
         description: ClassVar[str] = "Nested mapping keys retain their runtime meaning."
         category: ClassVar[str] = "custom"
@@ -401,7 +398,9 @@ def test_runner_preflight_rejects_late_nonstring_config_key(config_key_plugin, m
 
 def test_string_config_mapping_key_reaches_real_plugin(config_key_plugin):
     registry, calls = config_key_plugin
-    settings = QAVFSettings.model_validate({"extensions": {"probe": {"mapping": {"1": "x"}}}})
+    settings = QAVFSettings.model_validate(
+        {"extensions": {"probe": {"mapping": {"1": "x"}}}, "checks": [{"check": "rev3_keys"}]}
+    )
     report = QARunner(settings, registry=registry, sources=SourceRegistry()).run()
     assert calls == [{"1": "x"}]
     assert report.results[0].status.value == "FAIL"

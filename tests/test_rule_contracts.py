@@ -290,7 +290,9 @@ def test_expression_observation_preserves_missing_input_policy(
         sources["d"] = QuerySource(
             QueryParams(sql="SELECT * FROM absent_table"), SourceEnvironment()
         )
-    spec = DatasetSpec.model_validate({"required": required, "expressions": [{"expr": "x > 0"}]})
+    spec = DatasetSpec.model_validate(
+        {"required": required, "checks": [{"check": "expression", "expr": "x > 0"}]}
+    )
     with DataContext(sources=sources, specs={"d": spec}) as ctx:
         findings = ExpressionRule({"datasets": ["d"]} if selected else {}).evaluate(ctx)
     [finding] = findings
@@ -320,7 +322,7 @@ def test_expression_known_source_failure_is_not_retried(monkeypatch):
     monkeypatch.setattr(connections, "connect", instrumented)
     monkeypatch.setattr(query, "connect", instrumented)
     source = QuerySource(QueryParams(sql="SELECT broken_source() AS x"), SourceEnvironment())
-    spec = DatasetSpec.model_validate({"expressions": [{"expr": "x > 0"}]})
+    spec = DatasetSpec.model_validate({"checks": [{"check": "expression", "expr": "x > 0"}]})
     with DataContext(sources={"d": source}, specs={"d": spec}) as ctx:
         # Force a genuine prior load failure on every supported DuckDB version.
         with pytest.raises(Exception, match="controlled source failure"):

@@ -13,6 +13,7 @@ from qavf.engine.resources import ByteCache, FrameStore, ResourceLimitError
 from qavf.engine.runner import QARunner
 from qavf.settings import DatasetSpec, QAVFSettings
 from qavf.sources.base import DataSource, SourceEnvironment, SourceError, SourceParams
+from qavf.testing import with_checks
 
 
 @pytest.mark.parametrize("operation", ["project", "reduce", "get", "join"])
@@ -258,6 +259,7 @@ def test_no_memory_or_disk_capacity_fails_without_leaking_partial_observation():
 def test_small_memory_target_reduces_rule_concurrency_before_native_oom():
     class Native(Rule):
         rule_id = "REVIEW-MEMORY"
+        check_name = "review_memory"
         name = description = "Memory scheduling gate"
         category = "custom"
 
@@ -272,12 +274,18 @@ def test_small_memory_target_reduces_rule_concurrency_before_native_oom():
 
     registry = RuleRegistry()
     for index in range(8):
-        registry.register(type(f"Native{index}", (Native,), {"rule_id": f"MEM-{index}"}))
+        registry.register(
+            type(
+                f"Native{index}",
+                (Native,),
+                {"rule_id": f"MEM-{index}", "check_name": f"mem_{index}"},
+            )
+        )
     settings = QAVFSettings(
         plugins={"entry_points": False},
         engine={"memory_budget_bytes": 32 * 1024**2, "native_threads": 1, "max_workers": 8},
     )
-    report = QARunner(settings, registry).run()
+    report = QARunner(with_checks(settings, registry), registry).run()
     assert report.metadata.max_workers == 1
     assert report.exit_code() == 0
     with DataContext(memory_budget_bytes=32 * 1024**2) as ctx:

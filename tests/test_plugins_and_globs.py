@@ -22,14 +22,14 @@ from qavf.engine.severity import Status
 from qavf.io import atomic_write, write_table
 from qavf.settings import QAVFSettings
 from qavf.sources.parameters import FileParams
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 
 
 def _settings(**config) -> QAVFSettings:
     return QAVFSettings.model_validate(
-        {"plugins": {"entry_points": False}, "engine": {"run_unconfigured_rules": False}, **config}
+        checks_config({"plugins": {"entry_points": False}, "engine": {}, **config})
     )
 
 

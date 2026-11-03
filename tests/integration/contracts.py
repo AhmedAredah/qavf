@@ -47,9 +47,8 @@ def configuration() -> dict:
                 }
             }
         },
-        "engine": {"parallel": False, "run_unconfigured_rules": False},
+        "engine": {"parallel": False},
         "plugins": {"entry_points": False},
-        "rules": {name: {} for name in ("INP-001", "INP-002", "INP-003", "INP-004")},
     }
 
 

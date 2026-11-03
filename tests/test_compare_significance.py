@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from qavf import File, ResourceLimits, Status, compare_datasets, validate
 from qavf.compare import DatasetComparison
 from qavf.execution.os_limits import SUPPORTED_PLATFORMS
+from qavf.testing import checks_config
 
 pytest.importorskip("scipy")
 
@@ -323,7 +324,7 @@ def test_series_shape_lag_and_correlation_are_tested():
 
 # ------------------------------------------------------------- CMP-001, JSON
 def _cmp001(baseline: str, candidate: str, **comparison):
-    return {
+    return checks_config({
         "datasets": {"v1": {}, "v2": {}},
         "rules": {
             "CMP-001": {
@@ -339,8 +340,8 @@ def _cmp001(baseline: str, candidate: str, **comparison):
                 }
             }
         },
-        "engine": {"run_unconfigured_rules": False},
-    }  # fmt: skip
+        "engine": {},
+    })  # fmt: skip
 
 
 def test_cmp001_reports_significance_through_validate():

@@ -35,6 +35,7 @@ class ReviewComponent(Component):
 
 class ReviewRule(Rule):
     rule_id = "REVIEW-INPUT"
+    check_name = "review_input"
     name = "Review input"
     description = "Synthetic rule for registration isolation"
     category = "review"

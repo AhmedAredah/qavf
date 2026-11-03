@@ -22,7 +22,7 @@ from qavf.regression.models import ComparisonResult
 from qavf.reports.html import render_html, write_html
 from qavf.reports.models import DatasetInfo, QAReport, RuleResult, RunMetadata
 from qavf.settings import QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 comparison = importlib.import_module("qavf.regression._comparison")
 baselines = importlib.import_module("qavf.regression.baselines")
@@ -62,12 +62,16 @@ def result(**kwargs):
 
 def run_baselines(data, specs, **params):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "datasets": {"out": {}},
-            "rules": {"REG-001": {"severity": "WARNING", "params": {"baselines": specs, **params}}},
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {},
+                "datasets": {"out": {}},
+                "rules": {
+                    "REG-001": {"severity": "WARNING", "params": {"baselines": specs, **params}}
+                },
+            }
+        )
     )
     return QARunner(settings, discovered_rules(entry_points=False)).run(frames={"out": data})
 
@@ -169,7 +173,8 @@ def test_multiple_baselines_keep_distinct_identities(tmp_path):
         frame(1.0), [{"dataset": "out", "keys": ["k"], "path": str(path)} for path in (one, two)]
     )
     checks = output.results_for("REG-001")
-    assert len(checks) == 2 and checks[0].check != checks[1].check
+    # One check item per baseline: each keeps its own parameters and identity.
+    assert len(checks) == 2 and checks[0].parameters != checks[1].parameters
     assert checks[0].status is Status.PASS and checks[1].status is Status.FAIL
     assert checks[1].affected_records[0]["comparison"] == checks[1].check
 

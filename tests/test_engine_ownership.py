@@ -18,6 +18,7 @@ from qavf.sources.base import SourceEnvironment, SourceIntegrityError
 from qavf.sources.file import FileSource
 from qavf.sources.parameters import FileParams, QueryParams
 from qavf.sources.query import QuerySource
+from qavf.testing import with_checks
 
 
 def settings(**engine):
@@ -27,11 +28,12 @@ def settings(**engine):
 def runner(rule, **engine):
     registry = RuleRegistry()
     registry.register(rule)
-    return QARunner(settings(**engine), registry)
+    return QARunner(with_checks(settings(**engine), registry), registry)
 
 
 class BaseRule(Rule):
     rule_id = "PROBE"
+    check_name = "probe"
     name = "probe"
     description = "resource contract"
     category = "probe"

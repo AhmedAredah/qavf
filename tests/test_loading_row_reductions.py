@@ -9,6 +9,7 @@ import pytest
 
 from qavf import Status, validate
 from qavf.engine.context import DataContext
+from qavf.testing import checks_config
 
 
 def run(tmp_path, backend, frame, rule, *, schema=None, params=None, limit=2):
@@ -42,16 +43,17 @@ def run(tmp_path, backend, frame, rule, *, schema=None, params=None, limit=2):
     ):
         report = validate(
             data,
-            config={
-                "plugins": {"entry_points": False},
-                "engine": {
-                    "parallel": False,
-                    "run_unconfigured_rules": False,
-                    "max_affected_records": limit,
-                },
-                "datasets": {"data": {"schema": schema or {}}},
-                "rules": {rule: {"params": params or {}}},
-            },
+            config=checks_config(
+                {
+                    "plugins": {"entry_points": False},
+                    "engine": {
+                        "parallel": False,
+                        "max_affected_records": limit,
+                    },
+                    "datasets": {"data": {"schema": schema or {}}},
+                    "rules": {rule: {"params": params or {}}},
+                }
+            ),
         )
     results = report.results_for(rule)
     assert all(result.status in (Status.PASS, Status.FAIL) for result in results), [

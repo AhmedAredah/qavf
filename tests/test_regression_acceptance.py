@@ -24,6 +24,7 @@ from qavf.regression import accept_baseline, compare_frames, verify_baseline
 from qavf.reports.models import RuleResult, evidence_json_size, normalize_evidence
 from qavf.rules.regression_checks import BaselineComparisonRule
 from qavf.settings import QAVFSettings
+from qavf.testing import checks_config
 
 comparison = importlib.import_module("qavf.regression._cells")
 
@@ -49,7 +50,10 @@ def run_rule(rule, **settings):
     registry = RuleRegistry()
     registry.register(rule)
     return QARunner(
-        QAVFSettings.model_validate({"plugins": {"entry_points": False}, **settings}), registry
+        QAVFSettings.model_validate(
+            {"plugins": {"entry_points": False}, "checks": [{"check": rule.check_name}], **settings}
+        ),
+        registry,
     ).run()
 
 
@@ -100,17 +104,19 @@ def test_accepted_manifest_cannot_hide_nested_type_change(tmp_path):
     registry = RuleRegistry()
     registry.register(BaselineComparisonRule)
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "rules": {
-                "REG-001": {
-                    "params": {
-                        "require_manifest": True,
-                        "baselines": [{"dataset": "out", "path": str(path), "keys": ["k"]}],
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "rules": {
+                    "REG-001": {
+                        "params": {
+                            "require_manifest": True,
+                            "baselines": [{"dataset": "out", "path": str(path), "keys": ["k"]}],
+                        }
                     }
-                }
-            },
-        }
+                },
+            }
+        )
     )
     out = QARunner(settings, registry).run(frames={"out": frame(["2025-01-01T00:00:00.000000000"])})
     assert out.get("REG-001").status is Status.FAIL and out.exit_code() == 1
@@ -160,6 +166,7 @@ def test_complete_credential_values_are_removed(text):
 def test_credentials_do_not_survive_report_or_log_boundaries(caplog):
     class Secrets(Rule):
         rule_id = "TST-001"
+        check_name = "tst_001"
         name = "secrets"
         description = "test"
         category = "test"
@@ -237,6 +244,7 @@ def test_evidence_size_matches_persisted_codec(value):
 def test_nonfinite_evidence_obeys_encoded_budget():
     class Evidence(Rule):
         rule_id = "TST-001"
+        check_name = "tst_001"
         name = "evidence"
         description = "test"
         category = "test"

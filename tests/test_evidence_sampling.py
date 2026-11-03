@@ -18,7 +18,7 @@ from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.reports.models import REPORT_FORMAT_VERSION, QAReport
 from qavf.settings import QAVFSettings
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 ROWS = 400_000
@@ -26,10 +26,10 @@ LIMIT = 7
 
 
 def _run(frames, **config) -> QAReport:
-    engine = {"parallel": False, "run_unconfigured_rules": False, "max_affected_records": LIMIT}
+    engine = {"parallel": False, "max_affected_records": LIMIT}
     engine |= config.pop("engine", {})
     settings = QAVFSettings.model_validate(
-        {"plugins": {"entry_points": False}, "engine": engine, **config}
+        checks_config({"plugins": {"entry_points": False}, "engine": engine, **config})
     )
     return QARunner(settings, REGISTRY).run(frames=frames)
 
@@ -42,12 +42,13 @@ def failing() -> pl.DataFrame:
 
 CASES = {
     "INP-003": {
-        "rules": {"INP-003": {}},
         "datasets": {"t": {"schema": {"columns": {"v": {"ge": 0}}}}},
     },
-    "INP-006": {"rules": {"INP-006": {}}, "datasets": {"t": {"expressions": [{"expr": "v >= 0"}]}}},
+    "INP-006": {
+        "rules": {"INP-006": {}},
+        "datasets": {"t": {"checks": [{"check": "expression", "expr": "v >= 0"}]}},
+    },
     "INP-007": {
-        "rules": {"INP-007": {}},
         "datasets": {"t": {}},
         "assertions": [{"name": "negative", "sql": "SELECT * FROM t WHERE v < 0"}],
     },
@@ -150,8 +151,7 @@ def test_plan_digest_is_deterministic_and_sensitive() -> None:
     def digest(limit: float) -> str:
         return _run(
             {"t": pl.DataFrame({"a": [1]})},
-            datasets={"t": {}},
-            rules={"STA-001": {"params": {"threshold": limit}}},
+            datasets={"t": {"checks": [{"check": "outliers", "column": "a", "threshold": limit}]}},
         ).metadata.plan_digest
 
     assert re.fullmatch(r"[0-9a-f]{64}", digest(2.0))

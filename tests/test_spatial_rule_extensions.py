@@ -17,7 +17,7 @@ from qavf.rules.spatial_checks import CoverageParams
 from qavf.settings import QAVFSettings
 from qavf.spatial import extension
 from qavf.spatial.extension import SpatialUnavailable
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 
@@ -49,12 +49,14 @@ POINTS = pl.DataFrame(
 
 def _run(frames, rules):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "datasets": {name: {} for name in frames},
-            "rules": rules,
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {},
+                "datasets": {name: {} for name in frames},
+                "rules": rules,
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames=frames)
 

@@ -38,24 +38,16 @@ def test_key_join_transfers_only_summary_and_bounded_sample(kind, rule):
     config = {
         "datasets": {"child": {}, "parent": {}},
         "plugins": {"entry_points": False},
-        "engine": {"parallel": False, "run_unconfigured_rules": False, "max_affected_records": 1},
-        "rules": {rule: {}},
+        "engine": {"parallel": False, "max_affected_records": 1},
     }
     if rule == "INP-005":
         config["datasets"]["child"]["foreign_keys"] = [
             {"columns": ["id"], "ref_dataset": "parent", "ref_columns": ["id"]},
         ]
     else:
-        config["rules"][rule] = {
-            "params": {
-                "pairs": [
-                    {
-                        "left": {"dataset": "child", "columns": ["id"]},
-                        "right": {"dataset": "parent", "columns": ["id"]},
-                    }
-                ]
-            }
-        }
+        config["checks"] = [
+            {"check": "key_sets_match", "datasets": ["child", "parent"], "keys": ["id"]}
+        ]
     returned = []
     original_sql, original_collect = DataContext.sql, DataContext.collect_many
     original_observed_collect = Observation.collect
@@ -119,11 +111,10 @@ def test_mixed_backend_foreign_key_keeps_projected_fallback_correct():
                 "parent": {},
             },
             "plugins": {"entry_points": False},
-            "engine": {"parallel": False, "run_unconfigured_rules": False},
-            "rules": {"INP-005": {}},
+            "engine": {"parallel": False},
         },
     )
-    finding = report.results[0]
+    finding = report.get("INP-005")
     assert finding.status is Status.FAIL
     assert finding.affected_count == 1 and finding.affected_rows == 2
 
@@ -157,8 +148,7 @@ def test_key_relations_preserve_lossless_numeric_alignment(kind):
                 "parent": {},
             },
             "plugins": {"entry_points": False},
-            "engine": {"parallel": False, "run_unconfigured_rules": False},
-            "rules": {"INP-005": {}},
+            "engine": {"parallel": False},
         },
     )
     assert report.exit_code() == 0, [result.message for result in report.results]

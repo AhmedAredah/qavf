@@ -93,6 +93,7 @@ class _NeedsLimit(RuleParams):
 
 class _PluginRule(Rule):
     rule_id: ClassVar[str] = "PLUG-1"
+    check_name: ClassVar[str] = "plug_1"
     name: ClassVar[str] = "Plugin rule"
     description: ClassVar[str] = "Needs a limit."
     category: ClassVar[str] = "plugin"
@@ -126,15 +127,30 @@ def _runtime_accepts(registry, document) -> bool:
 @pytest.mark.parametrize(
     "document",
     [
-        {"rules": {"TMP-001": None}},
-        {"rules": {"TMP-001": {"params": None}}},
-        {"rules": {"TMP-001": {"severity": None}}},
-        {"rules": {"TMP-001": {"params": {"max_change_rate": 0.1}}}},
-        {"rules": {"TMP-001": {"params": {"max_change_rate": "fast"}}}},
-        {"rules": {"PLUG-1": {"enabled": False}}},
-        {"rules": {"PLUG-1": {}}},
-        {"rules": {"PLUG-1": {"enabled": True}}},
-        {"rules": {"PLUG-1": {"params": {"limit": 3}}}},
+        {"datasets": {"t": {"checks": [{"check": "change_rate", "series": {"value": "v"}}]}}},
+        {"datasets": {"t": {"checks": [{"check": "change_rate"}]}}},
+        {"datasets": {"t": {"checks": [{"check": "change_rate", "enabled": False}]}}},
+        {
+            "datasets": {
+                "t": {
+                    "checks": [{"check": "change_rate", "severity": None, "series": {"value": "v"}}]
+                }
+            }
+        },
+        {
+            "datasets": {
+                "t": {"checks": [{"check": "change_rate", "series": {"value": "v"}, "max": "fast"}]}
+            }
+        },
+        {
+            "datasets": {
+                "t": {"checks": [{"check": "change_rate", "series": {"value": "v"}, "maxx": 1}]}
+            }
+        },
+        {"checks": [{"check": "plug_1", "enabled": False}]},
+        {"checks": [{"check": "plug_1"}]},
+        {"checks": [{"check": "plug_1", "enabled": True}]},
+        {"checks": [{"check": "plug_1", "limit": 3}]},
         {"datasets": {"t": {"source": None}}},
     ],
 )
@@ -150,11 +166,7 @@ def test_schema_and_runtime_agree(document, plugin_registry) -> None:
 # =========================================================================
 def test_scaffold_with_required_plugin_parameters_plans(tmp_path, plugin_registry) -> None:
     text = render_config(plugin_registry, None)
-    block = text[text.index("  PLUG-1:") :].split("\n\n")[0]
-    assert (
-        "enabled: false" in block
-        and "limit" in text[text.index("# PLUG-1") : text.index("  PLUG-1:")]
-    )
+    assert "plug_1" in text and "PLUG-1" in text
     path = tmp_path / "qavf.yaml"
     path.write_text(text, encoding="utf-8")
     settings = load_settings(path)

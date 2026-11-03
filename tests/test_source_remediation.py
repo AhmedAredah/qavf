@@ -12,11 +12,8 @@ from qavf.sources.parameters import FileParams
 
 
 def _config(rule: str = "INP-002") -> dict:
-    return {
-        "plugins": {"entry_points": False},
-        "engine": {"parallel": False, "run_unconfigured_rules": False},
-        "rules": {rule: {}},
-    }
+    """Configuration for checking ``rule``; schema contracts always run."""
+    return {"plugins": {"entry_points": False}, "engine": {"parallel": False}}
 
 
 @pytest.mark.parametrize("helper", ["__qavf_text_0", "__QAVF_TEXT_0", "__qavf_text_0_"])
@@ -252,8 +249,8 @@ def test_run_config_rejects_live_crosswalk_before_copying_or_consuming_it(model)
 
     crosswalk = Crosswalk(data=Untouched())
     config = {
-        "datasets": {"data": {}},
-        "rules": {"CMP-001": {"params": {"crosswalk": crosswalk}}},
+        # A plugin check: its settings are validated once plugins load.
+        "datasets": {"data": {"checks": [{"check": "plugin_probe", "crosswalk": crosswalk}]}},
     }
     if model:
         config = QAVFSettings.model_validate(config)

@@ -25,6 +25,7 @@ from qavf.reports.models import QAReport
 from qavf.reports.presentation import HtmlLimits
 from qavf.spatial import extension
 from qavf.spatial.extension import SpatialUnavailable
+from qavf.testing import checks_config
 
 pytest.importorskip("scipy")
 
@@ -194,14 +195,14 @@ def test_json_round_trips_and_discloses_truncation(tmp_path):
 
 # --------------------------------------------------------------- CMP-001
 def _config(levels=LEVELS, **engine):
-    return {
+    return checks_config({
         "rules": {"CMP-001": {"params": {"comparisons": [
             {"name": "v1 vs v2", "baseline": "v1", "candidate": "v2", "keys": ["id"],
              "steps": STEPS, "levels": levels},
         ]}}},
-        "engine": {"run_unconfigured_rules": False, **engine},
+        "engine": {**engine},
         "plugins": {"entry_points": False},
-    }  # fmt: skip
+    })  # fmt: skip
 
 
 def test_cmp001_reports_carry_the_typed_comparison_and_render_its_section():
@@ -235,7 +236,7 @@ def test_a_report_too_small_for_the_detail_keeps_the_findings_section():
 def test_a_trimmed_report_budget_discloses_the_omission():
     base, cand = _frames()
     report = validate({"v1": base, "v2": cand}, config=_config())
-    budget = report.json_size_bytes() // 2
+    budget = report.json_size_bytes() * 3 // 5
     trimmed = validate({"v1": base, "v2": cand}, config=_config(max_report_bytes=budget))
     assert trimmed.comparisons() == []
     assert "noncoverage_metrics" in trimmed.metadata.resource_usage["report_details_omitted"]

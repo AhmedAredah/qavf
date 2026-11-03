@@ -11,7 +11,7 @@ from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
 from qavf.settings import QAVFSettings
 from qavf.sources import DatabaseSource
-from qavf.testing import discovered_rules
+from qavf.testing import checks_config, discovered_rules
 
 REGISTRY = discovered_rules(entry_points=False)
 
@@ -29,7 +29,7 @@ def _settings(path, snapshot: bool) -> QAVFSettings:
     return QAVFSettings.model_validate(
         {
             "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
+            "engine": {},
             "connections": {
                 "live": {
                     "type": "duckdb",
@@ -119,14 +119,18 @@ def test_every_dataset_records_when_it_was_read(database) -> None:
 # ------------------------------------------------------------------ REC-005
 def _batch(frames):
     settings = QAVFSettings.model_validate(
-        {
-            "plugins": {"entry_points": False},
-            "engine": {"run_unconfigured_rules": False},
-            "datasets": {name: {} for name in frames},
-            "rules": {
-                "REC-005": {"params": {"batches": [{"datasets": list(frames), "column": "run"}]}}
-            },
-        }
+        checks_config(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {},
+                "datasets": {name: {} for name in frames},
+                "rules": {
+                    "REC-005": {
+                        "params": {"batches": [{"datasets": list(frames), "column": "run"}]}
+                    }
+                },
+            }
+        )
     )
     return QARunner(settings, REGISTRY).run(frames=frames).get("REC-005")
 
