@@ -197,6 +197,10 @@ class ObservedConnection:
         self.queries.append(query)
         return self.con.execute(query)
 
+    def sql(self, query, **options):
+        self.queries.append(query)
+        return self.con.sql(query, **options)
+
     def __getattr__(self, key):
         return getattr(self.con, key)
 

@@ -211,6 +211,7 @@ def contiguity(
         # At most one over-budget pair is transferred, never the complete dense
         # result. The native operator's own working state remains connection-owned.
         cap = admission.max_edges // 2
+        settle(con)  # finish earlier statements before the relation streams
         cursor = con.sql(
             f"SELECT a.zone_order AS i, b.zone_order AS j {bbox} "
             f"WHERE ST_Intersects(a.geom, b.geom) AND ({shared}) LIMIT {cap + 1}"

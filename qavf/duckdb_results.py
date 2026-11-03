@@ -23,7 +23,10 @@ def relation(connection: Any, sql: str, parameters: Any = None) -> Any:
     """``sql`` on ``connection`` as a relation, binding ``parameters`` when given.
 
     A statement without a result set (``CREATE ...``) runs at once and gives ``None``.
+    Like ``execute``, it first finishes any earlier result left unread on the
+    connection, which DuckDB 2.0 would otherwise refuse to run beside.
     """
+    settle(connection)
     if parameters:
         return connection.sql(sql, params=parameters)
     return connection.sql(sql)

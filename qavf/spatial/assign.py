@@ -263,6 +263,7 @@ def matches(
                     f"{bbox} JOIN {tally} t ON t.pid = l.pid AND t.interior > 1 "
                     "WHERE ST_Contains(z.geom, l.pt)"
                 )
+            settle(con)  # finish earlier statements before the relation streams
             query = con.sql(sql + " ORDER BY pid, zone_order")
             reader = record_batch_reader(query, policy.batch_size)
             try:
