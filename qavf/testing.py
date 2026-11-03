@@ -12,14 +12,18 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from functools import cache
 from typing import Any
 
-from qavf.engine.registry import Rule, RuleRegistry, default_registry
-from qavf.engine.runner import QARunner
-from qavf.reports.models import QAReport, RuleResult
+from pydantic import ValidationError
+
 from qavf.checks.items import CheckItem
+from qavf.engine.compilation import ConfigurationError
+from qavf.engine.registry import CheckBinding, Rule, RuleRegistry, default_registry
+from qavf.engine.runner import QARunner
+from qavf.redaction import exception_details
+from qavf.reports.models import QAReport, RuleResult
 from qavf.settings import QAVFSettings
 
 
@@ -129,6 +133,50 @@ def run_rules(
     ).run(frames=frames)
 
 
+class RuleInstanceRunner(QARunner):
+    """Runs given rule instances as they are, instead of compiling check items.
+
+    For testing a rule's own behaviour with any parameters, including several
+    series or comparisons in one instance (which configurations split into one
+    check item each). Runs in process only.
+    """
+
+    def __init__(
+        self, settings: QAVFSettings, rules: Sequence[Rule], registry: RuleRegistry
+    ) -> None:
+        super().__init__(settings, registry=registry)
+        self.instances = tuple(rules)
+
+    def plan(self) -> list[Rule]:
+        problems = [
+            f"{rule.rule_id}: {problem}"
+            for rule in self.instances
+            for problem in rule.configuration_errors(self.settings)
+        ]
+        if problems:
+            raise ConfigurationError("; ".join(problems))
+        self.excluded = {}
+        return list(self.instances)
+
+
+def configured_rule(rule_cls: type[Rule], params: Mapping[str, Any] | None = None) -> Rule:
+    """An instance of ``rule_cls`` with ``params``, bound as a configured check.
+
+    Raises:
+        ConfigurationError: for invalid parameters.
+    """
+    try:
+        rule = rule_cls(params=dict(params or {}))
+    except ValidationError as exc:
+        raise ConfigurationError(
+            f"invalid parameters for rule {rule_cls.rule_id}: {exception_details(exc)}"
+        ) from None
+    rule.bind(
+        CheckBinding(key=rule_cls.rule_id, check=rule_cls.check_name, name=rule_cls.check_name)
+    )
+    return rule
+
+
 def rule_results(
     rule_id: str,
     frames: Mapping[str, Any],
@@ -136,16 +184,14 @@ def rule_results(
     registry: RuleRegistry | None = None,
     **settings: Any,
 ) -> list[RuleResult]:
-    """Run exactly one rule and return all its results (one per reported check)."""
-    report = QARunner(
-        make_settings(
-            rules={rule_id: {"params": dict(params or {})}},
-            registry=registry,
-            **settings,
-        ),
-        registry=registry if registry is not None else discovered_rules(),
-    ).run(frames=frames)
-    return report.results_for(rule_id)
+    """Run exactly one rule with ``params`` and return all its results (one per
+    reported check). The rule runs as a configured check; nothing else runs."""
+    registry = registry if registry is not None else discovered_rules()
+    if rule_id not in registry:
+        raise ConfigurationError(f"unknown rule id {rule_id!r}")
+    rule = configured_rule(registry.get(rule_id), params)
+    runner = RuleInstanceRunner(make_settings(registry=registry, **settings), [rule], registry)
+    return runner.run(frames=frames).results_for(rule_id)
 
 
 def run_rule(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fractions import Fraction
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,13 @@ from qavf.migrate import Migrator
 from .models import PreparedWorkload, WorkloadOptions
 from .policy import resources
 from .storage import read_json, write_json, write_parquet_chunks
+
+
+def _measured(inputs: Any, config: dict[str, Any], policy: Any, rule: str) -> Any:
+    """Validate, keeping the measured rule's results (schema contracts always run)."""
+    report = validate(inputs, config=config, resources=policy)
+    kept = [r for r in report.results if r.rule_id == rule or r.status is Status.ERROR]
+    return report.model_copy(update={"results": kept})
 
 
 def prepare_fixture(
@@ -147,7 +155,7 @@ def build_workload(
         }
 
     return PreparedWorkload(
-        lambda: validate(inputs, config=config, resources=policy),
+        partial(_measured, inputs, config, policy, rule),
         verify,
         {
             "api": "qavf.validate",

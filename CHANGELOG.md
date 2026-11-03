@@ -33,6 +33,12 @@ These changes break existing configurations. Convert a configuration once with
 - Plugins declare a `check_name` beside their `rule_id`; a missing or repeated
   check name is a registration error.
 - `Dataset(..., expressions=...)` is now `Dataset(..., checks=...)`.
+- Each check item is assessed on its own: a rule configured with several series or
+  comparisons becomes one item each, so multiple-testing corrections (trend,
+  drift) now apply within each item.
+- Testing helpers: `qavf.testing.rule_results`/`run_rule` run one rule instance
+  with any parameters; `checks_config` converts rule-code mappings and
+  `with_checks` configures every rule of a test registry.
 
 ### Added
 

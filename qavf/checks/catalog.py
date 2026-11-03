@@ -117,6 +117,9 @@ class CheckDefinition(ABC):
     """False for schema contracts, which come from ``schema`` rather than items."""
     list_driven: ClassVar[bool] = False
     """True when one rule instance evaluates every item of this check."""
+    plugin_components: ClassVar[bool] = False
+    """True when settings may name components from installed plugins (comparison
+    levels, steps, statistical tests), which load only when the run is planned."""
 
     def __init__(
         self, rule_cls: type[Rule], placement: Placement, *, where_field: str | None = None
@@ -172,8 +175,12 @@ class CheckDefinition(ABC):
             )
         return {self.where_field: item.where}
 
-    def errors(self, item: CheckItem, scope: Scope) -> list[str]:
-        """Problems with ``item``, each prefixed with the setting's path."""
+    def errors(self, item: CheckItem, scope: Scope, *, parameters: bool = True) -> list[str]:
+        """Problems with ``item``, each prefixed with the setting's path.
+
+        With ``parameters=False`` only the item's own structure is checked, not the
+        rule parameters it compiles to.
+        """
         if self.placement == "dataset" and scope.dataset is None:
             return [f"{scope.path}.check: {self.name} goes in a dataset's checks list"]
         if self.placement == "top" and scope.dataset is not None:
@@ -183,6 +190,8 @@ class CheckDefinition(ABC):
         except CheckSettingError as exc:
             where = f"{scope.path}.{exc.field}" if exc.field else scope.path
             return [f"{where}: {exc.message}"]
+        if not parameters:
+            return []
         try:
             self.rule_cls.Params.model_validate(params)
         except ValidationError as exc:
@@ -497,6 +506,8 @@ class PairCheck(CheckDefinition):
 class DriftCheck(PairCheck):
     """``drift``: a column's distribution in the other dataset versus the reference."""
 
+    plugin_components = True
+
     rule_fields = ("correction",)
 
     def element(self, reference: str, other: str, settings: dict[str, Any]) -> dict[str, Any]:
@@ -514,6 +525,8 @@ class DriftCheck(PairCheck):
 
 class CompareCheck(PairCheck):
     """``compare``: the other dataset (candidate) against the reference (baseline)."""
+
+    plugin_components = True
 
     def element(self, reference: str, other: str, settings: dict[str, Any]) -> dict[str, Any]:
         return {"baseline": reference, "candidate": other, **settings}
@@ -698,7 +711,7 @@ class ExpressionDefinition(CheckDefinition):
     def compile(self, item: CheckItem, scope: Scope) -> dict[str, Any]:
         return expression_check(item).model_dump(mode="python")
 
-    def errors(self, item: CheckItem, scope: Scope) -> list[str]:
+    def errors(self, item: CheckItem, scope: Scope, *, parameters: bool = True) -> list[str]:
         return expression_errors(item, scope)
 
     def decompile(self, params: Mapping[str, Any]) -> list[Decompiled]:
@@ -726,7 +739,7 @@ class SqlDefinition(CheckDefinition):
     def compile(self, item: CheckItem, scope: Scope) -> dict[str, Any]:
         return sql_assertion(item).model_dump(mode="python")
 
-    def errors(self, item: CheckItem, scope: Scope) -> list[str]:
+    def errors(self, item: CheckItem, scope: Scope, *, parameters: bool = True) -> list[str]:
         return sql_errors(item, scope)
 
     def decompile(self, params: Mapping[str, Any]) -> list[Decompiled]:
@@ -751,7 +764,7 @@ class ContractDefinition(CheckDefinition):
             "check", f"{self.name} runs from the dataset's schema; it is not a check item"
         )
 
-    def errors(self, item: CheckItem, scope: Scope) -> list[str]:
+    def errors(self, item: CheckItem, scope: Scope, *, parameters: bool = True) -> list[str]:
         return [
             f"{scope.path}.check: {self.name} runs from the dataset's schema and "
             "needs no check item"
@@ -770,7 +783,7 @@ class PluginDefinition(CheckDefinition):
     def __init__(self, rule_cls: type[Rule]) -> None:
         super().__init__(rule_cls, "dataset")
 
-    def errors(self, item: CheckItem, scope: Scope) -> list[str]:
+    def errors(self, item: CheckItem, scope: Scope, *, parameters: bool = True) -> list[str]:
         # Plugins may be placed on a dataset or at the top level.
         try:
             params = self.compile(item, scope)
@@ -898,6 +911,16 @@ _COMMON_ITEM_FIELDS: dict[str, Any] = {
 }
 
 
+def _settings_required_when_enabled(schema: dict[str, Any]) -> None:
+    """A check switched off (``enabled: false``) may omit its required settings."""
+    required = [name for name in schema.get("required", ()) if name != "check"]
+    if not required:
+        return
+    schema["required"] = ["check"]
+    schema["if"] = {"properties": {"enabled": {"const": False}}, "required": ["enabled"]}
+    schema["else"] = {"required": required}
+
+
 @functools.cache
 def _item_model(definition: CheckDefinition) -> type[BaseModel]:
     fields = dict(definition.item_fields())
@@ -906,7 +929,11 @@ def _item_model(definition: CheckDefinition) -> type[BaseModel]:
     model_name = "Check_" + "".join(ch if ch.isalnum() else "_" for ch in definition.name)
     return create_model(  # type: ignore[call-overload,no-any-return]
         model_name,
-        __config__=ConfigDict(extra="forbid", title=definition.name),
+        __config__=ConfigDict(
+            extra="forbid",
+            title=definition.name,
+            json_schema_extra=_settings_required_when_enabled,
+        ),
         __doc__=f"{definition.name} ({definition.rule_id}). {definition.summary}",
         check=(
             Literal[definition.name],  # type: ignore[valid-type]

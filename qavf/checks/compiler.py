@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING, Any
 
 from qavf.checks.catalog import CATALOG, CheckDefinition, PluginDefinition, definition_for
 from qavf.checks.items import CheckItem
-from qavf.checks.placement import ROW_CHECKS, PlacedItem, placed_items, row_check_errors
+from qavf.checks.placement import (
+    ROW_CHECKS,
+    CheckSettingError,
+    PlacedItem,
+    placed_items,
+    row_check_errors,
+)
 from qavf.engine.registry import CheckBinding, Rule, RuleRegistry
 
 if TYPE_CHECKING:
@@ -97,9 +103,12 @@ def configuration_errors(settings: QAVFSettings) -> list[str]:
         definition = CATALOG.get(placed.item.check)
         if definition is None or placed.item.check in ROW_CHECKS:
             continue
+        # Settings may name components of installed plugins, which load only when
+        # the run is planned; such parameters are validated then.
+        deferred = definition.plugin_components and settings.plugins.entry_points
         if placed.item.enabled or placed.item.settings:
             # A check switched off before any settings were given is not validated.
-            problems.extend(definition.errors(placed.item, placed.scope))
+            problems.extend(definition.errors(placed.item, placed.scope, parameters=not deferred))
     return problems + row_check_errors(settings)
 
 
@@ -134,9 +143,16 @@ def compile_checks(
             if errors:
                 problems.extend(errors)
                 continue
-        compiled.append(
-            CompiledCheck(definition, placed, definition.compile(placed.item, placed.scope))
-        )
+        if not configured:
+            # Switched off before any settings were given: nothing to compile.
+            compiled.append(CompiledCheck(definition, placed, {}))
+            continue
+        try:
+            params = definition.compile(placed.item, placed.scope)
+        except CheckSettingError as exc:
+            problems.append(f"{placed.scope.at(exc.field)}: {exc.message}")
+            continue
+        compiled.append(CompiledCheck(definition, placed, params))
     if problems:
         raise CheckCompilationError("invalid checks: " + "; ".join(problems))
     return compiled

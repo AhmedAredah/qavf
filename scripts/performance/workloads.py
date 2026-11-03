@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,17 @@ from .models import PreparedWorkload, WorkloadOptions
 from .storage import read_json
 
 CASES = ("wide_validation", "relational_validation", "grouped_reconciliation")
+
+
+def measured(inputs: Any, config: dict[str, Any], rule_ids: tuple[str, ...]) -> Any:
+    """Validate, keeping the results of the workload's own rules.
+
+    Schema contracts always run; those the workload does not measure are left out
+    unless they could not be assessed.
+    """
+    report = validate(inputs, config=config)
+    kept = [r for r in report.results if r.rule_id in rule_ids or r.status is Status.ERROR]
+    return report.model_copy(update={"results": kept})
 
 
 def _wide_columns() -> dict[str, Any]:
@@ -173,7 +185,7 @@ def build_workload(
         .config
     )
     return PreparedWorkload(
-        run=lambda: validate(inputs, config=config),
+        run=partial(measured, inputs, config, tuple(rules)),
         verify=lambda report: verify_outcome(
             case, report, manifest, options.evidence_rows, expected_fingerprints
         ),
@@ -337,9 +349,6 @@ def verify_outcome(
             }
     for result in report.results:
         if result.rule_id not in rule_ids:
-            # Schema contracts always run; only the benchmark's own rules are measured.
-            if result.status in (Status.PASS, Status.SKIPPED):
-                continue
             raise AssertionError(f"unexpected benchmark rule: {result.rule_id}")
         if result.status not in (Status.PASS, Status.FAIL):
             raise AssertionError(f"unassessed benchmark check: {result.label}: {result.message}")
