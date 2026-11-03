@@ -51,6 +51,15 @@ generated.
   evidence byte limits.
 - A foreign key between an integer and a float column is compared only when every
   value converts exactly; otherwise it is not assessed.
+- Dataset views (`datasets.<d>.views`) are SQL views over the loaded dataset,
+  `SELECT <columns or *> FROM "<d>" WHERE <where>`, so `sql` and `expression`
+  checks read `"<d>.<view>"` with the same rows and columns as on the full backend.
+- `connections.<name>.snapshot: true` is refused before any input is read, with a
+  capability error: the native reader has no shared transaction, so related tables
+  could reflect different committed states. Select `backend="polars"`, which reads
+  every dataset of the connection in one transaction.
+- A cancelled run starts no further source attempt, and a retry delay ends as soon
+  as the run is cancelled.
 
 ## Resources and timeouts
 

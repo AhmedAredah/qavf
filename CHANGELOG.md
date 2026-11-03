@@ -120,6 +120,29 @@ Reports written by earlier versions still load.
   name differing only in case) is a configuration error naming both declarations.
   A view `roads.active` could silently replace a dataset `roads.active` on the
   Polars backend while the DuckDB backend read the dataset.
+- Included files rebase only settings typed as file paths (dataset and source
+  paths, connection files, baseline and zone-layer or crosswalk paths,
+  `plugins.paths`). A column named `path` in `rename`, a schema or any other user
+  mapping was rewritten to `modules/path`.
+- `qavf run` no longer writes a report over a file the configuration includes, an
+  accepted baseline or its manifest, a zone layer, crosswalk or plugin file; it
+  had replaced them and reported QA PASSED. The same declared-input check now
+  guards `schema -o`, `init -o` (even with `--force`, also for profiled inputs)
+  and `migrate -o`. `schema -o` needs `--force` to replace an existing file.
+- `qavf migrate -o` writes the format of the output suffix (YAML text went into
+  `.json` files), rebases relative paths when the output is in another directory,
+  and reads its output back before writing.
+- The native DuckDB backend runs dataset views (`"<dataset>.<view>"` in `sql` and
+  `expression` checks) with the Polars backend's rows and columns; it had accepted
+  them and then failed with a missing table.
+- `connections.<name>.snapshot: true` is refused on the native backend before any
+  read; it had been ignored, so related tables could come from different commits.
+- A cancelled native run no longer retries a source: it starts no further attempt
+  and a retry delay ends at cancellation (a loader had run three more times).
+- `qavf run` in `execution_mode: isolated`: `--progress` is a usage error instead
+  of emitting nothing, and Ctrl-C, SIGTERM or Ctrl-Break stops the worker and exits
+  1 with `QA CANCELLED`; it had printed a cancellation notice, let the worker
+  finish and reported QA PASSED.
 
 ## [Unreleased]
 

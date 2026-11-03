@@ -120,6 +120,20 @@ dataset first; `other.name` reaches another dataset's block. `2016..2024` or
 `{from: 2016, to: 2024, step: 1}` expands to every value; a plain list means just
 those values.
 
+A relative file path written in an included file is relative to that file. Only
+settings that are file paths are rebased: a dataset's `path`, its source's
+`path`/`paths` (and those of `across` copies), a connection's database `path`,
+check settings naming files (a `matches_baseline` `path` or `source`, a zone
+layer's or crosswalk's `path`, a comparison level's layer) and `plugins.paths`.
+Column names, `rename`, `schema`, `views`, `series`, `metrics`, `where`, `expr`,
+SQL text and `extensions` are never rewritten, so a column named `path` means the
+same in an included file as inline. Absolute paths, URLs and values starting with
+`${...}` are kept; settings of plugin checks QAVF does not know are kept as written.
+
+Views behave the same on both backends: each is the parent dataset's rows that
+match `where`, with `columns` (or all columns), and SQL in `sql` and `expression`
+checks reads it as `"<dataset>.<view>"`.
+
 ## Selection and the run section
 
 ```yaml

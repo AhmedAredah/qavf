@@ -389,6 +389,14 @@ scaffolding and demo commands require `qavf[polars]`. Inspect the import-light
 Exit codes: `0` passed, `1` QA failed or outputs differ, `2` usage, configuration or
 resource error.
 
+No command writes over one of its inputs. `run` reports, `schema -o`, `init -o` and
+`migrate -o` refuse a destination that is (by any path, symbolic or hard link) the
+configuration, a file it includes, or a file a setting names: data and database
+files, accepted baselines and their manifests, zone layers, crosswalks, plugin files
+and the files `init` profiles. `--force` replaces only an unrelated existing file
+(`schema -o` needs it too). `migrate -o` writes YAML or JSON by the output's suffix
+and rebases relative paths when the output is in another directory.
+
 ## Documentation
 
 - [Python API](https://github.com/AhmedAredah/qavf/blob/main/docs/api.md) and

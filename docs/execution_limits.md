@@ -168,6 +168,21 @@ stalled in-process Python/native call can keep its worker slot. The isolated
 whole-run deadline terminates the worker process instead of trying to kill a
 Python thread. Without `wall_time`, isolation alone adds no wall-clock deadline.
 
+## Interrupting an isolated CLI run
+
+An isolated worker has no cooperative cancellation and sends no progress events,
+so `qavf run --progress` with `execution_mode: isolated` is a usage error (exit 2)
+before any input is read. The first Ctrl-C, SIGTERM or (on Windows) Ctrl-Break
+stops the run: the supervisor terminates the worker's process group (Windows: its
+job object), removes its run directory, and the command prints `QA CANCELLED` and
+exits 1 without writing a report. Further interrupts are ignored while that
+cleanup runs. The handler matters most for SIGTERM on Linux and macOS, where the
+worker runs in its own session: without it the parent would end at once and leave
+the worker running. Windows cannot deliver SIGTERM to a handler (it terminates the
+process outright); the job object then ends the worker when the parent's handle
+closes. In process, the first interrupt still requests cooperative cancellation
+and the report is written.
+
 ## Failure and cleanup
 
 A timeout, worker crash, failed OS-limit setup, invalid/missing result or failed
