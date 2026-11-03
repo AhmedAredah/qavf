@@ -83,6 +83,7 @@ class ColumnOutlierRule(Rule):
     """Individual values are not statistical outliers within their group."""
 
     rule_id: ClassVar[str] = "STA-001"
+    check_name: ClassVar[str] = "outliers"
     name: ClassVar[str] = "Statistical outliers in values"
     description: ClassVar[str] = (
         "Within each configured group, no individual value is an outlier by the configured "
@@ -285,6 +286,7 @@ class DistributionDriftRule(Rule):
     """A column's distribution has not drifted from its reference."""
 
     rule_id: ClassVar[str] = "STA-002"
+    check_name: ClassVar[str] = "drift"
     name: ClassVar[str] = "Distribution drift"
     description: ClassVar[str] = (
         "Each configured column's distribution stays close to a reference dataset's, by "

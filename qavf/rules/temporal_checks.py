@@ -528,6 +528,7 @@ class StepChangeRule(_TemporalRule):
     """Consecutive periods do not jump implausibly."""
 
     rule_id: ClassVar[str] = "TMP-001"
+    check_name: ClassVar[str] = "change_rate"
     name: ClassVar[str] = "Period-over-period change within bounds"
     description: ClassVar[str] = (
         "The compound change per time unit between consecutive periods stays within the "
@@ -715,6 +716,7 @@ class TrendDirectionRule(_TemporalRule):
     """Series with an expected direction actually move that way."""
 
     rule_id: ClassVar[str] = "TMP-002"
+    check_name: ClassVar[str] = "trend"
     name: ClassVar[str] = "Trend direction as expected"
     description: ClassVar[str] = (
         "Series declared as increasing or decreasing do not trend the opposite way "
@@ -900,6 +902,7 @@ class TrendOutlierRule(_TemporalRule):
     """Individual periods do not fall off their series' own trend line."""
 
     rule_id: ClassVar[str] = "TMP-003"
+    check_name: ClassVar[str] = "trend_outliers"
     name: ClassVar[str] = "Trend consistency"
     description: ClassVar[str] = (
         "No period is both a statistically significant outlier from its series' fitted "
@@ -1215,6 +1218,7 @@ class MissingPeriodRule(_TemporalRule):
     """Every group has every period."""
 
     rule_id: ClassVar[str] = "TMP-004"
+    check_name: ClassVar[str] = "missing_periods"
     name: ClassVar[str] = "No missing periods"
     description: ClassVar[str] = (
         "Each series group (for example each county and pollutant) has a value for every period."
@@ -1426,6 +1430,7 @@ class StaleValueRule(_TemporalRule):
     """Series do not repeat the same value period after period."""
 
     rule_id: ClassVar[str] = "TMP-005"
+    check_name: ClassVar[str] = "stale_values"
     name: ClassVar[str] = "Stale or repeated values"
     description: ClassVar[str] = (
         "No group of a series keeps the same value for max_repeats consecutive periods, "
@@ -1609,6 +1614,7 @@ class CumulativeRule(_TemporalRule):
     """Cumulative series (running totals, odometers, counters) never decrease."""
 
     rule_id: ClassVar[str] = "TMP-006"
+    check_name: ClassVar[str] = "cumulative"
     name: ClassVar[str] = "Cumulative series never decrease"
     description: ClassVar[str] = (
         "Each group of a cumulative series is non-decreasing from period to period; a "
@@ -1718,6 +1724,7 @@ class SeasonalAnomalyRule(_TemporalRule):
     """No value is anomalous compared with the same season in other cycles."""
 
     rule_id: ClassVar[str] = "TMP-007"
+    check_name: ClassVar[str] = "seasonal"
     name: ClassVar[str] = "Seasonal anomalies"
     description: ClassVar[str] = (
         "Each value is compared with the values of the same season (month, quarter, "
@@ -1850,6 +1857,7 @@ class LevelShiftRule(_TemporalRule):
     """No series jumps to a sustained new level (a regime change)."""
 
     rule_id: ClassVar[str] = "TMP-008"
+    check_name: ClassVar[str] = "level_shift"
     name: ClassVar[str] = "Level shifts"
     description: ClassVar[str] = (
         "No group of a series changes to a sustained new level: the best split into two "

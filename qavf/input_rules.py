@@ -34,6 +34,8 @@ class InputRule:
     """The message of the SKIPPED result when nothing is configured for the rule."""
     default_severity: Severity = Severity.ERROR
     category: str = CATEGORY
+    check_name: str = ""
+    """The rule's check name in configurations and reports."""
 
 
 INPUT_RULES: dict[str, InputRule] = {
@@ -50,6 +52,7 @@ INPUT_RULES: dict[str, InputRule] = {
             "'required: false' if it is genuinely optional.",
             "No datasets are configured.",
             Severity.CRITICAL,
+            check_name="datasets_available",
         ),
         InputRule(
             "INP-002",
@@ -64,6 +67,7 @@ INPUT_RULES: dict[str, InputRule] = {
             "zeros: read it as text at the source ('text_columns' for CSV files).",
             "No available dataset has a schema configured.",
             Severity.CRITICAL,
+            check_name="schema",
         ),
         InputRule(
             "INP-003",
@@ -74,6 +78,7 @@ INPUT_RULES: dict[str, InputRule] = {
             "errors, sentinel values such as -999, or failed joins that leave nulls. If a "
             "value is legitimate, widen the limit or downgrade that check's severity.",
             "No column QA limits are configured.",
+            check_name="column_limits",
         ),
         InputRule(
             "INP-004",
@@ -82,6 +87,7 @@ INPUT_RULES: dict[str, InputRule] = {
             "Duplicate keys double-count values when tables are joined. De-duplicate at the "
             "source, or add the missing dimension to the primary key.",
             "No primary or unique keys are configured.",
+            check_name="unique_keys",
         ),
         InputRule(
             "INP-005",
@@ -91,6 +97,7 @@ INPUT_RULES: dict[str, InputRule] = {
             "Orphaned keys are silently dropped by inner joins. Add the missing reference rows "
             "or correct the keys in the child dataset.",
             "No foreign keys are configured.",
+            check_name="references",
         ),
         InputRule(
             "INP-006",
@@ -101,6 +108,7 @@ INPUT_RULES: dict[str, InputRule] = {
             "does not. Inspect the listed rows for mismatched units or rows combined from "
             "different sources.",
             "No row expressions are configured.",
+            check_name="expression",
         ),
         InputRule(
             "INP-007",
@@ -110,6 +118,7 @@ INPUT_RULES: dict[str, InputRule] = {
             "Each returned row is a counter-example to the assertion. Run the assertion's "
             "query yourself to explore them.",
             "No SQL assertions are configured.",
+            check_name="sql",
         ),
         InputRule(
             "INP-008",
@@ -119,6 +128,7 @@ INPUT_RULES: dict[str, InputRule] = {
             "Stale data usually means an upstream job did not run or a file was not refreshed. "
             "Check the producing pipeline's last run before trusting downstream results.",
             "No freshness checks are configured.",
+            check_name="fresh",
         ),
         InputRule(
             "INP-009",
@@ -128,6 +138,7 @@ INPUT_RULES: dict[str, InputRule] = {
             "Make every column in the group applicable, or mark every column "
             "with its declared N/A token.",
             "No not-applicable tokens or groups are configured.",
+            check_name="not_applicable",
         ),
     )
 }

@@ -288,6 +288,7 @@ class TotalsReconcileRule(Rule):
     """Totals agree between datasets, key by key (control totals, input-output balance)."""
 
     rule_id: ClassVar[str] = "REC-001"
+    check_name: ClassVar[str] = "totals_match"
     name: ClassVar[str] = "Totals reconcile"
     description: ClassVar[str] = (
         "For each configured reconciliation, the sum (or row count) of one dataset equals "
@@ -511,6 +512,7 @@ class SharesSumRule(Rule):
     """Within each group, shares sum to their total."""
 
     rule_id: ClassVar[str] = "REC-002"
+    check_name: ClassVar[str] = "shares"
     name: ClassVar[str] = "Shares sum to total"
     description: ClassVar[str] = (
         "Within each group, the configured share column sums to its total (1 or 100) "
@@ -683,6 +685,7 @@ class KeyGridRule(Rule):
     """A dataset covers the full expected grid of key combinations."""
 
     rule_id: ClassVar[str] = "REC-003"
+    check_name: ClassVar[str] = "key_grid"
     name: ClassVar[str] = "Complete key grid"
     description: ClassVar[str] = (
         "Each configured dataset contains every combination of its dimensions' expected "
@@ -775,6 +778,7 @@ class KeySetsMatchRule(Rule):
     """Two datasets have exactly the same set of keys (both directions)."""
 
     rule_id: ClassVar[str] = "REC-004"
+    check_name: ClassVar[str] = "key_sets_match"
     name: ClassVar[str] = "Key sets match"
     description: ClassVar[str] = (
         "Each configured pair of datasets has identical sets of (non-null) keys: every key "
@@ -923,6 +927,7 @@ class ConsistentBatchRule(Rule):
     """Related datasets carry one, identical batch identifier."""
 
     rule_id: ClassVar[str] = "REC-005"
+    check_name: ClassVar[str] = "batch_consistent"
     name: ClassVar[str] = "Consistent batch"
     description: ClassVar[str] = (
         "Each configured group of datasets carries a single, identical value in its batch "

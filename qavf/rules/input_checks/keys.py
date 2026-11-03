@@ -64,6 +64,7 @@ class DuplicateKeyRule(_SelectsDatasets):
     """Primary keys identify rows uniquely."""
 
     rule_id: ClassVar[str] = "INP-004"
+    check_name: ClassVar[str] = INPUT_RULES["INP-004"].check_name
     name: ClassVar[str] = INPUT_RULES["INP-004"].name
     description: ClassVar[str] = INPUT_RULES["INP-004"].description
     category: ClassVar[str] = CATEGORY

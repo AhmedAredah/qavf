@@ -112,6 +112,7 @@ class DatasetComparisonRule(Rule):
     """Datasets compare within tolerance at each configured level."""
 
     rule_id: ClassVar[str] = "CMP-001"
+    check_name: ClassVar[str] = "compare"
     name: ClassVar[str] = "Datasets compare within tolerance"
     description: ClassVar[str] = (
         "Each configured pair of datasets (for example two versions of an output) agrees "

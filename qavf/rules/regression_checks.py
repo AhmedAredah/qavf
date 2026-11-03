@@ -106,6 +106,7 @@ class BaselineComparisonRule(Rule):
     """Outputs match their baselines within tolerance (exact keyed comparison)."""
 
     rule_id: ClassVar[str] = "REG-001"
+    check_name: ClassVar[str] = "matches_baseline"
     name: ClassVar[str] = "Outputs match baseline"
     description: ClassVar[str] = (
         "Generated outputs equal their stored baselines row-for-row by key, within the "

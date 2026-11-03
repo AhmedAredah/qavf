@@ -403,6 +403,7 @@ class EntityOutlierRule(Rule):
     """No entity is a statistical outlier among its peers."""
 
     rule_id: ClassVar[str] = "SPA-001"
+    check_name: ClassVar[str] = "entity_outliers"
     name: ClassVar[str] = "Entity outlier detection"
     description: ClassVar[str] = (
         "Within each group, no entity's (normalised) metric is a statistical outlier "
@@ -638,6 +639,7 @@ class GroupComparisonRule(Rule):
     """Entities resemble the group they belong to."""
 
     rule_id: ClassVar[str] = "SPA-002"
+    check_name: ClassVar[str] = "group_comparison"
     name: ClassVar[str] = "Entity versus group comparison"
     description: ClassVar[str] = (
         "Each entity's (normalised) metric stays within a configured factor of the median "
@@ -965,6 +967,7 @@ class CoverageRule(Rule):
     """Every entity-level dataset covers the same entities (in every period)."""
 
     rule_id: ClassVar[str] = "SPA-003"
+    check_name: ClassVar[str] = "coverage"
     name: ClassVar[str] = "Entity coverage"
     description: ClassVar[str] = (
         "Each dataset with the entity column contains every expected entity, in every "

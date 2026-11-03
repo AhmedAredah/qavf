@@ -50,6 +50,7 @@ class ExpressionRule(_SelectsDatasets):
     """Row-level SQL expressions hold for every row."""
 
     rule_id: ClassVar[str] = "INP-006"
+    check_name: ClassVar[str] = INPUT_RULES["INP-006"].check_name
     name: ClassVar[str] = INPUT_RULES["INP-006"].name
     description: ClassVar[str] = INPUT_RULES["INP-006"].description
     category: ClassVar[str] = CATEGORY
@@ -59,6 +60,12 @@ class ExpressionRule(_SelectsDatasets):
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements | None:
         return None  # Expressions may query any supplied frame via subqueries.
+
+    def item_name(self, finding: Finding | None) -> str | None:
+        """The ``expression`` item a finding reports on (``None`` for the summary)."""
+        if finding is None or finding.check_id != "row.expression" or not finding.datasets:
+            return None
+        return finding.parameters.get("name") or f"{self.check_name} on {finding.datasets[0]}"
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         failures: list[Finding] = []
@@ -228,6 +235,7 @@ class SqlAssertionRule(Rule):
     """Configured SQL assertions return no rows."""
 
     rule_id: ClassVar[str] = "INP-007"
+    check_name: ClassVar[str] = INPUT_RULES["INP-007"].check_name
     name: ClassVar[str] = INPUT_RULES["INP-007"].name
     description: ClassVar[str] = INPUT_RULES["INP-007"].description
     category: ClassVar[str] = CATEGORY
@@ -237,6 +245,12 @@ class SqlAssertionRule(Rule):
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements | None:
         # SQL may reference supplied runtime frames absent from settings.
         return None
+
+    def item_name(self, finding: Finding | None) -> str | None:
+        """The ``sql`` item a finding reports on (``None`` for the summary)."""
+        if finding is None or finding.check_id != "sql.assertion":
+            return None
+        return finding.check
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         failures: list[Finding] = []

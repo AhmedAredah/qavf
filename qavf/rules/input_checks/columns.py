@@ -58,6 +58,7 @@ class ColumnCheckRule(_SelectsDatasets):
     """Every configured column limit holds; each check is graded at its own severity."""
 
     rule_id: ClassVar[str] = "INP-003"
+    check_name: ClassVar[str] = INPUT_RULES["INP-003"].check_name
     name: ClassVar[str] = INPUT_RULES["INP-003"].name
     description: ClassVar[str] = INPUT_RULES["INP-003"].description
     category: ClassVar[str] = CATEGORY

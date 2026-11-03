@@ -52,6 +52,7 @@ class ApplicabilityRule(_SelectsDatasets):
     """Count valid N/A values separately and check configured row groups."""
 
     rule_id: ClassVar[str] = "INP-009"
+    check_name: ClassVar[str] = INPUT_RULES["INP-009"].check_name
     name: ClassVar[str] = INPUT_RULES["INP-009"].name
     description: ClassVar[str] = INPUT_RULES["INP-009"].description
     category: ClassVar[str] = CATEGORY

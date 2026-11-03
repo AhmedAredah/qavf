@@ -55,6 +55,7 @@ class ReferentialIntegrityRule(_SelectsDatasets):
     """Foreign-key values exist in the dataset they reference."""
 
     rule_id: ClassVar[str] = "INP-005"
+    check_name: ClassVar[str] = INPUT_RULES["INP-005"].check_name
     name: ClassVar[str] = INPUT_RULES["INP-005"].name
     description: ClassVar[str] = INPUT_RULES["INP-005"].description
     category: ClassVar[str] = CATEGORY

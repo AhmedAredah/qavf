@@ -85,6 +85,7 @@ class CoordinateRule(Rule):
     """Point coordinates are valid, plausible and inside the expected area."""
 
     rule_id: ClassVar[str] = "GEO-001"
+    check_name: ClassVar[str] = "coordinates"
     name: ClassVar[str] = "Coordinate validity"
     description: ClassVar[str] = (
         "Latitudes lie in [-90, 90] and longitudes in [-180, 180], coordinates are present "

@@ -56,6 +56,7 @@ class FreshnessRule(Rule):
     """The newest value of each configured date/time column is recent enough."""
 
     rule_id: ClassVar[str] = "INP-008"
+    check_name: ClassVar[str] = "fresh"
     name: ClassVar[str] = INPUT_RULES["INP-008"].name
     description: ClassVar[str] = INPUT_RULES["INP-008"].description
     category: ClassVar[str] = CATEGORY

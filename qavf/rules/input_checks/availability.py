@@ -68,6 +68,7 @@ class RequiredDatasetsRule(Rule):
     """
 
     rule_id: ClassVar[str] = "INP-001"
+    check_name: ClassVar[str] = INPUT_RULES["INP-001"].check_name
     name: ClassVar[str] = INPUT_RULES["INP-001"].name
     description: ClassVar[str] = INPUT_RULES["INP-001"].description
     category: ClassVar[str] = CATEGORY
@@ -124,6 +125,7 @@ class SchemaConformanceRule(_SelectsDatasets):
     """Columns, logical types and row counts match the configured schema."""
 
     rule_id: ClassVar[str] = "INP-002"
+    check_name: ClassVar[str] = INPUT_RULES["INP-002"].check_name
     name: ClassVar[str] = INPUT_RULES["INP-002"].name
     description: ClassVar[str] = INPUT_RULES["INP-002"].description
     category: ClassVar[str] = CATEGORY
