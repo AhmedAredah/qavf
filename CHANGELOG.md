@@ -36,6 +36,23 @@ These changes break existing configurations. Convert a configuration once with
 - Each check item is assessed on its own: a rule configured with several series or
   comparisons becomes one item each, so multiple-testing corrections (trend,
   drift) now apply within each item.
+- **Reuse.** A dataset's `series` and `metrics` define a time series or per-entity
+  metric once; temporal checks take `series: <name>` and spatial checks
+  `metric: <name>` (`other_dataset.name` reaches another dataset's). Metrics take
+  their normalizer as `per: counts.aadt`. `views` name a slice of a dataset
+  (`where`, `columns`), usable as `counts.recent` wherever a check names a dataset.
+  Top-level `defaults` give settings per check name, `vars` named values used as
+  `${vars.name}`, and `include` merges shared files first (a dataset or named check
+  defined twice is an error). `expected: 2016..2024` or `{from, to, step}` expands
+  to every value.
+- **Run-time selection.** `qavf run --tags`, `--skip-tags`, `--only "<name>"` and
+  `--dataset`, and `validate(..., only=, tags=, skip_tags=, datasets=)`, narrow a run
+  on both backends; built-in checks carry their family as a tag. Selecting nothing
+  is an error. `run.tags: {<tag>: {fail_on: <severity>|never}}` sets a pass/fail
+  policy per tag; results carry their item's `tags`.
+- `qavf migrate` turns inline series and metrics into named `series`/`metrics`
+  entries, merging identical ones (`<value>_by_<group>`).
+- The demo uses a named series and metric and `vars`.
 - Testing helpers: `qavf.testing.rule_results`/`run_rule` run one rule instance
   with any parameters; `checks_config` converts rule-code mappings and
   `with_checks` configures every rule of a test registry.
@@ -51,6 +68,11 @@ These changes break existing configurations. Convert a configuration once with
   it would become, and `python -m qavf` runs the command line.
 - The configuration JSON Schema (`qavf schema`) labels its fields for editors:
   `ui_group`, `ui_title` and `ui_advanced` on each setting.
+
+### Fixed
+
+- `qavf run` prints result labels on a console that is not UTF-8 (e.g. a Windows
+  cp1252 pipe): `·` falls back to `-` instead of showing as `�`.
 
 ## [0.6.2] - 2026-11-02
 

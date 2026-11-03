@@ -89,23 +89,45 @@ contracts always do. Row expressions and SQL queries run in DuckDB, where each
 dataset is a table:
 
 ```yaml
+vars:
+  years: 2020..2023                 # every year from 2020 to 2023
+defaults:
+  change_rate: {max: 0.15}          # unless an item sets its own
 datasets:
   counts:
     path: data/counts.csv
+    series:                         # defined once, named by the checks
+      aadt_by_site: {value: aadt, group_by: [site_id], time_column: year}
+    views:                          # a slice, used as counts.recent
+      recent: {where: year >= 2022}
     checks:
       - check: missing_periods
         name: no missing years
-        series: {value: aadt, group_by: [site_id], time_column: year}
-        expected: [2020, 2021, 2022, 2023]
+        series: aadt_by_site
+        expected: ${vars.years}
+      - {check: change_rate, series: aadt_by_site, tags: [nightly]}
   crashes:
     path: data/crashes.parquet
+    metrics:
+      crash_rate: {value: crashes, entity: site_id, group_by: [year], per: counts.aadt}
     checks:
       - {check: expression, expr: fatal <= crashes, severity: CRITICAL}
+      - {check: entity_outliers, metric: crash_rate}
 checks:
   - check: sql
     name: every site has counts
     sql: SELECT site_id FROM sites WHERE site_id NOT IN (SELECT site_id FROM counts)
+  - {check: key_sets_match, datasets: [counts.recent, crashes], keys: [site_id, year]}
+run:
+  tags:
+    nightly: {fail_on: never}       # report, but never fail the run
 ```
+
+`include: [shared.yaml]` merges shared files first (this file wins). Narrow a run
+without editing the file: `qavf run -c qa.yaml --tags nightly`, `--skip-tags slow`,
+`--only "no missing years"` or `--dataset counts`; built-in checks carry their
+family (`temporal`, `spatial`, `input`, ...) as a tag. The same selectors exist on
+`validate(..., only=, tags=, skip_tags=, datasets=)`.
 
 `qavf list-checks` lists every check. Configurations written for QAVF 0.6
 (`rules:`, `expressions:`, `assertions:`) convert with `qavf migrate old.yaml -o new.yaml`.
