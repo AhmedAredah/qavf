@@ -26,7 +26,7 @@ DOCS = ROOT / "docs"
 def pages() -> dict[Path, str]:
     """Generated documentation pages keyed by path."""
     return {
-        DOCS / "rules.md": rules_markdown(discovered_rules(entry_points=False), "Built-in rules"),
+        DOCS / "rules.md": rules_markdown(discovered_rules(entry_points=False), "Built-in checks"),
         DOCS / "sources.md": sources_markdown(
             SourceRegistry().discover(use_entry_points=False), "Built-in sources"
         ),
