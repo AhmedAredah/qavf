@@ -10,6 +10,7 @@ import os
 import platform
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -132,8 +133,32 @@ def environment() -> dict[str, Any]:
     }
 
 
+REPLACE_TOLERANCE_S = 2.0
+"""How long a Windows replace may wait out a scanner or indexer briefly holding the target."""
+
+
 def write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    replace_file(temporary, path)
+
+
+def replace_file(source: Path, target: Path) -> None:
+    """Atomically replace ``target`` by ``source``.
+
+    A record is rewritten several times in quick succession; on Windows a virus
+    scanner or the indexer may still hold the previous version open, and the
+    replace then fails with a sharing violation (``PermissionError``) for a moment.
+    That is retried for :data:`REPLACE_TOLERANCE_S`; elsewhere, and after that,
+    the error is real and raised.
+    """
+    deadline = time.monotonic() + (REPLACE_TOLERANCE_S if sys.platform == "win32" else 0.0)
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -449,3 +450,38 @@ def test_host_memory_api_skips_are_accepted_only_off_their_host():
         assert accepted_skip(linux, "Linux /proc and cgroup files", {"system": system})
     assert not accepted_skip(linux, "Linux /proc and cgroup files", {"system": "Linux"})
     assert not accepted_skip(windows, "another reason", {"system": "Linux"})
+
+
+class _HeldTarget:
+    """``os.replace`` that fails like a Windows sharing violation ``failures`` times."""
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls = 0
+        self.real = os.replace
+
+    def __call__(self, source: Path, target: Path) -> None:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise PermissionError(13, "The process cannot access the file", str(target))
+        self.real(source, target)
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_evidence_records_survive_a_briefly_held_target(tmp_path, monkeypatch, platform):
+    """A scanner briefly holding a just-written record must not fail the gate on Windows."""
+    from scripts.release_checks import provenance
+
+    record = tmp_path / "evidence.json"
+    provenance.write_json(record, {"status": "running"})
+    held = _HeldTarget(failures=3)
+    monkeypatch.setattr(provenance.sys, "platform", platform)
+    monkeypatch.setattr(provenance.os, "replace", held)
+    if platform == "win32":
+        provenance.write_json(record, {"status": "failed"})
+        assert json.loads(record.read_text())["status"] == "failed"
+        assert held.calls == 4
+    else:
+        with pytest.raises(PermissionError):
+            provenance.write_json(record, {"status": "failed"})
+        assert held.calls == 1

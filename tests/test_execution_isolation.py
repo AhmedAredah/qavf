@@ -240,6 +240,10 @@ def test_abrupt_worker_exit_never_returns_a_partial_report(tmp_path):
     assert report is None
 
 
+IMPORT_DEADLINE_S = 10
+"""Wall-clock limit of the slow plugin import probe: ample for startup, far below its 90 s."""
+
+
 def test_wall_deadline_includes_plugin_import_before_rule_execution(tmp_path):
     if not _supported_or_rejected():
         return
@@ -253,12 +257,14 @@ def test_wall_deadline_includes_plugin_import_before_rule_execution(tmp_path):
     )
     config = _config(tmp_path / "observed", "pass")
     config["plugins"]["paths"] = [str(plugin)]
-    record, report = _probe(tmp_path, "pass", config=config, wall_time=2)
+    # The deadline covers worker startup too, so it must leave startup (slower on a
+    # loaded machine) time to reach the plugin import, which then outlasts it.
+    record, report = _probe(tmp_path, "pass", config=config, wall_time=IMPORT_DEADLINE_S)
     assert record["outcome"] == "error", record
     assert record["error_type"] == "ExecutionLimitError"
     assert report is None and marker.is_file()
     assert json.loads(marker.read_text(encoding="utf-8"))["pid"] != record["driver_pid"]
-    assert record["elapsed"] < 8
+    assert IMPORT_DEADLINE_S <= record["elapsed"] < IMPORT_DEADLINE_S + 6
 
 
 def test_report_budget_rejection_does_not_accept_truncated_success(tmp_path):
