@@ -117,6 +117,7 @@ def build_plan(
     alone is an availability condition, not a complete dependency declaration.
     """
     universe = frozenset(dataset_names)
+    parents = {name: parent for name, (parent, _) in settings.views().items()}
     dependencies = []
     for rule in rules:
         explicit = rule.data_requirements(settings)
@@ -130,6 +131,10 @@ def build_plan(
         else:
             requirements = DataRequirements(universe | frozenset(rule.requires))
             mode = "opaque"
+        viewed = frozenset(parents[name] for name in requirements.datasets if name in parents)
+        if viewed:
+            # A view is read from its parent, which must stay loaded while the view is used.
+            requirements = DataRequirements(requirements.datasets | viewed, requirements.columns)
         dependencies.append(_RuleDependencies(rule.key, rule.rule_id, requirements, mode))
     return ExecutionPlan(dependencies)
 

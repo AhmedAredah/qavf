@@ -5,6 +5,10 @@
 
 project: Traffic monitoring demo
 
+# Named values, used as ${vars.<name>}. `2016..2024` is every year in that range.
+vars:
+  years: 2016..2024
+
 # ---------------------------------------------------------------------------
 # Datasets: where each table comes from, and the QA limits for its columns.
 # ---------------------------------------------------------------------------
@@ -49,22 +53,25 @@ datasets:
         count_type: {dtype: str, isin: [permanent, portable]}
     foreign_keys:
       - {columns: [site_id], ref_dataset: sites}
+    # Time series defined once and named by the temporal checks below.
+    series:
+      aadt_by_site: {value: aadt, group_by: [site_id], time_column: year}
     # Checks of this dataset. `qavf list-checks` lists every check and its settings.
     checks:
       - check: change_rate            # period-over-period change
-        series: {value: aadt, group_by: [site_id], time_column: year}
+        series: aadt_by_site
         max: 0.15                     # 15 % per year
       - check: trend                  # trend direction (needs qavf[stats])
-        series: {value: aadt, group_by: [site_id], time_column: year}
+        series: aadt_by_site
         expect: increasing
         tags: [stats]
       - check: trend_outliers         # off-trend years (needs qavf[stats])
-        series: {value: aadt, group_by: [site_id], time_column: year}
+        series: aadt_by_site
         tags: [stats]
       - check: missing_periods
         name: no missing years
-        series: {value: aadt, group_by: [site_id], time_column: year}
-        expected: [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+        series: aadt_by_site
+        expected: ${vars.years}
       - check: matches_baseline       # compare with the accepted counts
         path: baseline/counts.csv
         keys: [site_id, year]
@@ -80,6 +87,9 @@ datasets:
         fatal: {dtype: int, ge: 0}
     foreign_keys:
       - {columns: [site_id], ref_dataset: sites}
+    # Crashes per vehicle (AADT from counts), per site and year.
+    metrics:
+      crash_rate: {value: crashes, entity: site_id, group_by: [year], per: counts.aadt}
     checks:
       - {check: expression, expr: fatal <= crashes, name: fatal within total}
       # Expressions may query other datasets by name:
@@ -88,19 +98,11 @@ datasets:
         name: year has counts
         severity: WARNING
       - check: entity_outliers        # sites whose crash rate is an outlier
-        metric:
-          value: crashes
-          entity: site_id
-          group_by: [year]
-          normalize_by: {dataset: counts, value: aadt}
+        metric: crash_rate
         method: modified_zscore
         min_entities: 5
       - check: group_comparison       # site vs. its region
-        metric:
-          value: crashes
-          entity: site_id
-          group_by: [year]
-          normalize_by: {dataset: counts, value: aadt}
+        metric: crash_rate
         max_ratio: 1.6
         groups:
           North: [S01, S02, S03, S04, S05, S06]

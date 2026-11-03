@@ -400,10 +400,19 @@ class DataContext:
                     except (KeyError, ValueError) as exc:
                         message = exc.args[0] if exc.args else exc
                         raise ValueError(f"dataset {name!r}: {message}") from None
+            context._attach_views(settings)
             return context
         except BaseException:
             context.close()
             raise
+
+    def _attach_views(self, settings: QAVFSettings) -> None:
+        """Give every dataset view a source that slices its parent as this run loads it."""
+        from qavf.engine.views import ViewSource
+
+        for name, (parent, spec) in settings.views().items():
+            self._catalog.sources[name] = ViewSource.of(parent, spec, self.env, self)
+            self._catalog.views.add(name)
 
     @property
     def observation_storage(self) -> ObservationStorage:

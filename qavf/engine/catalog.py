@@ -52,6 +52,8 @@ class DatasetCatalog:
         self.specs = dict(specs)
         self.sources = dict(sources)
         self.provided_names = frozenset(provided_names)
+        self.views: set[str] = set()
+        """Dataset views: loaded on demand, never listed among the datasets."""
         self._canonical = check_canonical_columns(canonical_columns)
         self._observations: dict[str, _Observation] = {}
         self._plans: dict[str, dict[str, Any]] = {}
@@ -64,10 +66,10 @@ class DatasetCatalog:
         return entry
 
     def names(self, materialized: Iterable[str], lazy: Iterable[str]) -> list[str]:
-        return sorted(set(materialized) | self.sources.keys() | set(lazy))
+        return sorted((set(materialized) | self.sources.keys() | set(lazy)) - self.views)
 
     def declared(self, accessible: Iterable[str]) -> list[str]:
-        return sorted(set(accessible) | self.specs.keys() | self.provided_names)
+        return sorted(set(accessible) | self.specs.keys() | self.provided_names | self.views)
 
     def failure(self, name: str) -> SourceError | None:
         with self._lock:
@@ -237,7 +239,9 @@ class DatasetCatalog:
                 for name, entry in self._observations.items()
                 if entry.schema is not None or entry.failure is not None
             }
-            return sorted((self.sources.keys() | self.provided_names) - used - self._plans.keys())
+            return sorted(
+                (self.sources.keys() | self.provided_names) - used - self._plans.keys() - self.views
+            )
 
     def unavailable(self, materialized: Iterable[str]) -> dict[str, str]:
         with self._lock:

@@ -144,7 +144,7 @@ class DatasetComparisonRule(Rule):
         problems = []
         for spec in self.params.comparisons:
             for dataset in spec.datasets():
-                if dataset not in settings.datasets:
+                if not settings.knows_dataset(dataset):
                     problems.append(f"comparison {spec.label!r} names unknown dataset {dataset!r}")
         counts = Counter(spec.label for spec in self.params.comparisons)
         problems.extend(
