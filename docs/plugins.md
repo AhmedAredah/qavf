@@ -410,7 +410,8 @@ def test_flags_high_share():
 ```
 
 `run_rule` / `rule_results` run one rule against in-memory frames; pass
-`datasets=`, `extensions=`, `assertions=` or `connections=` for configuration.
+`datasets=`, `extensions=`, `checks=` (top-level check items such as `sql`) or
+`connections=` for configuration.
 Installed entry-point plugins are discovered automatically. A plugin that fails to
 import is recorded (not just logged): `metadata.plugins` in every report lists each
 entry point as `loaded` or with its error, and `plugins.required: [moves]` makes the

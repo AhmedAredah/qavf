@@ -82,7 +82,7 @@ report = validate(
 ```
 
 `Dataset` associates an input with its `schema`, `rename`, `foreign_keys`,
-`expressions`, `load_policy`, `required`, or `description`. Its input can be any
+`checks`, `load_policy`, `required`, or `description`. Its input can be any
 supported path, `File`, frame, `Query`, `Loader`, or `DataSource`. It does not load
 the input. Names come from the surrounding mapping; all names and contracts are
 resolved together before execution. A single `Dataset` also works without a
