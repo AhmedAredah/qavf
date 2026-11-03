@@ -216,7 +216,7 @@ def test_parallel_and_sequential_runs_agree_on_everything_but_timing() -> None:
 
     config = yaml.safe_load(demo_config())
     config.pop("datasets", None)
-    settings = {k: v for k, v in config.items() if k in ("rules", "assertions")}
+    settings = {k: v for k, v in config.items() if k in ("rules", "assertions", "vars")}
     datasets = yaml.safe_load(demo_config())["datasets"]
     for spec in datasets.values():
         spec.pop("path", None)
@@ -241,7 +241,7 @@ def test_shuffling_rows_does_not_change_verdicts_or_counts() -> None:
     for spec in datasets.values():
         spec.pop("path", None)
         spec.pop("source", None)
-    settings = {k: v for k, v in config.items() if k in ("rules", "assertions")}
+    settings = {k: v for k, v in config.items() if k in ("rules", "assertions", "vars")}
 
     def summary(report):
         return sorted(

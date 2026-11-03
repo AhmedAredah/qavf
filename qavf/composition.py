@@ -155,12 +155,15 @@ class VariableSubstitution:
             return raw
         substitution = cls(raw.get(VARS_KEY))
         result: dict[str, Any] = {}
-        for key, value in raw.items():
-            result[key] = (
-                {name: substitution.value(name) for name in substitution._raw}
-                if key == VARS_KEY
-                else substitution.substitute(value, key)
-            )
+        try:
+            for key, value in raw.items():
+                result[key] = (
+                    {name: substitution.value(name) for name in substitution._raw}
+                    if key == VARS_KEY
+                    else substitution.substitute(value, key)
+                )
+        except RecursionError as exc:
+            raise ValueError("configuration is nested too deeply or refers to itself") from exc
         return result
 
     def value(self, name: str) -> Any:
