@@ -9,7 +9,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from qavf.checks.legacy import LegacyConfigurationError
+from qavf.checks.legacy import LegacyConfigurationError, first_legacy_key
 from qavf.cli import main
 from qavf.demo import demo_config, write_demo_project
 from qavf.engine.runner import QARunner
@@ -252,3 +252,37 @@ def test_new_configurations_are_left_unchanged() -> None:
     migration = Migrator().migrate(raw)
     assert not migration.changed
     assert migration.config == raw
+
+
+SHIPPED_06 = {
+    "qavf06_full.yaml": "config/qavf.full.yaml",
+    "qavf06_minimal.yaml": "config/qavf.minimal.yaml",
+}
+"""The example configurations as QAVF 0.6.2 shipped them, and their 0.7 versions."""
+
+
+@pytest.mark.parametrize("old", sorted(SHIPPED_06))
+def test_shipped_examples_convert_to_valid_configurations(old: str) -> None:
+    raw = yaml.safe_load((OLD_DEMO.parent / old).read_text(encoding="utf-8"))
+    migration = Migrator().migrate(raw)
+    assert migration.changed
+    assert first_legacy_key(migration.config) is None
+    assert not Migrator().migrate(migration.config).changed
+    QAVFSettings.model_validate(migration.config)
+
+
+def test_the_old_minimal_example_reports_as_the_shipped_one(tmp_path: Path) -> None:
+    (tmp_path / "data").mkdir()
+    rows = "station,date,pm25\nABC01,2024-01-01,12.5\nABC01,2024-01-02,600\nABC02,2024-01-01,-1\n"
+    (tmp_path / "data" / "measurements.csv").write_text(rows, encoding="utf-8")
+    old = tmp_path / "old.yaml"
+    old.write_text((OLD_DEMO.parent / "qavf06_minimal.yaml").read_text("utf-8"), "utf-8")
+    new = tmp_path / "new.yaml"
+    migrate_file(old, new)
+    shipped = tmp_path / "shipped.yaml"
+    root = Path(__file__).resolve().parents[1]
+    shipped.write_text((root / SHIPPED_06["qavf06_minimal.yaml"]).read_text("utf-8"), "utf-8")
+    migrated = QARunner(load_settings(new)).run().results
+    expected = QARunner(load_settings(shipped)).run().results
+    assert _outcome(migrated) == _outcome(expected)
+    assert {r.status.value for r in migrated} >= {"FAIL"}

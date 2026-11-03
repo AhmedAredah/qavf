@@ -1,0 +1,377 @@
+# yaml-language-server: $schema=qavf.schema.json
+#
+# QAVF configuration reference: every section and option, annotated.
+# Generate a schema for editor autocompletion with:  qavf schema -o qavf.schema.json
+# Generate a starting configuration from your data:   qavf init -d data/file.csv
+#
+# Relative paths resolve against this file's directory.
+# Any string may use ${ENV_VAR} or ${ENV_VAR:-default}.
+
+project: Reference configuration
+
+# ---------------------------------------------------------------------------
+# datasets: name -> where the data comes from + what it must look like
+# ---------------------------------------------------------------------------
+datasets:
+
+  # Shorthand: a file (CSV, Parquet, JSON, NDJSON, Excel) or a glob of files.
+  readings:
+    path: data/readings/*.parquet
+    description: Hourly sensor readings.
+    required: true                    # INP-001 fails CRITICAL if it cannot load
+    rename: {Station_ID: station}     # applied after loading
+    schema:
+      primary_key: [station, timestamp]
+      duplicate_rows_per_key: 10      # positive integer or all; exact totals never sampled
+      unique_keys: []                 # lists retain null exemption; or:
+                                      # [{columns: [station, serial], nulls: equal}]
+                                      # nulls: exempt | equal | forbid
+      na_groups: []                  # all-or-none N/A across groups of declared columns
+      strict: false                   # true: reject undeclared columns
+      min_rows: 1
+      max_rows: 50000000
+      evidence_columns: checked       # failing rows show checked columns and the key; all: whole rows
+      columns:
+        station:
+          dtype: str                  # int | float | decimal | str | bool | date | datetime
+          regex: '[A-Z]{3}\d{2}'      # whole-value match
+          min_length: 5
+          max_length: 5
+        timestamp:
+          dtype: datetime
+          ge: 2020-01-01
+          le: 2030-12-31
+        value:
+          dtype: float
+          nullable: true              # nulls allowed ...
+          max_null_fraction: 0.02     # ... but at most 2 %
+          missing_values: ['N/A']     # placeholders that mean missing; text ones also
+                                      # apply when a stray value leaves the column as text
+          na_values: []               # valid not-applicable tokens, distinct from missing_values
+          trim_whitespace: ascii      # ASCII space only | unicode | none
+          number_grammar:
+            int_decimal: false        # int only: opt into exact integral forms such as 7.0
+            underscores: false        # allow digit separators, e.g. 1_000
+            exponent: true            # allow e/E notation (int also needs int_decimal)
+            special_values: true      # admit nan/inf spellings; missing/finite rules still apply
+          convert_options: false      # numeric isin/notin literals use the declared grammar
+          each_allowed_once: false    # with isin: require every converted allowed value once
+          ge: 0                       # inline limits: graded at INP-003's severity
+          notin: [-999, -9999]        # sentinel values
+          checks:                     # extra checks, each with its own severity
+            - name: plausible maximum
+              le: 2000
+              severity: WARNING
+            - name: network level
+              mean: {ge: 5, le: 60}   # aggregates: min max mean median std sum distinct_count
+              severity: INFO
+            - name: valid readings have a value
+              where: "status = 'valid'"
+              not_null: true          # required only in these rows; missing rows are listed
+        status:
+          dtype: str
+          isin: [valid, suspect, invalid]
+          normalize: [case, trim]     # compare ' Valid' as 'valid' (isin, notin, unique)
+        # Values written another way than ISO 8601 dates or true/false:
+        #   installed: {dtype: date, format: '%m/%d/%Y'}
+        #   active: {dtype: bool, true_values: [Y, 'yes', 1], false_values: [N, 'no', 0]}
+        # (quote yes and no, which YAML would otherwise read as booleans)
+        serial:
+          dtype: int
+          unique: true
+    foreign_keys:
+      - {columns: [station], ref_dataset: stations, severity: CRITICAL}
+    expressions:                      # row-level DuckDB SQL; may query other datasets
+      - {name: valid rows have values, expr: "status <> 'valid' OR value IS NOT NULL"}
+      - {name: known station, expr: "station IN (SELECT station FROM stations)", severity: WARNING}
+
+  # A full source block: DuckDB SQL over files (and attached connections).
+  daily:
+    source:
+      type: query
+      sql: |
+        SELECT Station_ID AS station,
+               CAST(timestamp AS DATE) AS day,
+               date_diff('day', DATE '2020-01-01', CAST(timestamp AS DATE)) AS day_number,
+               avg(value) AS value
+        FROM read_parquet('data/readings/*.parquet')
+        GROUP BY ALL                  -- temporal rules need a numeric time: day_number
+
+  # A second version of `daily` with renamed columns, for the CMP-001 comparison below.
+  daily_v2:
+    source:
+      type: query
+      sql: |
+        SELECT Station_ID AS station_id,
+               CAST(timestamp AS DATE) AS day,
+               avg(value) * 1000 AS value_milli
+        FROM read_parquet('data/readings/*.parquet')
+        GROUP BY ALL
+
+  # Zone polygons for spatial checks: an id and a WKT (or WKB) geometry column. A zone
+  # layer can also be a path: GeoParquet, GeoJSON or a shapefile (docs/spatial.md).
+  zones:
+    source:
+      type: query
+      sql: |
+        SELECT * FROM (VALUES
+          ('west',   'POLYGON((-98 29, -97.45 29, -97.45 31, -98 31, -98 29))'),
+          ('centre', 'POLYGON((-97.45 29, -97.25 29, -97.25 31, -97.45 31, -97.45 29))'),
+          ('east',   'POLYGON((-97.25 29, -96.5 29, -96.5 31, -97.25 31, -97.25 29))')
+        ) AS t(zone, geometry)
+
+  # Monitoring sites with coordinates (WGS 84 longitude/latitude).
+  sites:
+    source:
+      type: query
+      sql: |
+        SELECT * FROM (VALUES ('ABC01', -97.6, 30.0), ('ABC04', -97.3, 30.1),
+                              ('ABC06', -97.1, 29.9)) AS t(station, longitude, latitude)
+
+  # A table (or query) in a database attached through `connections`.
+  stations:
+    source: {type: database, connection: warehouse, table: stations, schema: public}
+
+  # CSV with reader options (passed to DuckDB's read_csv).
+  calibrations:
+    source:
+      type: file
+      path: data/calibrations.csv
+      options: {delim: ';', header: true}
+      columns: [station, calibrated_on, factor]
+      text_columns: [station]         # read as written (leading zeros kept); columns
+                                      # declared dtype: str are added automatically
+    required: false                   # absent is fine; failing to load is a WARNING
+
+  # Anything else: a Python function returning a DataFrame.
+  forecasts:
+    source: {type: python, callable: my_package.loaders:load_forecasts, kwargs: {horizon: 7}}
+    required: false
+
+# ---------------------------------------------------------------------------
+# connections: databases DuckDB attaches (duckdb | sqlite | postgres | mysql)
+# ---------------------------------------------------------------------------
+connections:
+  warehouse:
+    type: postgres
+    uri: host=${PGHOST:-localhost} dbname=air user=qa password=${PGPASSWORD:-}
+    read_only: true
+  archive: {type: sqlite, path: data/archive.db}
+
+# ---------------------------------------------------------------------------
+# secrets: cloud storage credentials for s3:// and az:// / abfss:// paths
+# (docs/cloud_storage.md). Values are masked in reports and logs. Each secret
+# loads its DuckDB extension, so configure only the storage you read.
+# ---------------------------------------------------------------------------
+# secrets:
+#   lake:
+#     type: s3                          # s3 (AWS and S3-compatible) | azure
+#     provider: credential_chain        # config (keys below) | credential_chain
+#     region: us-east-1
+#     scope: [s3://my-lake]             # URL prefixes; omit for every s3:// URL
+#   minio: {type: s3, key_id: "${MINIO_KEY}", secret: "${MINIO_SECRET}",
+#           endpoint: "minio.internal:9000", url_style: path, use_ssl: false}
+#   blob:  {type: azure, connection_string: "${AZURE_STORAGE_CONNECTION_STRING}"}
+
+# ---------------------------------------------------------------------------
+# assertions: SQL returning offending rows (INP-007); datasets are tables
+# ---------------------------------------------------------------------------
+assertions:
+  - name: every station reports
+    severity: WARNING
+    sql: SELECT station FROM stations WHERE station NOT IN (SELECT station FROM readings)
+
+# ---------------------------------------------------------------------------
+# rules: per-rule enabled / severity / params. Unlisted rules run with defaults.
+# `qavf list-rules` shows everything installed; `qavf init` writes all defaults.
+# ---------------------------------------------------------------------------
+rules:
+  INP-003: {severity: ERROR}          # default severity of inline column limits
+
+  TMP-001:
+    params:
+      max_change_rate: 0.30
+      series:
+        - {dataset: daily, value: value, group_by: [station], time_column: day_number,
+           aggregate: mean}           # sum (default) | mean | count | min | max | first | last
+                                      # (order_by) | weighted_mean (weight) | none
+
+  TMP-004:                            # every station has every calendar day
+    params:
+      series:
+        - {dataset: readings, value: value, group_by: [station], time_column: timestamp,
+           bucket: day,               # a Date/Datetime/text column needs a bucket: second ...
+           time_zone: UTC,            # year (with multiples: 15 minutes), or a cyclic profile
+           aggregate: count}          # hour_of_day ... season; naive times are local here
+
+  SPA-001:
+    params:
+      method: modified_zscore         # zscore | modified_zscore | iqr
+      threshold: 3.5
+      metrics:
+        - {dataset: daily, value: value, entity_column: station}
+
+  SPA-003:
+    params: {entity_column: station, reference_dataset: stations, datasets: [readings]}
+    # zone_layer: {dataset: zones, id: zone}   # or: expected entities are a layer's zones
+
+  GEO-001:                            # coordinates valid, and inside the study area
+    params:
+      points:
+        - dataset: sites
+          bbox: {min_lat: 25, max_lat: 37, min_lon: -107, max_lon: -93}
+          within: {dataset: zones, id: zone}  # needs DuckDB's spatial extension
+
+  STA-001:
+    params:
+      targets:
+        - {dataset: readings, value: value, group_by: [station], method: iqr, threshold: 3.0}
+
+  INP-008:                            # freshness of the newest value
+    params:
+      checks:
+        - {dataset: readings, column: timestamp, max_age: P3650D}
+
+  REG-001:
+    enabled: false
+    params:
+      baselines:
+        - dataset: daily
+          path: baselines/daily.parquet
+          keys: [station, day]
+          rtol: 1.0e-6
+          columns:                    # per-column tolerances
+            value: {atol: 0.01}
+            day_number: {exact: true}
+
+  CMP-001:                            # compare two datasets after aligning them
+    params:
+      comparisons:
+        - name: daily v1 vs v2
+          baseline: daily
+          candidate: daily_v2
+          keys: [station_id, day]       # candidate names: they apply after `columns`
+          columns: {station: station_id, value: value_milli}   # baseline -> candidate
+          units: {value_milli: {factor: 1000}}  # exact for integers and decimals
+          ignore_columns: [day_number]  # only in the baseline
+          # cast: {code: str}  recode: {fc: {values: {"1": interstate}}}
+          # derive: {total: "a + b"}  baseline_where / candidate_where / where: SQL
+          # steps: [{step: shift_time, column: day, offset: {years: 1}}]  # year over year
+          rtol: 1.0e-9                  # default tolerance; per column: tolerances
+          # A difference fails when material and significant (the stats extra).
+          # decision: material | significant | equivalence; material runs no test.
+          decision: material_and_significant
+          correction: bh                # bh | by | holm | bonferroni | none, per check
+          alpha: 0.05
+          seed: 0                       # resampling tests reproduce exactly
+          levels:
+            - structure                 # columns, types, units, nullability, rows, keys
+            - coverage                  # keys on one side only; null-rate changes
+            - {level: records, top_n: 5}  # changed values; shift: paired test per column
+            - level: groups             # measures per group, materiality, rank changes
+              severity: WARNING
+              group_by: [station_id]
+              measures:
+                - count                 # Poisson test of the counts
+                - sum(value_milli)      # integer sums: Poisson; others: bootstrap
+                - {measure: quantile, column: value_milli, p: 0.9}  # bootstrap
+                - {measure: mean, column: value_milli, test: welch_t}  # the default
+              rank: {measure: sum(value_milli), top_k: 3}
+            - level: temporal           # measures per calendar bucket; gaps in the grid
+              time_column: day
+              bucket: week              # day | 15 minutes | month | hour_of_day | season ...
+              group_by: [station_id]
+              measures: [sum(value_milli)]
+            - level: series_shape       # correlation, trend, peak, lag, level shifts
+              time_column: day
+              bucket: day
+              group_by: [station_id]
+              measure: mean(value_milli)
+              trend: {dependence: block}  # slope difference: block bootstrap (or hac)
+              lag: {max_lag: 2}         # profile: {profile: day_of_week} compares cycles
+            - level: distribution       # PSI, KS, Wasserstein, Jensen-Shannon, quantile deltas
+              columns: [value_milli]    # categorical columns: chi-square, new categories
+              group_by: [station_id]    # time: {time_column: day, bucket: month} too
+              thresholds: {max_psi: 0.2, max_ks: 0.1, max_js: 0.05}
+              quantiles: {probabilities: [0.1, 0.5, 0.9]}
+            - level: relationships      # correlations, ratio invariants, agreement
+              agreement:                # matched records: Bland-Altman, CCC, MAE, the fit
+                columns: [value_milli]
+                fit: deming             # or ols; tests slope = 1 and intercept = 0
+                min_ccc: 0.99
+                max_slope_deviation: 0.05
+              # correlation: {columns: [a, b, c]}  ratios: ["fatal / crashes"]
+
+        - name: daily by zone           # spatial comparison (docs/spatial.md)
+          baseline: daily
+          candidate: daily_v2
+          keys: [station_id, day]
+          columns: {station: station_id, value: value_milli}
+          units: {value_milli: {factor: 1000}}
+          ignore_columns: [day_number]
+          derive:                       # each station's coordinates, on both sides
+            lon: "-97.7 + 0.1 * CAST(SUBSTR(station_id, 4, 2) AS INTEGER)"
+            lat: "30.0"
+            readings: "1"               # one per row: the rate below is a mean per reading
+          steps:
+            - step: assign_zones        # points to zone polygons (or grid: {size: 0.1})
+              x: lon
+              y: lat
+              layer: {dataset: zones, id: zone}
+              predicate: intersects     # boundary points belong to the zone (or contains)
+              overlap: error            # a point inside several zones: error | first | all
+              max_unassigned: 0.0       # fraction of rows allowed in no zone
+          levels:
+            - level: spatial            # measures per zone, expected zones, patterns
+              measures: [count, sum(value_milli)]
+              weights: {method: queen}  # rook | knn (k) | distance_band (distance) | table
+              rank: {min_spearman: 0.9}
+              shares: {max_change: 0.01}
+              moran: {min_i: 0.1}       # are the changes clustered?
+              lisa: {}                  # which zones form clusters of change
+            - {level: temporal, time_column: day, bucket: week, group_by: [zone],
+               measures: [sum(value_milli)]}  # each zone, week by week
+            - {level: locations, x: lon, y: lat, max_distance: 10}  # metres moved
+            - level: contribution       # what explains the total change
+              measure: sum(value_milli) # additive: count, sum or null_count
+              dimensions: [zone, {columns: [zone], time: {time_column: day, bucket: week}}]
+              share: 0.8                # the fewest zones explaining 80 % of the change
+              rates:                    # mix (composition) vs rate effects, exactly
+                - {numerator: value_milli, denominator: readings, dimension: zone}
+
+# ---------------------------------------------------------------------------
+engine:
+  parallel: true
+  max_workers: 4
+  run_unconfigured_rules: true
+  include_categories: null            # e.g. [input, temporal]
+  exclude_categories: []
+  max_affected_records: 50
+  max_evidence_bytes: 1048576         # per-result evidence/diagnostics; counts remain exact
+  max_report_bytes: 16777216          # fail explicitly if essential outcomes cannot fit
+  memory_budget_bytes: null          # planning/post-collection target, not an OS RSS cap
+  cache_max_bytes: 268435456          # tracked retained caches
+  spill_max_bytes: 1073741824         # explicit cap; omit for data/key-aware automatic planning
+  temp_directory: null               # optional parent directory for run temporary files
+  native_threads: null               # DuckDB thread allocation; Polars pool is process-global
+  rule_timeout_s: null               # cooperative; cannot kill arbitrary plugin threads
+  timeout_grace_s: 0.1
+  fail_on: ERROR                      # CLI exit code 1 at this severity or above
+  fail_on_incomplete: true            # also fail when a configured check was not assessed
+  require: [INP-001, INP-003]         # must be assessed: rule ids or RULE[check]
+  canonical_columns: []               # or 'package:LIST' provided by a plugin
+
+plugins:
+  packages: [qavf.rules]
+  modules: []                         # scanned for rules and sources
+  paths: []                           # .py files / directories scanned for rules
+  entry_points: true                  # load installed plugin packages
+
+report:
+  title: Air Quality QA
+  output_dir: qa_output
+  html: true
+  json: true
+  hash_inputs: false                  # also record SHA-256 of local input files
+
+extensions: {}                        # plugin settings, e.g. mypack: {version: 2}
