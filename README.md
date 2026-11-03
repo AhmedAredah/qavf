@@ -59,8 +59,14 @@ For your own data, generate a configuration with inferred limits, review it, the
 
 ```bash
 qavf init -d data/counts.csv -d crashes=data/crashes.parquet --margin 0.1
+qavf explain -c qavf.yaml   # validate the configuration and show the plan; reads no data
 qavf run -c qavf.yaml
 ```
+
+`qavf init` writes a minimal starter: the project, each dataset with its inferred
+schema, and pointers to the next steps. It never pins defaults, so adding a process
+limit later selects isolated execution by itself. `qavf init --full` writes the
+complete reference instead, with every check and every setting's default.
 
 ```yaml
 datasets:
@@ -369,7 +375,7 @@ datasets with the default strategy report exactly as a single comparison. See
 | Command | Purpose |
 |---|---|
 | `qavf run -c CONFIG` | Run QA and write HTML/JSON reports |
-| `qavf init -d [NAME=]PATH` | Profile data and write a starting configuration |
+| `qavf init -d [NAME=]PATH` | Profile data and write a minimal starting configuration (`--full`: the complete reference) |
 | `qavf profile PATH` | Print inferred QA limits for a file |
 | `qavf schema` | Write the configuration JSON Schema for editor support |
 | `qavf list-checks` | List the checks a configuration can use |

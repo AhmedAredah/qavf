@@ -255,3 +255,52 @@ def test_generated_reference_docs_are_current() -> None:
         if not path.exists() or path.read_text(encoding="utf-8") != text
     ]
     assert not stale, f"run: uv run python scripts/generate_docs.py  (stale: {stale})"
+
+
+def _no_nulls(value: object) -> bool:
+    if isinstance(value, dict):
+        return all(item is not None and _no_nulls(item) for item in value.values())
+    if isinstance(value, list):
+        return all(_no_nulls(item) for item in value)
+    return True
+
+
+def test_init_writes_a_minimal_starter_by_default(tmp_path, capsys) -> None:
+    data = tmp_path / "d.csv"
+    data.write_text("id,v\n1,2.5\n2,\n", encoding="utf-8")
+    output = tmp_path / "qavf.yaml"
+    assert main(["init", "-o", str(output), "--no-schema", "-d", str(data)]) == EXIT_OK
+    text = output.read_text(encoding="utf-8")
+    raw = yaml.safe_load(text)
+    assert set(raw) == {"project", "datasets"}
+    assert "execution_mode" not in text and "engine" not in raw
+    assert "primary_key" not in text and "min_rows" not in text
+    assert _no_nulls(raw)
+    assert "qavf explain" in text and "qavf list-checks" in text and "--full" in text
+    assert "decision: material" in text
+    assert len(text.splitlines()) < 50
+    # A hard process limit added later selects isolation by itself.
+    raw["engine"] = {"process_cpu_time_s": 5}
+    assert QAVFSettings.model_validate(raw).engine.execution_mode == "isolated"
+    capsys.readouterr()
+
+
+def test_init_full_writes_the_reference_without_pinning_execution_mode(tmp_path, capsys) -> None:
+    output = tmp_path / "qavf.yaml"
+    assert main(["init", "-o", str(output), "--no-schema", "--full"]) == EXIT_OK
+    text = output.read_text(encoding="utf-8")
+    raw = yaml.safe_load(text)
+    assert {"run", "engine", "plugins", "report"} <= set(raw)
+    assert "execution_mode" not in raw["engine"] and "# Available checks" in text
+    assert "decision: material" in text
+    raw["engine"]["process_cpu_time_s"] = 5
+    assert QAVFSettings.model_validate(raw).engine.execution_mode == "isolated"
+    capsys.readouterr()
+
+
+def test_minimal_json_init_lists_only_what_it_sets(tmp_path, capsys) -> None:
+    output = tmp_path / "qavf.json"
+    assert main(["init", "-o", str(output)]) == EXIT_OK
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload == {"project": "QA run", "datasets": {}, "$schema": "qavf.schema.json"}
+    capsys.readouterr()

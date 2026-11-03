@@ -184,7 +184,9 @@ def _parser() -> argparse.ArgumentParser:
         help="run only this dataset's checks and schema contracts (repeatable)",
     )
 
-    init = commands.add_parser("init", help="write a complete starting configuration")
+    init = commands.add_parser(
+        "init", help="write a minimal starting configuration (--full: every setting)"
+    )
     init.add_argument("-o", "--output", type=Path, default=Path("qavf.yaml"))
     init.add_argument(
         "-d",
@@ -210,6 +212,11 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--no-bounds", action="store_true", help="do not infer ge/le bounds")
     init.add_argument("--no-schema", action="store_true", help=f"do not write {SCHEMA_FILENAME}")
     init.add_argument("--force", action="store_true", help="overwrite existing files")
+    init.add_argument(
+        "--full",
+        action="store_true",
+        help="write the complete reference: every check and every setting with its default",
+    )
 
     schema = commands.add_parser("schema", help="write the configuration JSON Schema")
     schema.add_argument("-o", "--output", type=Path, help="file to write (default: stdout)")
@@ -578,10 +585,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
         datasets,
         project=args.project,
         schema_reference=None if args.no_schema else SCHEMA_FILENAME,
+        full=args.full,
     )
-    settings = QAVFSettings.model_validate(yaml.safe_load(text))
+    starter = yaml.safe_load(text)
+    settings = QAVFSettings.model_validate(starter)
     if output.suffix.lower() == ".json":
-        payload = settings.model_dump(mode="json", by_alias=True)
+        # The minimal starter keeps only what it sets; --full lists every default.
+        payload = settings.model_dump(mode="json", by_alias=True) if args.full else starter
         if not args.no_schema:
             payload["$schema"] = SCHEMA_FILENAME
         text = json.dumps(payload, indent=2, ensure_ascii=False, allow_nan=False) + "\n"

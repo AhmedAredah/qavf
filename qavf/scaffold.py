@@ -1,14 +1,17 @@
 """Configuration scaffolding: profiling data into QA limits, ``qavf init`` and JSON Schema.
 
-``qavf init`` writes a complete configuration listing every discovered rule with
-its default parameters, and, given data files, a schema per dataset whose QA
-limits (types, nullability, observed bounds, allowed values) are inferred from
-the data. Inferred limits are a starting point to review, not a verdict: they
-encode whatever the sample contained, including its errors.
+``qavf init`` writes a minimal starter (the project, its datasets and their
+inferred schemas, and pointers to the next steps); ``qavf init --full`` writes the
+complete reference listing every discovered rule and every setting's default.
+Given data files, each dataset gets a schema whose QA limits (types, nullability,
+observed bounds, allowed values) are inferred from the data. Inferred limits are a
+starting point to review, not a verdict: they encode whatever the sample contained,
+including its errors.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -30,6 +33,7 @@ from qavf.settings import (
     PluginSettings,
     QAVFSettings,
     ReportSettings,
+    SchemaSpec,
 )
 from qavf.sources.base import SourceRegistry
 
@@ -43,21 +47,67 @@ def _dump(value: Any, indent: int = 0) -> str:
     return "".join(pad + line if line.strip() else line for line in text.splitlines(True))
 
 
+DOCS_URL = "https://github.com/AhmedAredah/qavf/blob/main/docs/"
+
+
+class StarterEntries:
+    """Dataset entries for the minimal starter: no null or default-valued settings."""
+
+    @classmethod
+    def entry(cls, raw: Mapping[str, Any]) -> dict[str, Any]:
+        """``raw`` without empty settings, and its schema without default values."""
+        entry = cls.pruned(raw)
+        schema = entry.get("schema")
+        if isinstance(schema, dict):
+            defaults = _schema_defaults()
+            for key in [key for key in schema if key in defaults]:
+                if schema[key] == defaults[key]:
+                    del schema[key]
+        return entry
+
+    @classmethod
+    def pruned(cls, raw: Mapping[str, Any]) -> dict[str, Any]:
+        """A copy of ``raw`` with null values and empty lists and mappings left out."""
+        result: dict[str, Any] = {}
+        for key, value in raw.items():
+            kept = cls.pruned(value) if isinstance(value, Mapping) else value
+            if kept is None or (isinstance(kept, list | dict) and not kept):
+                continue
+            result[key] = kept
+        return result
+
+
+@functools.cache
+def _schema_defaults() -> dict[str, Any]:
+    """The scalar defaults of a dataset schema's own settings (``min_rows``, ...)."""
+    return {
+        name: field.default
+        for name, field in SchemaSpec.model_fields.items()
+        if isinstance(field.default, int | float | str | bool)
+    }
+
+
 def render_config(
     registry: RuleRegistry,
     datasets: Mapping[str, Mapping[str, Any]] | None = None,
     *,
     project: str = "QA run",
     schema_reference: str | None = SCHEMA_FILENAME,
+    full: bool = True,
 ) -> str:
-    """Render a complete, commented YAML configuration.
+    """Render a commented YAML configuration.
 
     Args:
-        registry: Installed rules; their checks are listed in a comment.
+        registry: Installed rules; the full reference lists their checks in a comment.
         datasets: Dataset entries (``path``/``source`` plus ``schema``) to include.
         project: Project name.
         schema_reference: JSON Schema path for the editor header comment, or ``None``.
+        full: The complete reference with every setting's default (``qavf init
+            --full``); ``False`` renders the minimal starter ``qavf init`` writes,
+            which never pins defaults such as ``engine.execution_mode``.
     """
+    if not full:
+        return _render_starter(datasets, project=project, schema_reference=schema_reference)
     stamp = datetime.now(UTC).strftime("%Y-%m-%d")
     lines = []
     if schema_reference:
@@ -119,6 +169,7 @@ def render_config(
         "#    datasets: traffic@*",
         "#    strategy: consensus             # reference | sequential | all_pairs | consensus",
         "#    keys: [site_id, year]",
+        "#    decision: material              # no significance test; needs no stats extra",
         "",
         "# Available checks (name, rule code, where it goes; schema checks need no item):",
     ]
@@ -136,7 +187,10 @@ def render_config(
         _dump(RunSettings().model_dump(mode="json"), 2).rstrip(),
         "",
         "engine:",
-        _dump(EngineSettings().model_dump(mode="json", by_alias=True), 2).rstrip(),
+        _dump(
+            EngineSettings().model_dump(mode="json", by_alias=True, exclude={"execution_mode"}), 2
+        ).rstrip(),
+        "  # execution_mode: in_process (isolated when a process_* limit is set)",
         "",
         "plugins:",
         _dump(PluginSettings().model_dump(mode="json", by_alias=True), 2).rstrip(),
@@ -146,6 +200,56 @@ def render_config(
         "",
         "# Settings for plugins, keyed by plugin name.",
         "extensions: {}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _render_starter(
+    datasets: Mapping[str, Mapping[str, Any]] | None,
+    *,
+    project: str,
+    schema_reference: str | None,
+) -> str:
+    """The minimal starter: the project, its datasets and pointers to the next steps."""
+    stamp = datetime.now(UTC).strftime("%Y-%m-%d")
+    lines = []
+    if schema_reference:
+        lines.append(f"# yaml-language-server: $schema={schema_reference}")
+    lines += [
+        f"# QAVF {__version__} starter configuration, generated by `qavf init` on {stamp}.",
+        "# Schema contracts (columns, keys, foreign keys) always run; other checks run where",
+        "# a `checks` list configures them. Inferred column limits reflect the profiled data;",
+        "# review them before relying on them.",
+        "",
+        _dump({"project": project}).rstrip(),
+        "",
+    ]
+    if datasets:
+        lines.append("datasets:")
+        for name, entry in datasets.items():
+            lines.append(_dump({name: StarterEntries.entry(entry)}, 2).rstrip())
+    else:
+        lines += [
+            "datasets: {}",
+            "#  traffic:",
+            "#    path: data/traffic.csv",
+            "#    schema:",
+            "#      primary_key: [site_id, year]",
+            "#      columns:",
+            "#        aadt: {dtype: int, ge: 0}",
+        ]
+    lines += [
+        "",
+        "# Next steps:",
+        "#   qavf explain -c <this file>   validate it and show the plan, reading no data",
+        "#   qavf list-checks              every check, its settings and where it goes",
+        "#   qavf init --full              a reference of every setting and its default",
+        "# A comparison of datasets goes in a top-level checks list, for example:",
+        "#checks:",
+        "#  - {check: compare, name: versions agree, datasets: [old, new], keys: [id],",
+        "#     decision: material}",
+        f"# Documentation: {DOCS_URL}",
         "",
     ]
     return "\n".join(lines)
