@@ -42,7 +42,7 @@ import duckdb
 import polars as pl
 from pydantic import Field
 
-from qavf.duckdb_results import settle
+from qavf.duckdb_results import record_batch_reader, settle
 from qavf.engine.registry import RuleParams
 from qavf.rules.helpers import fresh_internal, plural
 from qavf.sources.sql import quote_identifier
@@ -263,12 +263,8 @@ def matches(
                     f"{bbox} JOIN {tally} t ON t.pid = l.pid AND t.interior > 1 "
                     "WHERE ST_Contains(z.geom, l.pt)"
                 )
-            query = con.execute(sql + " ORDER BY pid, zone_order")
-            reader = (
-                query.to_arrow_reader(policy.batch_size)
-                if hasattr(query, "to_arrow_reader")
-                else query.fetch_record_batch(policy.batch_size)
-            )
+            query = con.sql(sql + " ORDER BY pid, zone_order")
+            reader = record_batch_reader(query, policy.batch_size)
             try:
                 pieces.extend(cast(pl.DataFrame, pl.from_arrow(chunk)) for chunk in reader)
             finally:

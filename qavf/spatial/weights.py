@@ -34,7 +34,7 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from qavf._adjacency import CompactAdjacency, checked_subset, normalized_weights
-from qavf.duckdb_results import settle
+from qavf.duckdb_results import record_batch_reader, settle
 from qavf.engine.registry import RuleParams
 from qavf.keys import cast_key
 from qavf.missingness import missing_count
@@ -211,15 +211,11 @@ def contiguity(
         # At most one over-budget pair is transferred, never the complete dense
         # result. The native operator's own working state remains connection-owned.
         cap = admission.max_edges // 2
-        cursor = con.execute(
+        cursor = con.sql(
             f"SELECT a.zone_order AS i, b.zone_order AS j {bbox} "
             f"WHERE ST_Intersects(a.geom, b.geom) AND ({shared}) LIMIT {cap + 1}"
         )
-        reader = (
-            cursor.to_arrow_reader(65536)
-            if hasattr(cursor, "to_arrow_reader")
-            else cursor.fetch_record_batch(65536)
-        )
+        reader = record_batch_reader(cursor, 65536)
         left, right = [], []
         count = 0
         try:

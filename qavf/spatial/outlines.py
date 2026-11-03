@@ -18,7 +18,7 @@ from typing import Any
 
 import polars as pl
 
-from qavf.duckdb_results import settle
+from qavf.duckdb_results import record_batch_reader, settle
 from qavf.sources.sql import quote_identifier
 from qavf.spatial.extension import fetch
 from qavf.spatial.grid import Grid, label_positions
@@ -79,11 +79,7 @@ def layer_rings(
         f"SELECT zone_order, ST_AsGeoJSON({geometry}) AS shape FROM {name} ORDER BY zone_order",
         params=[tolerance],
     )
-    reader = (
-        query.to_arrow_reader(64)
-        if hasattr(query, "to_arrow_reader")
-        else query.fetch_arrow_reader(64)
-    )
+    reader = record_batch_reader(query, 64)
     rings: dict[Any, list[Ring]] = {}
     try:
         for batch in reader:

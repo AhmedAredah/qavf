@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import duckdb
 
-from qavf.duckdb_results import polars_frame, settle
+from qavf.duckdb_results import query_frame, settle
 
 if TYPE_CHECKING:
     import polars as pl
@@ -258,7 +258,7 @@ def fetch(
     keep_open: bool = False,
 ) -> pl.DataFrame:
     try:
-        result = polars_frame(con.execute(sql, dict(params or {})))
+        result = query_frame(con, sql, dict(params or {}))
         if result is None:
             raise SourceError("the SQL statement returned no result set")
         return result

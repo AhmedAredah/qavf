@@ -9,6 +9,7 @@ from typing import Any, cast
 import polars as pl
 import pyarrow as pa
 
+from qavf.duckdb_results import record_batch_reader
 from qavf.sources.base import SourceError
 from qavf.sources.sql import normalize_single_query, quote_identifier, sql_literal
 from qavf.sources.sql import sql_table_names as sql_table_names
@@ -128,12 +129,7 @@ class BoundedSample:
         self, connection: Any, query: str, check_cancelled: Callable[[], None]
     ) -> tuple[pl.DataFrame, int]:
         """``(sample, count)`` of one evaluation of ``query`` on ``connection``."""
-        result = connection.execute(self.statement(query))
-        reader = (
-            result.to_arrow_reader(self.BATCH_ROWS)
-            if hasattr(result, "to_arrow_reader")
-            else result.fetch_record_batch(self.BATCH_ROWS)
-        )
+        reader = record_batch_reader(connection.sql(self.statement(query)), self.BATCH_ROWS)
         kept: list[pa.RecordBatch] = []
         count = retained = 0
         try:

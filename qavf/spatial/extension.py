@@ -25,7 +25,7 @@ import duckdb
 import polars as pl
 import pyarrow as pa
 
-from qavf.duckdb_results import polars_frame, settle
+from qavf.duckdb_results import query_frame, settle
 from qavf.redaction import redact_text
 
 if TYPE_CHECKING:
@@ -105,4 +105,7 @@ def register(con: Any, name: str, frame: pl.DataFrame) -> None:
 
 def fetch(con: Any, sql: str, parameters: list[Any] | None = None) -> pl.DataFrame:
     """Run ``sql`` and return its result as a Polars frame."""
-    return polars_frame(con.execute(sql, parameters or []))
+    frame = query_frame(con, sql, parameters or None)
+    if frame is None:
+        raise ValueError("the SQL statement returned no result set")
+    return frame

@@ -3,6 +3,11 @@
 DuckDB 2.0 removed ``pl()``, ``arrow()`` and ``fetch_arrow_table()`` from the result
 of ``execute`` and ``fetchone()`` from relations; ``to_arrow_table()`` replaces the
 first three and is absent before 1.4. These helpers pick whichever exists.
+
+Results are read from relations (``con.sql(query)``), not from the DB-API result of
+``con.execute(query)``: DuckDB 2.0 copies the rows of a DB-API result once more for
+Arrow output and warns about it, while a relation streams them directly. Relations
+take query parameters as well, on DuckDB 1.3 and 2.x alike (:func:`relation`).
 """
 
 from __future__ import annotations
@@ -14,6 +19,22 @@ if TYPE_CHECKING:
     import pyarrow as pa
 
 
+def relation(connection: Any, sql: str, parameters: Any = None) -> Any:
+    """``sql`` on ``connection`` as a relation, binding ``parameters`` when given.
+
+    A statement without a result set (``CREATE ...``) runs at once and gives ``None``.
+    """
+    if parameters:
+        return connection.sql(sql, params=parameters)
+    return connection.sql(sql)
+
+
+def query_frame(connection: Any, sql: str, parameters: Any = None) -> pl.DataFrame | None:
+    """The result of ``sql`` as a Polars frame; ``None`` for a statement without one."""
+    result = relation(connection, sql, parameters)
+    return None if result is None else polars_frame(result)
+
+
 def arrow_table(result: Any) -> pa.Table:
     """The complete result as an Arrow table."""
     fetch = getattr(result, "to_arrow_table", None) or result.fetch_arrow_table
@@ -21,8 +42,16 @@ def arrow_table(result: Any) -> pa.Table:
 
 
 def record_batch_reader(result: Any, batch_rows: int) -> pa.RecordBatchReader:
-    """The result as a stream of Arrow batches of at most ``batch_rows`` rows."""
-    open_reader = getattr(result, "to_arrow_reader", None) or result.fetch_record_batch
+    """The result as a stream of Arrow batches of at most ``batch_rows`` rows.
+
+    Relations name the reader ``to_arrow_reader`` on DuckDB 2.x and
+    ``fetch_arrow_reader`` before; a 1.x DB-API result names it ``fetch_record_batch``.
+    """
+    open_reader = (
+        getattr(result, "to_arrow_reader", None)
+        or getattr(result, "fetch_arrow_reader", None)
+        or result.fetch_record_batch
+    )
     return open_reader(batch_rows)
 
 

@@ -108,7 +108,7 @@ class SqlReadSession:
 
     def frame(self, query: str) -> pl.DataFrame:
         """Collect a small metadata/reduction query within the materialization target."""
-        result = polars_frame(self._connection.execute(self._statement(query)))
+        result = polars_frame(self._connection.sql(self._statement(query)))
         self._policy.check_materialization("SQL read result", result)
         self._policy.check_cancelled()
         return result
@@ -118,7 +118,7 @@ class SqlReadSession:
         if isinstance(batch_rows, bool) or not isinstance(batch_rows, int) or batch_rows < 1:
             raise ValueError("batch_rows must be a positive integer")
         statement = self._statement(query)
-        query_result = self._connection.execute(statement)
+        query_result = self._connection.sql(statement)
         reader = record_batch_reader(query_result, batch_rows)
         self._readers[id(reader)] = reader
         exhausted = False

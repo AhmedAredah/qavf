@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 import polars as pl
 
-from qavf.duckdb_results import arrow_table, bind_relation, first_row, polars_frame
+from qavf.duckdb_results import arrow_table, bind_relation, first_row, query_frame
 from qavf.engine.capabilities import ReaderCapabilities
 from qavf.engine.catalog import DatasetCatalog
 from qavf.engine.cleanup import attempt_cleanup, raise_cleanup_errors
@@ -1116,11 +1116,11 @@ class DataContext:
     ) -> pl.DataFrame:
         """Execute SQL, retaining native source scans until result collection."""
         with self._sql_lease(query, datasets, normalize_missing=normalize_missing) as con:
-            result = polars_frame(
-                con.execute(
-                    resolve_sql_paths(query, self.env.base_dir, known_tables=self.declared())
-                )
+            result = query_frame(
+                con, resolve_sql_paths(query, self.env.base_dir, known_tables=self.declared())
             )
+            if result is None:
+                raise ValueError("the SQL statement returned no result set")
         self._check_materialization("SQL result", result)
         self._check_cancelled()
         return result
@@ -1139,7 +1139,7 @@ class DataContext:
             if not ordered:
                 sample, count = BoundedSample(limit).read(con, resolved, self._check_cancelled)
             else:
-                result = con.execute(sample_statement(resolved, limit, ordered=True))
+                result = con.sql(sample_statement(resolved, limit, ordered=True))
                 sample, count = sample_result(arrow_table(result))
         self._check_cancelled()
         self._check_materialization("SQL evidence sample", sample)
