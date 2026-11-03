@@ -82,21 +82,19 @@ def validate(
             selection=selection,
         )
     from qavf.engine.runner import QARunner
-    from qavf.inputs.normalize import prepare
+    from qavf.inputs.normalize import _adapt, prepare_configuration
     from qavf.profiles import apply_profile
     from qavf.run_control import control_for
 
-    if profile is None:
-        settings, frames = prepare(data, schema=schema, config=config, resources=resources)
-    else:
-        from qavf.inputs.normalize import _adapt, prepare_configuration
-
-        settings, inputs = prepare_configuration(
-            data, schema=schema, config=config, resources=resources
-        )
+    # Resolve and narrow before adapting: an input the selection excludes is never
+    # converted or consumed (a one-shot Arrow stream stays unread).
+    settings, inputs = prepare_configuration(
+        data, schema=schema, config=config, resources=resources
+    )
+    if profile is not None:
         settings = apply_profile(settings, profile)
-        frames = _adapt(inputs, settings)
     settings = narrow(settings, selection)
+    frames = _adapt(inputs, settings)
     control = control_for(on_event, cancel, settings.engine.execution_mode)
     if control is None:
         # Runners overridden without the hooks keep working when none is requested.

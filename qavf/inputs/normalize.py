@@ -225,7 +225,48 @@ def validate_inputs(inputs: Mapping[str, object], settings: QAVFSettings) -> Non
             )
 
 
+class InputDemand:
+    """The datasets a narrowed configuration's selected work reads directly.
+
+    Without an active selection every dataset is in demand. With one, the demand is
+    the datasets whose schema contracts run, the datasets of the enabled check items
+    and the datasets their foreign keys reference; an enabled run-level item (SQL,
+    a comparison, ...) may read any dataset, so it puts every dataset in demand.
+    An input outside the demand is adapted only if the run loads it after all (a
+    view parent or a plugin's own reference), so an excluded input is never read.
+    """
+
+    def __init__(self, settings: QAVFSettings) -> None:
+        self.settings = settings
+
+    def datasets(self) -> frozenset[str] | None:
+        """The datasets in demand; ``None`` when every dataset is."""
+        from qavf.checks.placement import placed_items
+
+        applied = self.settings.selection
+        if applied is None:
+            return None
+        demand: set[str] = set()
+        for placed in placed_items(self.settings):
+            if not placed.item.enabled:
+                continue
+            if placed.scope.dataset is None:
+                return None
+            demand.add(placed.scope.dataset)
+        demand.update(name for name in self.settings.datasets if applied.contract_runs(name))
+        for name in list(demand):
+            spec = self.settings.datasets.get(name)
+            if spec is not None:
+                demand.update(fk.ref_dataset for fk in spec.foreign_keys)
+        return frozenset(demand)
+
+
 def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, object]:
+    """Adapt the inputs for execution; inputs outside the demand are deferred.
+
+    An input no selected work reads (:class:`InputDemand`) is wrapped unconverted,
+    so a selection never consumes, copies or fails on an excluded frame or stream.
+    """
     if settings.engine.execution_mode == "isolated":
         from qavf.execution.inputs import isolated_inputs
 
@@ -239,6 +280,7 @@ def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, ob
     )
     frames: dict[str, object] = {}
     borrowed_locks: dict[int, threading.Lock] = {}
+    demand = InputDemand(settings).datasets()
     for name, value in inputs.items():
         policy = settings.datasets[name].effective_load_policy()
         if isinstance(value, File | str | os.PathLike):
@@ -259,6 +301,9 @@ def _adapt(inputs: Mapping[str, object], settings: QAVFSettings) -> dict[str, ob
         else:
             if callable(getattr(value, "read_next_batch", None)):
                 raise TypeError("a borrowed one-pass reader requires an explicit source adapter")
+            if demand is not None and name not in demand:
+                frames[name] = _FrameInput(value, env, policy)
+                continue
             if policy.row_budget is not None and known_rows(value) is not None:
                 # Admit the stated size at load, before a conversion copies the frame.
                 frames[name] = _FrameInput(value, env, policy)
