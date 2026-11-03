@@ -32,14 +32,27 @@ _LIMITS: dict[str, Hint] = {
     "normalize": ("Value limits", "Normalize text before comparing", True),
     "each_allowed_once": ("Value limits", "Each allowed value at most once", True),
     "convert_options": ("Value limits", "Convert allowed values to the column type", True),
-    "min": ("Column statistics", "Minimum value bounds", False),
-    "max": ("Column statistics", "Maximum value bounds", False),
-    "mean": ("Column statistics", "Mean bounds", False),
-    "median": ("Column statistics", "Median bounds", False),
-    "std": ("Column statistics", "Standard deviation bounds", False),
-    "sum": ("Column statistics", "Sum bounds", False),
-    "distinct_count": ("Column statistics", "Distinct value count bounds", False),
+    "between": ("Value limits", "Between (inclusive)", False),
+    "stats": ("Column statistics", "Column statistics", False),
     "description": ("General", "Description", False),
+}
+
+_STATS: dict[str, Hint] = {
+    "min": ("Column statistics", "Smallest value", False),
+    "max": ("Column statistics", "Largest value", False),
+    "mean": ("Column statistics", "Mean", False),
+    "median": ("Column statistics", "Median", False),
+    "std": ("Column statistics", "Standard deviation", False),
+    "sum": ("Column statistics", "Sum", False),
+    "distinct_count": ("Column statistics", "Distinct values", False),
+}
+
+_BOUNDS: dict[str, Hint] = {
+    "ge": ("Bounds", "At least (≥)", False),
+    "le": ("Bounds", "At most (≤)", False),
+    "gt": ("Bounds", "Greater than (>)", True),
+    "lt": ("Bounds", "Less than (<)", True),
+    "between": ("Bounds", "Between (inclusive)", False),
 }
 
 _COLUMN: dict[str, Hint] = {
@@ -65,7 +78,7 @@ _COLUMN: dict[str, Hint] = {
     "unit": ("Units", "Unit", False),
     "unit_column": ("Units", "Unit column", False),
     "allowed_units": ("Units", "Allowed units", False),
-    "checks": ("Conditional checks", "Conditional checks", False),
+    "conditions": ("Conditions", "Conditional limits", False),
 }
 
 _COLUMN_CHECK: dict[str, Hint] = {
@@ -86,8 +99,29 @@ _DATASET: dict[str, Hint] = {
     "rename": ("Source", "Rename columns", True),
     "schema": ("Schema", "Schema", False),
     "foreign_keys": ("Keys & relations", "Foreign keys", False),
+    "across": ("Source", "Copies across sources", True),
+    "series": ("Reuse", "Named series", False),
+    "metrics": ("Reuse", "Named metrics", False),
+    "views": ("Reuse", "Named views", True),
     "checks": ("Checks", "Checks", False),
 }
+
+_ROOT: dict[str, Hint] = {
+    "project": ("Project", "Project name", False),
+    "vars": ("Reuse", "Variables", True),
+    "include": ("Reuse", "Included files", True),
+    "defaults": ("Reuse", "Default check settings", True),
+    "datasets": ("Datasets", "Datasets", False),
+    "connections": ("Connections", "Database connections", False),
+    "secrets": ("Connections", "Cloud credentials", True),
+    "checks": ("Checks", "Checks across datasets", False),
+    "run": ("Run", "Pass / fail policy", False),
+    "engine": ("Engine", "Execution settings", True),
+    "plugins": ("Plugins", "Plugins", True),
+    "report": ("Report", "Report outputs", False),
+    "extensions": ("Plugins", "Plugin settings", True),
+}
+"""Top-level sections of a configuration."""
 
 _CHECK: dict[str, Hint] = {
     "check": ("Check", "Check", False),
@@ -98,7 +132,37 @@ _CHECK: dict[str, Hint] = {
     "enabled": ("Check", "Enabled", False),
     "description": ("Check", "Description", False),
 }
-"""Fields every check item has; the check's own settings are hinted generically."""
+"""Fields every check item has; the check's own settings are hinted below or generically."""
+
+_CHECK_SETTINGS: dict[str, Hint] = {
+    "datasets": ("Datasets", "Datasets related", False),
+    "strategy": ("Datasets", "Pairing strategy", False),
+    "reference": ("Datasets", "Reference dataset", False),
+    "max_pairs": ("Datasets", "Most pairs (all_pairs)", True),
+    "consensus": ("Datasets", "Consensus rules", True),
+    "series": ("Settings", "Series", False),
+    "metric": ("Settings", "Metric", False),
+}
+"""Check settings shared by several checks, with a specific title."""
+
+_INLINE: dict[str, Hint] = {
+    "value": ("Definition", "Value column", False),
+    "group_by": ("Definition", "Group by", False),
+    "aggregate": ("Definition", "Aggregate", False),
+    "weight": ("Definition", "Weight column", True),
+    "order_by": ("Definition", "Order by (first/last)", True),
+    "bucket": ("Definition", "Calendar bucket", True),
+    "time_zone": ("Definition", "Time zone", True),
+    "time_format": ("Definition", "Time format", True),
+    "time_column": ("Definition", "Time column", False),
+    "expected_trend": ("Definition", "Expected trend (this series)", True),
+    "max_change_rate": ("Definition", "Maximum change (this series)", True),
+    "entity": ("Definition", "Entity column", False),
+    "per": ("Definition", "Per (normalizer)", False),
+}
+"""Fields of an inline series or metric definition (``Inline_<series|metric>_<check>``)."""
+
+INLINE_PREFIX = "Inline_"
 
 CHECK_PREFIX = "Check_"
 """Definitions of individual checks' items are named ``Check_<check name>``."""
@@ -139,6 +203,8 @@ def _source(*fields: str) -> dict[str, Hint]:
 HINTS: dict[str, dict[str, Hint]] = {
     "ColumnSpec": _COLUMN,
     "ColumnCheck": _COLUMN_CHECK,
+    "ColumnStats": _STATS,
+    "Bounds": _BOUNDS,
     "Dataset": _DATASET,
     "NativeDataset": _DATASET,
     "FileParams": _source(
@@ -205,6 +271,24 @@ HINTS: dict[str, dict[str, Hint]] = {
         "fail_on": ("Pass / fail", "Fail on severity", False),
         "fail_on_incomplete": ("Pass / fail", "Fail when checks cannot run", False),
         "require": ("Pass / fail", "Checks that must be assessed", True),
+        "tags": ("Pass / fail", "Policies per tag", True),
+    },
+    "TagPolicy": {"fail_on": ("Pass / fail", "Fail on severity (this tag)", False)},
+    "ViewSpec": {
+        "where": ("View", "Rows where", False),
+        "columns": ("View", "Columns", True),
+        "description": ("View", "Description", False),
+    },
+    "_SideSettings": {
+        "value": ("Datasets", "Value column (this dataset)", False),
+        "keys": ("Datasets", "Key columns (this dataset)", False),
+    },
+    "ConsensusSettings": {
+        "numeric": ("Consensus", "Numbers combine by", False),
+        "trim": ("Consensus", "Trimmed share (trimmed_mean)", True),
+        "categorical": ("Consensus", "Categories combine by", False),
+        "min_agreement": ("Consensus", "Minimum agreeing share", False),
+        "ties": ("Consensus", "On a tie", False),
     },
     "ConnectionSpec": {
         "type": ("Connection", "Database type", False),
@@ -287,7 +371,8 @@ HINTS: dict[str, dict[str, Hint]] = {
 def _check_hints(properties: Mapping[str, Any]) -> dict[str, Hint]:
     """The common check fields, plus a plain title for each of the check's settings."""
     return {
-        field: _CHECK.get(field, ("Settings", field.replace("_", " ").capitalize(), False))
+        field: _CHECK.get(field)
+        or _CHECK_SETTINGS.get(field, ("Settings", field.replace("_", " ").capitalize(), False))
         for field in properties
     }
 
@@ -303,6 +388,7 @@ def _apply(properties: Any, hints: Mapping[str, Hint]) -> None:
 
 def apply_ui_hints(schema: dict[str, Any]) -> dict[str, Any]:
     """Add the hints to ``schema``'s definitions in place, and return it."""
+    _apply(schema.get("properties"), ROOT_HINTS)
     definitions = schema.get("$defs", {})
     for name, hints in HINTS.items():
         _apply(definitions.get(name, {}).get("properties"), hints)
@@ -310,7 +396,12 @@ def apply_ui_hints(schema: dict[str, Any]) -> dict[str, Any]:
         properties = definition.get("properties")
         if name.startswith(CHECK_PREFIX) and isinstance(properties, Mapping):
             _apply(properties, _check_hints(properties))
+        elif name.startswith(INLINE_PREFIX):
+            _apply(properties, _INLINE)
     return schema
 
 
-__all__ = ["HINTS", "apply_ui_hints"]
+ROOT_HINTS = _ROOT
+"""Hints for the configuration's top-level properties."""
+
+__all__ = ["HINTS", "ROOT_HINTS", "apply_ui_hints"]
