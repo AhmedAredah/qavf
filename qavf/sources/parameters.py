@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, StringConstraints, field_validator, model_validator
+from pydantic import ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from qavf.sources.base import SourceParams
 from qavf.sources.formats import GLOB_PATTERN, FileFormat, infer_format, is_remote, lossy_options
@@ -146,8 +146,20 @@ class QueryParams(SourceParams):
         return names
 
 
+def _connection_from_copies(schema: dict[str, Any]) -> None:
+    """A dataset copied ``across`` connections gets ``connection`` from each copy, so
+    the editor schema does not require it (the runtime does, once copies exist)."""
+    required = [name for name in schema.get("required", ()) if name != "connection"]
+    if required:
+        schema["required"] = required
+    else:
+        schema.pop("required", None)
+
+
 class DatabaseParams(SourceParams):
     """Parameters of :class:`qavf.sources.DatabaseSource`."""
+
+    model_config = ConfigDict(json_schema_extra=_connection_from_copies)
 
     type: Literal["database"] = "database"
     connection: NonBlank

@@ -15,13 +15,14 @@ from collections.abc import Mapping
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from qavf.engine.registry import RuleParams
 from qavf.engine.severity import Severity
 from qavf.inference.decision import DEFAULT_ALPHA, DEFAULT_POLICY
 from qavf.inference.resampling import DEFAULT_MAX_WORK, DEFAULT_SEED
 from qavf.inference.results import Correction, DecisionPolicy
+from qavf.parameters import text_or_mapping_schema
 from qavf.rules.regression_checks import ColumnTolerance
 from qavf.settings import DType, NumericBound
 
@@ -117,8 +118,17 @@ class Recode(RuleParams):
         return [tuple(pair) for pair in self.values]
 
 
+def _component_schema(schema: dict[str, Any]) -> None:
+    """A component entry is its name alone, or a mapping of its selector and the
+    selected component's own parameters (validated against that component)."""
+    schema.pop("additionalProperties", None)
+    text_or_mapping_schema(schema)
+
+
 class _Configured(RuleParams):
     """A named component whose own parameters may be written inline."""
+
+    model_config = ConfigDict(json_schema_extra=_component_schema)
 
     @model_validator(mode="before")
     @classmethod

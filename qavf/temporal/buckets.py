@@ -48,9 +48,10 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import polars as pl
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from qavf.engine.registry import RuleParams
+from qavf.parameters import text_or_mapping_schema
 from qavf.rules._temporal import temporal_ticks, utc_wall_clock, wall_clock, zoned
 
 BucketUnit = Literal[
@@ -110,6 +111,8 @@ class Bucket(RuleParams):
     Written as a unit name, ``<n> <unit>``, or a mapping such as
     ``{unit: week, week_start: sunday}``.
     """
+
+    model_config = ConfigDict(json_schema_extra=text_or_mapping_schema)
 
     unit: BucketUnit
     """``second``, ``minute``, ``hour``, ``day``, ``week``, ``month``, ``quarter``,

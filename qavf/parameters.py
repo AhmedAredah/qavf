@@ -22,3 +22,16 @@ class RuleParams(BaseModel):
     @classmethod
     def _scientific_scalar(cls, value: Any) -> Any:
         return normalize_scalar(value)
+
+
+_SCHEMA_ANNOTATIONS = ("title", "description")
+
+
+def text_or_mapping_schema(schema: dict[str, Any]) -> None:
+    """``json_schema_extra`` of a model also written as one string (``day``,
+    ``records``): the editor schema takes the string or the mapping."""
+    mapping = {key: value for key, value in schema.items() if key not in _SCHEMA_ANNOTATIONS}
+    for key in list(schema):
+        if key not in _SCHEMA_ANNOTATIONS:
+            del schema[key]
+    schema["anyOf"] = [{"type": "string", "minLength": 1}, mapping]

@@ -1478,7 +1478,7 @@ class QAVFSettings(_Strict):
     project: str = "QA run"
     vars: dict[str, Any] = Field(default_factory=dict)
     """Named values, used as ``${vars.<name>}`` in any value."""
-    include: list[str] = Field(default_factory=list)
+    include: list[str] | str = Field(default_factory=list)
     """Other configuration files merged first, in order (paths relative to this file).
     This file wins on conflicting values; a dataset or named check defined twice is
     an error."""

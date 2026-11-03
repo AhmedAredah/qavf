@@ -266,6 +266,33 @@ def test_a_bad_range_is_a_load_error(expected: Any, message: str) -> None:
         )
 
 
+@pytest.mark.parametrize("values", ["2016..2018", {"from": 2016, "to": 2018}])
+def test_ranges_expand_in_nested_sequence_settings(values: Any) -> None:
+    item = {"check": "key_grid", "dimensions": {"year": {"values": values}}}
+    settings = _settings({"datasets": {"d": {"checks": [item]}}})
+    grid = _params(settings)[0]["grids"][0]
+    assert grid["dimensions"]["year"]["values"] == [2016, 2017, 2018]
+
+
+def test_range_looking_text_settings_stay_literal() -> None:
+    item = {"check": "outliers", "column": "2016..2024"}
+    settings = _settings({"datasets": {"d": {"checks": [item]}}})
+    assert _params(settings)[0]["targets"][0]["value"] == "2016..2024"
+
+
+def test_a_bad_nested_range_names_its_setting() -> None:
+    item = {"check": "key_grid", "dimensions": {"year": {"values": "2020..2016"}}}
+    with pytest.raises(ValidationError, match=r"dimensions\.year\.values: .*must not exceed"):
+        _settings({"datasets": {"d": {"checks": [item]}}})
+
+
+def test_plugin_settings_keep_range_looking_values() -> None:
+    from qavf.checks.reuse import TypedRanges
+
+    item = {"check": "acme_plugin", "payload": "1..3", "bounds": {"from": 1, "to": 3}}
+    assert TypedRanges().item(item, "checks[0]") == item
+
+
 # ---------------------------------------------------------------------------- vars
 
 
