@@ -43,9 +43,8 @@ configurations: list[tuple[str, dict[str, Any]]] = [
     (
         "selected",
         {
-            "engine": {"parallel": False, "native_threads": 2, "run_unconfigured_rules": False},
+            "engine": {"parallel": False, "native_threads": 2},
             "plugins": {"entry_points": False},
-            "rules": {f"INP-00{i}": {} for i in range(1, 5)},
         },
     ),
 ]

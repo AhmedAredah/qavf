@@ -172,8 +172,7 @@ def _dirty(fixture: Path, work_dir: Path, options: WorkloadOptions, rows: int) -
     data = Dataset(source, schema={"columns": {"id": {"dtype": "int"}, "value": {"dtype": "int"}}})
     config = {
         "plugins": {"entry_points": False},
-        "engine": {"parallel": False, "run_unconfigured_rules": False},
-        "rules": {"INP-002": {}},
+        "engine": {"parallel": False},
     }
     policy = resources(work_dir / "temporary", options)
     return PreparedWorkload(

@@ -10,7 +10,7 @@ pip install 'qavf[all]'      # every optional capability
 when Polars is installed and the native DuckDB backend otherwise.
 `backend="duckdb"` selects the native backend even when Polars is installed, and
 `backend="polars"` requires the full one. The CLI `run`, `schema` and
-`list-rules` commands take the same choice as `--backend`.
+`list-checks` commands take the same choice as `--backend`.
 
 The native backend checks declared schemas, column limits, keys, foreign keys, row
 expressions, SQL assertions and N/A groups over CSV, Parquet, JSON, Arrow, pandas,

@@ -600,39 +600,37 @@ correction, family size, significant and not assessed counts), and so do
 `SeriesShape.significance`. The tests, their defaults and calibration are described
 in [statistical inference](inference.md).
 
-## In a configuration: CMP-001
+## In a configuration: the compare check (CMP-001)
 
 ```yaml
 datasets:
   v1: {path: releases/2024/counts.parquet, rename: {SiteID: site}}
   v2: {path: releases/2025/counts.parquet}
-rules:
-  CMP-001:
-    params:
-      comparisons:
-        - name: counts 2024 vs 2025
-          baseline: v1
-          candidate: v2
-          keys: [site]
-          columns: {aadt_k: aadt}
-          units: {aadt: {factor: 1000}}
-          decision: material_and_significant  # the default; material runs no test
-          correction: bh
-          levels:
-            - structure
-            - {level: coverage, allow_added: true}
-            - {level: records, shift_by: [county]}
-            - level: groups
-              severity: WARNING
-              group_by: [county]
-              measures: [sum(aadt), {measure: median, column: aadt, test: bootstrap}]
-            - {level: temporal, time_column: counted_on, bucket: month, measures: [sum(aadt)]}
-            - {level: series_shape, time_column: counted_on, bucket: month, measure: sum(aadt),
-               trend: {dependence: block}, decision: significant, alpha: 0.01}
+checks:
+  - check: compare
+    name: counts 2024 vs 2025
+    datasets: [v1, v2]                # the reference (baseline) first
+    keys: [site]
+    columns: {aadt_k: aadt}
+    units: {aadt: {factor: 1000}}
+    decision: material_and_significant  # the default; material runs no test
+    correction: bh
+    levels:
+      - structure
+      - {level: coverage, allow_added: true}
+      - {level: records, shift_by: [county]}
+      - level: groups
+        severity: WARNING
+        group_by: [county]
+        measures: [sum(aadt), {measure: median, column: aadt, test: bootstrap}]
+      - {level: temporal, time_column: counted_on, bucket: month, measures: [sum(aadt)]}
+      - {level: series_shape, time_column: counted_on, bucket: month, measure: sum(aadt),
+         trend: {dependence: block}, decision: significant, alpha: 0.01}
 ```
 
-Each check becomes one result, `CMP-001 [counts 2024 vs 2025: records: values]`, so
-severities (per level with `severity`), `engine.require`, evidence limits, redaction
+Each check becomes one result, `compare · v1, v2 · counts 2024 vs 2025 (CMP-001)
+[counts 2024 vs 2025: records: values]`, so severities (per level with `severity`),
+`run.require`, evidence limits, redaction
 and the HTML/JSON reports work as for every rule. Datasets keep their sources,
 secrets, load policies and isolation settings.
 

@@ -83,18 +83,32 @@ datasets:
     schema: {primary_key: [site_id]}
 ```
 
-Row expressions and SQL assertions run in DuckDB, where each dataset is a table:
+Other checks are named in `checks` lists: on a dataset for checks of that dataset,
+at the top level for checks relating datasets. Only configured checks run; schema
+contracts always do. Row expressions and SQL queries run in DuckDB, where each
+dataset is a table:
 
 ```yaml
 datasets:
+  counts:
+    path: data/counts.csv
+    checks:
+      - check: missing_periods
+        name: no missing years
+        series: {value: aadt, group_by: [site_id], time_column: year}
+        expected: [2020, 2021, 2022, 2023]
   crashes:
     path: data/crashes.parquet
-    expressions:
-      - {expr: fatal <= crashes, severity: CRITICAL}
-assertions:
-  - name: every site has counts
+    checks:
+      - {check: expression, expr: fatal <= crashes, severity: CRITICAL}
+checks:
+  - check: sql
+    name: every site has counts
     sql: SELECT site_id FROM sites WHERE site_id NOT IN (SELECT site_id FROM counts)
 ```
+
+`qavf list-checks` lists every check. Configurations written for QAVF 0.6
+(`rules:`, `expressions:`, `assertions:`) convert with `qavf migrate old.yaml -o new.yaml`.
 
 [`config/qavf.full.yaml`](https://github.com/AhmedAredah/qavf/blob/main/config/qavf.full.yaml)
 documents every option. Paths are relative to the configuration file, and any string
@@ -153,12 +167,12 @@ Each result is **PASS**, **FAIL**, **SKIPPED** (nothing configured) or **ERROR**
 
 | Verdict | When | Exit code |
 |---|---|---|
-| passed | At least one check was assessed, none reports ERROR, and no failure meets `engine.fail_on` | 0 |
-| failed | A failure at or above `engine.fail_on` (default `ERROR`) | 1 |
+| passed | At least one check was assessed, none reports ERROR, and no failure meets `run.fail_on` | 0 |
+| failed | A failure at or above `run.fail_on` (default `ERROR`) | 1 |
 | incomplete | No qualifying failure, but a check could not be assessed or nothing was assessed | 1 by default |
 
 A qualifying failure takes precedence over incompleteness. Setting
-`engine.fail_on_incomplete: false` allows exit code `0` for an incomplete report;
+`run.fail_on_incomplete: false` allows exit code `0` for an incomplete report;
 its verdict remains `incomplete`.
 
 Use `engine.require` to name checks that must be assessed for a run to pass.
@@ -177,43 +191,45 @@ the columns of its `where` and its unit column) and the `primary_key`; other col
 are not read for evidence. Set `evidence_columns: all` in a dataset's `schema` to show
 whole rows.
 
-## Rules
+## Checks
 
-| ID | Default | Checks |
-|---|---|---|
-| INP-001 | CRITICAL | Sources accessible and schemas inspectable |
-| INP-002 | CRITICAL | Columns present with declared types; row-count limits |
-| INP-003 | ERROR* | Column QA limits (*per-check severities) |
-| INP-004 | ERROR | Primary keys unique |
-| INP-005 | ERROR* | Foreign keys resolve |
-| INP-006 | ERROR* | Row expressions hold |
-| INP-007 | ERROR* | SQL assertions return no rows |
-| INP-008 | ERROR | Newest date/time value is recent enough |
-| INP-009 | ERROR | N/A tokens apply to all or none of a column group |
-| TMP-001 | WARNING | Period-over-period change within a rate |
-| TMP-002 | WARNING | Series trend in their declared direction |
-| TMP-003 | WARNING | No period is a significant and material trend outlier |
-| TMP-004 | ERROR | No group is missing a period |
-| TMP-005 | WARNING | No value stuck for several periods |
-| TMP-006 | ERROR | Cumulative series never decrease |
-| TMP-007 | WARNING | No value is anomalous for its season |
-| TMP-008 | WARNING | No series shifts to a sustained new level |
-| SPA-001 | WARNING | No entity is an outlier among its peers |
-| SPA-002 | WARNING | Each entity within a factor of its group's median |
-| SPA-003 | ERROR | Every expected entity is covered in every period |
-| GEO-001 | ERROR | Coordinates valid, present and inside a bounding box |
-| STA-001 | WARNING | z-score, modified z-score or IQR outlier scans |
-| STA-002 | WARNING | Distributions have not drifted from a reference |
-| REC-001 | ERROR | Totals reconcile between datasets, key by key |
-| REC-002 | ERROR | Shares sum to their total within each group |
-| REC-003 | ERROR | The full expected key grid is present |
-| REC-004 | ERROR | Two datasets have the same key set |
-| REC-005 | ERROR | Related datasets carry one identical batch id |
-| REG-001 | ERROR | Outputs match baselines within tolerance |
-| CMP-001 | ERROR | Two datasets compare within tolerance after alignment |
+Each check has a name used in configurations; reports also show its rule code.
 
-Parameters for every rule: [docs/rules.md](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md)
-or `qavf list-rules`.
+| Check | Code | Default | Checks |
+|---|---|---|---|
+| `datasets_available` | INP-001 | CRITICAL | Sources accessible and schemas inspectable |
+| `schema` | INP-002 | CRITICAL | Columns present with declared types; row-count limits |
+| `column_limits` | INP-003 | ERROR* | Column QA limits (*per-check severities) |
+| `unique_keys` | INP-004 | ERROR | Primary keys unique |
+| `references` | INP-005 | ERROR* | Foreign keys resolve |
+| `expression` | INP-006 | ERROR* | Row expressions hold |
+| `sql` | INP-007 | ERROR* | SQL assertions return no rows |
+| `fresh` | INP-008 | ERROR | Newest date/time value is recent enough |
+| `not_applicable` | INP-009 | ERROR | N/A tokens apply to all or none of a column group |
+| `change_rate` | TMP-001 | WARNING | Period-over-period change within a rate |
+| `trend` | TMP-002 | WARNING | Series trend in their declared direction |
+| `trend_outliers` | TMP-003 | WARNING | No period is a significant and material trend outlier |
+| `missing_periods` | TMP-004 | ERROR | No group is missing a period |
+| `stale_values` | TMP-005 | WARNING | No value stuck for several periods |
+| `cumulative` | TMP-006 | ERROR | Cumulative series never decrease |
+| `seasonal` | TMP-007 | WARNING | No value is anomalous for its season |
+| `level_shift` | TMP-008 | WARNING | No series shifts to a sustained new level |
+| `entity_outliers` | SPA-001 | WARNING | No entity is an outlier among its peers |
+| `group_comparison` | SPA-002 | WARNING | Each entity within a factor of its group's median |
+| `coverage` | SPA-003 | ERROR | Every expected entity is covered in every period |
+| `coordinates` | GEO-001 | ERROR | Coordinates valid, present and inside a bounding box |
+| `outliers` | STA-001 | WARNING | z-score, modified z-score or IQR outlier scans |
+| `drift` | STA-002 | WARNING | Distributions have not drifted from a reference |
+| `totals_match` | REC-001 | ERROR | Totals reconcile between datasets, key by key |
+| `shares` | REC-002 | ERROR | Shares sum to their total within each group |
+| `key_grid` | REC-003 | ERROR | The full expected key grid is present |
+| `key_sets_match` | REC-004 | ERROR | Two datasets have the same key set |
+| `batch_consistent` | REC-005 | ERROR | Related datasets carry one identical batch id |
+| `matches_baseline` | REG-001 | ERROR | Outputs match baselines within tolerance |
+| `compare` | CMP-001 | ERROR | Two datasets compare within tolerance after alignment |
+
+Check names and parameters: [docs/rules.md](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md)
+or `qavf list-checks`.
 
 ## Regression testing
 
@@ -291,15 +307,16 @@ for one comparison.
 | `qavf init -d [NAME=]PATH` | Profile data and write a starting configuration |
 | `qavf profile PATH` | Print inferred QA limits for a file |
 | `qavf schema` | Write the configuration JSON Schema for editor support |
-| `qavf list-rules` | List supported or discovered rules |
+| `qavf list-checks` | List the checks a configuration can use |
+| `qavf migrate OLD -o NEW` | Convert a QAVF 0.6 configuration to named checks |
 | `qavf capabilities` | Show the backend capability catalog as JSON |
 | `qavf compare BASELINE CANDIDATE -k KEY` | Compare an output with a baseline (`--map OLD=NEW`) |
 | `qavf compare-datasets BASELINE CANDIDATE -c SPEC` | Compare two datasets at several levels; write `--html`/`--json` reports |
 | `qavf baseline SOURCE DEST -k KEY` | Accept an output as a baseline |
 | `qavf demo DIR` | Write a runnable demo project |
 
-`--help`, `--version`, `schema`, `list-rules` and native `run` work with the core
-installation. `run`, `schema` and `list-rules` accept `--backend auto|duckdb|polars`;
+`--help`, `--version`, `schema`, `list-checks` and native `run` work with the core
+installation. `run`, `schema` and `list-checks` accept `--backend auto|duckdb|polars`;
 `auto` uses Polars when installed, otherwise DuckDB. Advanced profiling, comparison,
 scaffolding and demo commands require `qavf[polars]`. Inspect the import-light
 [capability catalog](docs/backend_capabilities.md) before selecting a backend.

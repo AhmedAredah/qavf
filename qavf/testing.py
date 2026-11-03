@@ -19,6 +19,7 @@ from typing import Any
 from qavf.engine.registry import Rule, RuleRegistry, default_registry
 from qavf.engine.runner import QARunner
 from qavf.reports.models import QAReport, RuleResult
+from qavf.checks.items import CheckItem
 from qavf.settings import QAVFSettings
 
 
@@ -54,19 +55,64 @@ def make_settings(
     extensions: Mapping[str, Any] | None = None,
     assertions: list[Mapping[str, Any]] | None = None,
     connections: Mapping[str, Any] | None = None,
+    registry: RuleRegistry | None = None,
     **engine: Any,
 ) -> QAVFSettings:
-    """Settings for tests: sequential execution unless ``parallel=True`` is passed."""
-    return QAVFSettings.model_validate(
-        {
-            "datasets": dict(datasets or {}),
-            "rules": dict(rules or {}),
-            "extensions": dict(extensions or {}),
-            "assertions": list(assertions or []),
-            "connections": dict(connections or {}),
-            "engine": {"parallel": False, **engine},
-        }
-    )
+    """Settings for tests: sequential execution unless ``parallel=True`` is passed.
+
+    ``rules`` configures rules by code (``{"TMP-001": {"params": {...}}}``), as a
+    rule's own tests naturally do; it is converted to check items the way
+    ``qavf migrate`` converts QAVF 0.6 configurations, resolving rule codes in
+    ``registry`` (built-in and discovered rules by default). ``datasets`` and
+    ``engine`` options may likewise use either form.
+    """
+    raw: dict[str, Any] = {
+        "datasets": dict(datasets or {}),
+        "extensions": dict(extensions or {}),
+        "connections": dict(connections or {}),
+        "engine": {"parallel": False, **engine},
+    }
+    if rules:
+        raw["rules"] = dict(rules)
+    if assertions:
+        raw["assertions"] = list(assertions)
+    return QAVFSettings.model_validate(checks_config(raw, registry))
+
+
+def checks_config(
+    config: Mapping[str, Any], registry: RuleRegistry | None = None
+) -> dict[str, Any]:
+    """A configuration mapping that configures rules by code, as named checks.
+
+    Rule tests naturally write ``{"rules": {"TMP-001": {"params": {...}}}}``; this
+    converts such a mapping the way ``qavf migrate`` does (rule codes resolve in
+    ``registry``, built-in and discovered rules by default). A mapping that already
+    uses named checks is returned unchanged.
+    """
+    from qavf.migrate import Migrator
+
+    registry = registry if registry is not None else discovered_rules()
+    return Migrator(registry).migrate(config).config
+
+
+def with_checks(settings: QAVFSettings, registry: RuleRegistry) -> QAVFSettings:
+    """``settings`` plus a top-level check item, without settings, for each rule of
+    ``registry`` that no item configures yet (schema contracts excepted).
+
+    Only configured checks run; this runs a test registry's rules the way QAVF 0.6
+    ran rules that were not configured.
+    """
+    from qavf.checks.catalog import CONTRACT_RULES
+
+    configured = {item.check for item in settings.checks} | {
+        item.check for spec in settings.datasets.values() for item in spec.checks
+    }
+    added = [
+        CheckItem(check=rule.check_name)
+        for rule in registry
+        if rule.check_name not in configured and rule.rule_id not in CONTRACT_RULES
+    ]
+    return settings.model_copy(update={"checks": [*settings.checks, *added]})
 
 
 def run_rules(
@@ -77,7 +123,7 @@ def run_rules(
 ) -> QAReport:
     """Run every discovered rule (configured by ``rules``) against in-memory frames."""
     return QARunner(
-        make_settings(rules=rules, **settings),
+        make_settings(rules=rules, registry=registry, **settings),
         # An explicitly empty registry is a registry, not "use the default".
         registry=registry if registry is not None else discovered_rules(),
     ).run(frames=frames)
@@ -94,7 +140,7 @@ def rule_results(
     report = QARunner(
         make_settings(
             rules={rule_id: {"params": dict(params or {})}},
-            run_unconfigured_rules=False,
+            registry=registry,
             **settings,
         ),
         registry=registry if registry is not None else discovered_rules(),

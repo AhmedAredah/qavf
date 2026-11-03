@@ -12,6 +12,7 @@ import duckdb
 import polars as pl
 from pydantic import BaseModel
 
+from qavf.checks.legacy import reject_legacy
 from qavf.configuration import ConfigurationGraph
 from qavf.settings import (
     DatasetSpec,
@@ -63,6 +64,7 @@ def _check_configured_auxiliary_inputs(config: object) -> None:
             pending.extend(value.values())
         elif isinstance(value, BaseModel):
             pending.extend(getattr(value, name) for name in type(value).model_fields)
+            pending.extend((value.model_extra or {}).values())  # check item settings
         elif isinstance(value, list | tuple):
             pending.extend(value)
         if embedded:
@@ -88,9 +90,11 @@ def _configuration(config: Configuration) -> tuple[dict[str, Any], Path | None]:
         }, copied.source_path
     if isinstance(config, str | os.PathLike):
         raw, path = _read_config_mapping(Path(config))
+        reject_legacy(raw, str(path))
         _check_configured_auxiliary_inputs(raw)
         return raw, path
     if isinstance(config, Mapping):
+        reject_legacy(config)
         _check_configured_auxiliary_inputs(config)
         return dict(config), None
     raise TypeError("config must be settings, a configuration mapping, or a YAML/JSON path")
@@ -293,7 +297,7 @@ def prepare_configuration(
         raise ValueError("no input datasets were provided or configured")
     inline_contract = any(
         isinstance(value, Dataset)
-        and bool(value.contract().model_fields_set & {"schema_spec", "foreign_keys", "expressions"})
+        and bool(value.contract().model_fields_set & {"schema_spec", "foreign_keys", "checks"})
         for value in inputs.values()
     )
     if schema is None and config is None and not inline_contract:

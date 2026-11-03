@@ -86,8 +86,22 @@ _DATASET: dict[str, Hint] = {
     "rename": ("Source", "Rename columns", True),
     "schema": ("Schema", "Schema", False),
     "foreign_keys": ("Keys & relations", "Foreign keys", False),
-    "expressions": ("Row rules", "Row expressions", False),
+    "checks": ("Checks", "Checks", False),
 }
+
+_CHECK: dict[str, Hint] = {
+    "check": ("Check", "Check", False),
+    "name": ("Check", "Name", False),
+    "severity": ("Check", "Severity", False),
+    "where": ("Check", "Only rows where", True),
+    "tags": ("Check", "Tags", True),
+    "enabled": ("Check", "Enabled", False),
+    "description": ("Check", "Description", False),
+}
+"""Fields every check item has; the check's own settings are hinted generically."""
+
+CHECK_PREFIX = "Check_"
+"""Definitions of individual checks' items are named ``Check_<check name>``."""
 
 _SOURCE: dict[str, Hint] = {
     "type": ("Source", "Source type", False),
@@ -180,18 +194,17 @@ HINTS: dict[str, dict[str, Hint]] = {
         "expected_groups": ("Grouped values", "Expected groups", True),
         "name": ("Grouped values", "Name", True),
     },
-    "ExpressionCheck": {
-        "expr": ("Row expression", "Expression", False),
-        "name": ("Row expression", "Name", False),
-        "severity": ("Row expression", "Severity", False),
-        "description": ("Row expression", "Description", False),
-        "null_as": ("Row expression", "A null result counts as", True),
+    "ExpressionItem": {
+        **_CHECK,
+        "expr": ("Settings", "Expression", False),
+        "null_as": ("Settings", "A null result counts as", True),
     },
-    "SqlAssertion": {
-        "name": ("SQL assertion", "Name", False),
-        "sql": ("SQL assertion", "Query returning offending rows", False),
-        "severity": ("SQL assertion", "Severity", False),
-        "description": ("SQL assertion", "Description", False),
+    "SqlItem": {**_CHECK, "sql": ("Settings", "Query returning offending rows", False)},
+    "CheckItem": _CHECK,
+    "RunSettings": {
+        "fail_on": ("Pass / fail", "Fail on severity", False),
+        "fail_on_incomplete": ("Pass / fail", "Fail when checks cannot run", False),
+        "require": ("Pass / fail", "Checks that must be assessed", True),
     },
     "ConnectionSpec": {
         "type": ("Connection", "Database type", False),
@@ -246,12 +259,6 @@ HINTS: dict[str, dict[str, Hint]] = {
         "required": ("Plugins", "Required plugins", True),
     },
     "EngineSettings": {
-        "fail_on": ("Pass / fail", "Fail on severity", False),
-        "fail_on_incomplete": ("Pass / fail", "Fail when checks cannot run", False),
-        "require": ("Pass / fail", "Checks that must be assessed", True),
-        "run_unconfigured_rules": ("Rules", "Run rules that are not configured", False),
-        "include_categories": ("Rules", "Only these categories", False),
-        "exclude_categories": ("Rules", "Skip these categories", False),
         "parallel": ("Performance", "Run rules in parallel", False),
         "max_workers": ("Performance", "Maximum workers", True),
         "native_threads": ("Performance", "DuckDB threads", True),
@@ -277,17 +284,32 @@ HINTS: dict[str, dict[str, Hint]] = {
 }
 
 
+def _check_hints(properties: Mapping[str, Any]) -> dict[str, Hint]:
+    """The common check fields, plus a plain title for each of the check's settings."""
+    return {
+        field: _CHECK.get(field, ("Settings", field.replace("_", " ").capitalize(), False))
+        for field in properties
+    }
+
+
+def _apply(properties: Any, hints: Mapping[str, Hint]) -> None:
+    if not isinstance(properties, Mapping):
+        return
+    for field, (group, title, advanced) in hints.items():
+        target = properties.get(field)
+        if isinstance(target, dict):
+            target.update(ui_group=group, ui_title=title, ui_advanced=advanced)
+
+
 def apply_ui_hints(schema: dict[str, Any]) -> dict[str, Any]:
     """Add the hints to ``schema``'s definitions in place, and return it."""
     definitions = schema.get("$defs", {})
     for name, hints in HINTS.items():
-        properties = definitions.get(name, {}).get("properties")
-        if not isinstance(properties, Mapping):
-            continue
-        for field, (group, title, advanced) in hints.items():
-            target = properties.get(field)
-            if isinstance(target, dict):
-                target.update(ui_group=group, ui_title=title, ui_advanced=advanced)
+        _apply(definitions.get(name, {}).get("properties"), hints)
+    for name, definition in definitions.items():
+        properties = definition.get("properties")
+        if name.startswith(CHECK_PREFIX) and isinstance(properties, Mapping):
+            _apply(properties, _check_hints(properties))
     return schema
 
 

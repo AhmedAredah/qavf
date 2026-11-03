@@ -29,7 +29,7 @@ def validate(
     """Validate explicit contracts and return a report without writing files.
 
     Pass a path, File, frame, Query, Loader, or named mapping of those inputs.
-    Dataset wraps an input with its own schema, foreign keys, expressions and
+    Dataset wraps an input with its own schema, foreign keys, check items and
     loading safeguards. Plain mappings always name datasets, never columns.
     All input names and contracts are checked before adapting or executing data.
     Lazy frames, deferred loaders and caller-owned handles keep their ownership.

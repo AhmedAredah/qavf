@@ -4,65 +4,49 @@ from __future__ import annotations
 
 from typing import Literal
 
-from qavf.settings import QAVFSettings, RuleSettings
+from qavf.settings import QAVFSettings
 
 ProfileName = Literal["validity", "regression", "change"]
 _INPUT_RULES = tuple(f"INP-{i:03d}" for i in range(1, 8))
-_ANALYSIS = {"regression": ("REG-001", "baselines"), "change": ("CMP-001", "comparisons")}
+_ANALYSIS = {"regression": "matches_baseline", "change": "compare"}
+
+
+def _configured(settings: QAVFSettings, check: str) -> bool:
+    """Whether an enabled ``check`` item is configured anywhere."""
+    items = [
+        *settings.checks,
+        *(item for spec in settings.datasets.values() for item in spec.checks),
+    ]
+    return any(item.check == check and item.enabled for item in items)
 
 
 def apply_profile(settings: QAVFSettings, name: ProfileName) -> QAVFSettings:
-    """Expand a named profile while retaining every explicitly configured check.
+    """Check a named profile's requirements and record it in the configuration.
 
-    All profiles include declared schema/key/reference/expression validity.
-    Regression/change additionally require explicit baseline/comparison settings;
-    no tolerances, geography limits, or accepted baselines are inferred.
+    All profiles include declared schema/key/reference/expression validity, which
+    always runs. Regression/change additionally require a configured
+    ``matches_baseline``/``compare`` check; no tolerances, geography limits, or
+    accepted baselines are inferred.
     """
     if name not in ("validity", "regression", "change"):
         raise ValueError("profile must be 'validity', 'regression', or 'change'")
-    if (
-        not any(
-            spec.schema_spec is not None or spec.foreign_keys or spec.expressions
-            for spec in settings.datasets.values()
-        )
-        and not settings.assertions
-    ):
+    if not any(
+        spec.schema_spec is not None or spec.foreign_keys or spec.expressions
+        for spec in settings.datasets.values()
+    ) and not _configured(settings, "sql"):
         raise ValueError("a validation profile requires an explicit dataset QA contract")
-    required_categories = {"input"}
-    if name in _ANALYSIS:
-        rule_id, collection = _ANALYSIS[name]
-        override = settings.rules.get(rule_id)
-        if override is None or not override.enabled or not override.params.get(collection):
-            raise ValueError(f"profile {name!r} requires configured {rule_id}.{collection}")
-        required_categories.add("regression" if name == "regression" else "comparison")
-    engine = settings.engine
-    if required_categories & set(engine.exclude_categories) or (
-        engine.include_categories is not None
-        and not required_categories <= set(engine.include_categories)
-    ):
-        raise ValueError("engine category filters exclude checks required by the profile")
-    rules = dict(settings.rules)
+    if name in _ANALYSIS and not _configured(settings, _ANALYSIS[name]):
+        raise ValueError(f"profile {name!r} requires a configured {_ANALYSIS[name]} check")
     has_applicability = any(
         spec.schema_spec is not None
         and any(column.na_values for column in spec.schema_spec.columns.values())
         for spec in settings.datasets.values()
     )
     input_rules = (*_INPUT_RULES, "INP-009") if has_applicability else _INPUT_RULES
-    for rule_id in input_rules:
-        if rule_id in rules and not rules[rule_id].enabled:
-            raise ValueError(f"profile {name!r} conflicts with disabled {rule_id}")
-        rules.setdefault(rule_id, RuleSettings())
-    # Expanded checks are the effective configuration and enter the plan digest.
-    # Preserve explicit custom checks while avoiding unrelated unconfigured rules.
+    # The profile enters the configuration digest; schema contracts always run.
     extensions = dict(settings.extensions)
     provenance = {"name": name, "input_rules": list(input_rules)}
     if "qavf.profile" in extensions and extensions["qavf.profile"] != provenance:
         raise ValueError("extensions['qavf.profile'] conflicts with the selected profile")
     extensions["qavf.profile"] = provenance
-    return settings.model_copy(
-        update={
-            "rules": rules,
-            "engine": engine.model_copy(update={"run_unconfigured_rules": False}),
-            "extensions": extensions,
-        }
-    )
+    return settings.model_copy(update={"extensions": extensions})

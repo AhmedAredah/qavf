@@ -8,6 +8,7 @@ from typing import Any
 import polars as pl
 
 from qavf import Status, validate
+from qavf.migrate import Migrator
 
 from .fixtures import FEATURES, FIXTURE_VERSION, TEXT_COLUMNS, content_fingerprint, residue_count
 from .models import PreparedWorkload, WorkloadOptions
@@ -147,7 +148,6 @@ def build_workload(
     temporary.mkdir(parents=True, exist_ok=True)
     engine = {
         "parallel": False,
-        "run_unconfigured_rules": False,
         "native_threads": options.threads,
         "max_workers": 1,
         "max_affected_records": options.evidence_rows,
@@ -157,14 +157,21 @@ def build_workload(
     for name in ("memory_budget_bytes", "cache_max_bytes", "spill_max_bytes"):
         if (value := getattr(options, name)) is not None:
             engine[name] = value
-    config = {
-        "project": f"Performance workload: {case}",
-        "plugins": {"entry_points": False},
-        "datasets": datasets,
-        "rules": rules,
-        "engine": engine,
-        "report": {"hash_inputs": options.hash_inputs},
-    }
+    # Workloads are defined by rule parameters; convert them to check items.
+    config = (
+        Migrator()
+        .migrate(
+            {
+                "project": f"Performance workload: {case}",
+                "plugins": {"entry_points": False},
+                "datasets": datasets,
+                "rules": rules,
+                "engine": engine,
+                "report": {"hash_inputs": options.hash_inputs},
+            }
+        )
+        .config
+    )
     return PreparedWorkload(
         run=lambda: validate(inputs, config=config),
         verify=lambda report: verify_outcome(
@@ -330,6 +337,9 @@ def verify_outcome(
             }
     for result in report.results:
         if result.rule_id not in rule_ids:
+            # Schema contracts always run; only the benchmark's own rules are measured.
+            if result.status in (Status.PASS, Status.SKIPPED):
+                continue
             raise AssertionError(f"unexpected benchmark rule: {result.rule_id}")
         if result.status not in (Status.PASS, Status.FAIL):
             raise AssertionError(f"unassessed benchmark check: {result.label}: {result.message}")

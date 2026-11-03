@@ -1,8 +1,8 @@
 """Pydantic configuration models and YAML/JSON loading.
 
-A configuration file describes *what* to validate (datasets, their sources and
-their column-level QA limits), *how* (per-rule enablement, severity and
-parameters) and *where* results go. ``qavf init`` writes a complete starting
+A configuration file describes *what* to validate (datasets, their sources,
+their column-level QA limits and named ``checks``), the pass/fail policy of a
+``run`` and *where* results go. ``qavf init`` writes a complete starting
 configuration and ``qavf schema`` a JSON Schema for editor autocompletion.
 
 String values may reference environment variables as ``${NAME}`` or
@@ -25,15 +25,15 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SerializerFunctionWrapHandler,
     ValidatorFunctionWrapHandler,
     WrapValidator,
     field_serializer,
     field_validator,
-    model_serializer,
     model_validator,
 )
 
+from qavf.checks.items import CheckItem, RunSettings
+from qavf.checks.legacy import reject_legacy
 from qavf.configuration import ConfigurationGraph
 from qavf.configuration import expand_env as expand_env
 from qavf.configuration import parse_config_text as _parse_config_text
@@ -790,7 +790,18 @@ class DatasetSpec(_Strict):
     """Column renames applied after loading (``old: new``)."""
     schema_spec: SchemaSpec | None = Field(default=None, alias="schema")
     foreign_keys: list[ForeignKeySpec] = Field(default_factory=list)
-    expressions: list[ExpressionCheck] = Field(default_factory=list)
+    checks: list[CheckItem] = Field(default_factory=list)
+    """Checks of this dataset, e.g. ``{check: missing_periods, series: {...}}``.
+    ``qavf list-checks`` lists the checks and their settings."""
+
+    @property
+    def expressions(self) -> list[ExpressionCheck]:
+        """The enabled ``expression`` checks, as the row expressions INP-006 evaluates."""
+        return [
+            expression_check(item)
+            for item in self.checks
+            if item.check == "expression" and item.enabled
+        ]
 
     @field_serializer("load_policy")
     def _serialize_load_policy(self, value: SourcePolicy) -> dict[str, Any]:
@@ -1081,26 +1092,32 @@ class SecretSpec(_Strict):
 
 
 # --------------------------------------------------------------------- engine
-class RuleSettings(_Strict):
-    """Per-rule overrides."""
+def expression_check(item: CheckItem) -> ExpressionCheck:
+    """The row expression of an ``expression`` check item.
 
-    enabled: bool = True
-    severity: Severity | None = None
-    """Overrides the rule's default severity."""
-    params: dict[str, Any] = Field(default_factory=dict)
-    """Validated against the rule's own ``Params`` model at plan time."""
+    A ``where`` condition limits the rows assessed: rows it does not select pass.
+    """
+    settings = item.settings
+    expr = settings.get("expr")
+    if item.where is not None and isinstance(expr, str):
+        expr = f"CASE WHEN coalesce(({item.where}), false) THEN ({expr}) ELSE true END"
+    return ExpressionCheck(
+        expr=expr,
+        name=item.name,
+        severity=item.severity,
+        description=item.description,
+        null_as=settings.get("null_as", "pass"),
+    )
 
-    @model_serializer(mode="wrap")
-    def _preserve_parameter_presence(self, handler: SerializerFunctionWrapHandler) -> Any:
-        """Omitted parameters and an explicitly empty mapping have distinct meaning.
 
-        Disabled rules may omit required parameters. Keep that omission through
-        normalization, while retaining explicit emptiness and in-place additions.
-        """
-        result = handler(self)
-        if "params" not in self.model_fields_set and not self.params:
-            result.pop("params", None)
-        return result
+def sql_assertion(item: CheckItem) -> SqlAssertion:
+    """The query of a top-level ``sql`` check item."""
+    return SqlAssertion(
+        name=item.name or "",
+        sql=item.settings.get("sql"),
+        severity=item.severity,
+        description=item.description,
+    )
 
 
 class EngineSettings(_Strict):
@@ -1119,17 +1136,8 @@ class EngineSettings(_Strict):
     parallel: bool = True
     max_workers: int | None = Field(default=None, ge=1)
     """Thread count; defaults to ``min(8, cpu_count)``."""
-    run_unconfigured_rules: bool = True
-    """Run discovered rules that have no entry under ``rules`` with their defaults."""
-    include_categories: list[str] | None = None
-    exclude_categories: list[str] = Field(default_factory=list)
     max_affected_records: int = Field(default=50, ge=0)
     """Cap on the offending-record sample kept per result."""
-    fail_on: Severity = Severity.ERROR
-    """Lowest failure severity that makes the run (and CLI exit code) fail."""
-    fail_on_incomplete: bool = True
-    """Fail the run when it is incomplete: a configured check could not be assessed
-    (missing data, invalid SQL, nothing testable), or no check assessed anything."""
     rule_timeout_s: float | None = Field(default=None, gt=0)
     """Cooperative deadline: overdue work is unassessed and cancellation is requested.
     Arbitrary Python/native plugin calls cannot be forcibly terminated by a thread;
@@ -1162,10 +1170,6 @@ class EngineSettings(_Strict):
     concurrent_loads: bool = True
     """Load independent datasets concurrently when rules run in parallel. Turn off
     when a backend cannot take several queries at once or loads must not overlap."""
-    require: list[str] = Field(default_factory=list)
-    """Checks that must actually be assessed, as rule ids (``INP-004``) or single
-    checks (``INP-003[counts.aadt: ge 0]``). A required check that is disabled,
-    filtered out, skipped or not assessed makes the run incomplete."""
     canonical_columns: list[str] | str = Field(default_factory=list)
     """Column spellings to normalise to case-insensitively on load (``sourcetypeid``
     becomes ``sourceTypeID``). Either a list or an import reference such as
@@ -1248,8 +1252,11 @@ class QAVFSettings(_Strict):
     connections: dict[str, ConnectionSpec] = Field(default_factory=dict)
     secrets: dict[str, SecretSpec] = Field(default_factory=dict)
     """Cloud storage credentials, keyed by a SQL-identifier name."""
-    assertions: list[SqlAssertion] = Field(default_factory=list)
-    rules: dict[str, RuleSettings] = Field(default_factory=dict)
+    checks: list[CheckItem] = Field(default_factory=list)
+    """Checks relating several datasets: ``sql``, ``compare``, ``totals_match``,
+    ``key_sets_match``, ``batch_consistent``, ``coverage`` and ``drift``."""
+    run: RunSettings = Field(default_factory=RunSettings)
+    """Pass/fail policy: ``fail_on``, ``fail_on_incomplete`` and ``require``."""
     engine: EngineSettings = Field(default_factory=EngineSettings)
     plugins: PluginSettings = Field(default_factory=PluginSettings)
     report: ReportSettings = Field(default_factory=ReportSettings)
@@ -1263,7 +1270,13 @@ class QAVFSettings(_Strict):
     @classmethod
     def _string_mapping_keys(cls, data: Any) -> Any:
         validate_config_mapping_keys(data)
+        reject_legacy(data)
         return data
+
+    @property
+    def assertions(self) -> list[SqlAssertion]:
+        """The enabled top-level ``sql`` checks, as the queries INP-007 evaluates."""
+        return [sql_assertion(item) for item in self.checks if item.check == "sql" and item.enabled]
 
     @model_validator(mode="after")
     def _references_resolve(self) -> QAVFSettings:
@@ -1309,9 +1322,10 @@ class QAVFSettings(_Strict):
                 unknown = set(attached) - self.connections.keys()
                 if unknown:
                     raise ValueError(f"dataset {name!r}: unknown connections {sorted(unknown)!r}")
-        names = [assertion.name for assertion in self.assertions]
-        if len(names) != len(set(names)):
-            raise ValueError("assertion names must be unique")
+        if self.checks or self.run.require or any(spec.checks for spec in self.datasets.values()):
+            problems = _check_errors(self)
+            if problems:
+                raise ValueError("invalid checks: " + "; ".join(problems))
         return self
 
     @property
@@ -1323,6 +1337,25 @@ class QAVFSettings(_Strict):
         """Resolve ``path`` against :attr:`base_dir` unless it is already absolute."""
         candidate = Path(path)
         return candidate if candidate.is_absolute() else (self.base_dir / candidate).resolve()
+
+
+def _check_errors(settings: QAVFSettings) -> list[str]:
+    """Problems with the check items of ``settings``, each with its path.
+
+    Built-in checks are validated against their rules' parameters. The catalog
+    imports the rule implementations (which import this module, and need the
+    optional Polars backend), so it is imported here. Without Polars only the
+    ``expression`` and ``sql`` checks can run (natively) and only they are
+    validated now. Plugin checks are validated when the run is planned, once
+    plugins are loaded (:func:`qavf.engine.compilation.compile_rules`).
+    """
+    try:
+        from qavf.checks.compiler import configuration_errors
+    except ModuleNotFoundError as exc:
+        if not (exc.name or "").startswith("polars"):
+            raise
+        from qavf.checks.placement import row_check_errors as configuration_errors
+    return configuration_errors(settings)
 
 
 def validate_config_mapping_keys(value: Any) -> None:
@@ -1421,6 +1454,7 @@ def settings_from_text(text: str, path: str | Path) -> QAVFSettings:
 
 
 def _validated(raw: dict[str, Any], source: Path) -> QAVFSettings:
+    reject_legacy(raw, str(source))
     ConfigurationGraph().check(raw)
     settings = QAVFSettings.model_validate(raw)
     settings.source_path = source

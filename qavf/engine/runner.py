@@ -26,6 +26,7 @@ from pydantic_core import to_json
 from qavf._version import __version__
 from qavf.audit_codec import EVIDENCE_OMITTED, canonical_digest
 from qavf.audit_codec import bounded_diagnostic as _bounded_diagnostic
+from qavf.checks.requirements import Requirements, RuleDescription
 from qavf.engine.compilation import (
     ConfigurationError as ConfigurationError,
 )
@@ -40,19 +41,12 @@ from qavf.engine.compilation import (
     compile_rules,
     plugin_status,
 )
-from qavf.engine.compilation import (
-    required_check as _required_check,
-)
-from qavf.engine.compilation import (
-    required_rule as _required_rule,
-)
 from qavf.engine.context import DataContext, DatasetNotAvailableError
 from qavf.engine.registry import Finding, Rule, RuleRegistry
 from qavf.engine.resources import ResourceLimitError, retained_size
 from qavf.engine.row_locator import RowLocator
 from qavf.engine.session import Invocation
 from qavf.engine.severity import Severity, Status
-from qavf.input_rules import required_not_assessed
 from qavf.redaction import exception_details, redact, redact_text
 from qavf.reports.models import (
     QAReport,
@@ -128,10 +122,8 @@ class QARunner:
         if self.settings.engine.execution_mode != "isolated":
             self._registry = self.registry  # Preserve eager in-process discovery.
             self._sources = self.sources
-        self.needs_configuration: dict[str, list[str]] = {}
-        """Discovered rules skipped because they require parameters, with those parameters."""
         self.excluded: dict[str, str] = {}
-        """Discovered rules left out of the plan, with the reason."""
+        """Check items left out of the plan (disabled), by item name, with the reason."""
 
     @property
     def registry(self) -> RuleRegistry:
@@ -153,9 +145,6 @@ class QARunner:
         partially prepared plan can become the runner's visible state.
         """
         compiled = compile_rules(self.settings, self.registry, self.sources)
-        self.needs_configuration = {
-            key: list(fields) for key, fields in compiled.needs_configuration.items()
-        }
         self.excluded = dict(compiled.excluded)
         return list(compiled.rules)
 
@@ -311,8 +300,8 @@ class QARunner:
                 extensions=redact(self.settings.extensions),
                 excluded_rules=dict(sorted(self.excluded.items())),
                 plugins=self.plugin_status(),
-                fail_on=self.settings.engine.fail_on,
-                fail_on_incomplete=self.settings.engine.fail_on_incomplete,
+                fail_on=self.settings.run.fail_on,
+                fail_on_incomplete=self.settings.run.fail_on_incomplete,
                 cancelled=control is not None and control.cancelled,
                 config=config,
                 config_digest=config_digest(config),
@@ -324,12 +313,7 @@ class QARunner:
                 resource_usage=snapshot["resource_usage"],
                 query_plans=snapshot["query_plans"] + execution_plan.describe(),
             ),
-            results=self._with_requirements(
-                [
-                    *(result for batch in batches for result in batch),
-                    *self._unconfigured_results(),
-                ]
-            ),
+            results=self._with_requirements([result for batch in batches for result in batch]),
         )
         report = self._fit_report_budget(report)
         summary = report.summary
@@ -409,71 +393,26 @@ class QARunner:
 
     # ---------------------------------------------------------------- internal
     def _with_requirements(self, results: list[RuleResult]) -> list[RuleResult]:
-        """``results`` plus an ERROR for each ``engine.require`` entry not assessed."""
-        added = []
-        for entry in self.settings.engine.require:
-            rule_id, check = _required_rule(entry), _required_check(entry)
-            # A passing check may be folded into its rule's summary (``passed_checks``).
-            matching = [
-                r
-                for r in results
-                if r.rule_id == rule_id
-                and (
-                    check is None
-                    or r.check == check
-                    or check in (r.metrics.get("passed_checks") or ())
-                )
-            ]
-            assessed = [r for r in matching if r.status in (Status.PASS, Status.FAIL)]
-            if assessed and not any(r.status is Status.ERROR for r in matching):
-                continue
-            if rule_id in self.excluded:
-                reason = f"the rule was excluded: {self.excluded[rule_id]}"
-            elif not matching:
-                reason = "no result was produced for it"
-            elif any(r.status is Status.ERROR for r in matching):
-                reason = "it could not be assessed"
-            else:
-                reason = "it was skipped"
-            rule_cls = self.registry.get(rule_id)
-            added.append(
-                RuleResult(
-                    rule_id=rule_id,
-                    name=rule_cls.name,
-                    description=rule_cls.description,
-                    category=rule_cls.category,
-                    check=f"required: {entry}",
-                    status=Status.ERROR,
-                    severity=max(rule_cls.default_severity, Severity.ERROR),
-                    message=required_not_assessed(entry, reason),
-                    affected_count_exact=False,
-                    recommendation=rule_cls.recommendation,
-                )
-            )
-        return [*results, *added]
+        """``results`` plus an ERROR for each ``run.require`` entry not assessed."""
+        if not self.settings.run.require:
+            return results
+        return Requirements(
+            self.settings, self._describe, {rule.check_name: rule.rule_id for rule in self.registry}
+        ).apply(results)
 
-    def _unconfigured_results(self) -> list[RuleResult]:
-        """SKIPPED results for discovered rules that need parameters nobody supplied."""
-        results = []
-        for rule_id, fields in sorted(self.needs_configuration.items()):
-            rule_cls = self.registry.get(rule_id)
-            results.append(
-                RuleResult(
-                    rule_id=rule_id,
-                    name=rule_cls.name,
-                    description=rule_cls.description,
-                    category=rule_cls.category,
-                    status=Status.SKIPPED,
-                    severity=rule_cls.default_severity,
-                    message=(
-                        f"Not configured: this rule requires parameter(s) "
-                        f"{', '.join(fields)} under rules.{rule_id}.params."
-                    ),
-                    affected_count_exact=False,
-                    recommendation=rule_cls.recommendation,
-                )
-            )
-        return results
+    def _describe(self, rule_id: str) -> RuleDescription | None:
+        if rule_id not in self.registry:
+            return None
+        rule = self.registry.get(rule_id)
+        return RuleDescription(
+            rule.rule_id,
+            rule.check_name,
+            rule.name,
+            rule.description,
+            rule.category,
+            rule.default_severity,
+            rule.recommendation,
+        )
 
     def _worker_count(self, n_rules: int, frames: Mapping[str, Any] | None = None) -> int:
         engine = self.settings.engine
@@ -764,7 +703,7 @@ class QARunner:
             if began:
                 try:
                     if ctx._execution_plan is not None:
-                        ctx.release(ctx._execution_plan.complete(rule.rule_id))
+                        ctx.release(ctx._execution_plan.complete(rule.key))
                 except Exception as exc:
                     results.append(
                         self._result(
@@ -808,8 +747,8 @@ class QARunner:
         missing = [name for name in rule.requires if not ctx.has(name)]
         if missing:
             reasons = "; ".join(str(ctx.unavailable_reason(name)) for name in missing)
-            if rule.rule_id in self.settings.rules:
-                # Explicitly configured: the user intended this check, so it is blocked.
+            if rule.binding is not None:
+                # A configured check item: the user intended this check, so it is blocked.
                 return [
                     self._result(
                         rule,
@@ -1024,9 +963,11 @@ class QARunner:
         return RuleResult(
             rule_id=rule.rule_id,
             name=rule.name,
-            description=rule.description,
+            description=(rule.binding.description if rule.binding else None) or rule.description,
             category=rule.category,
             check=finding.check if finding else None,
+            check_name=rule.check_name,
+            item_name=rule.item_name(finding),
             check_id=finding.check_id if finding and finding.check_id else rule.rule_id,
             columns=list(finding.columns if finding else ()),
             parameters=redact(
@@ -1172,6 +1113,8 @@ def _rule_info(rule: Rule) -> RuleInfo:
     module = type(rule).__module__
     return RuleInfo(
         rule_id=rule.rule_id,
+        check_name=rule.check_name,
+        item_name=rule.binding.name if rule.binding else None,
         severity=rule.severity,
         params=redact(rule.params.model_dump(mode="python")),
         module=module,

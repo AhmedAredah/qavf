@@ -50,17 +50,17 @@ qavf --help
 qavf --version
 qavf capabilities                         # JSON catalog for both backends
 qavf schema --backend duckdb -o schema.json
-qavf list-rules --backend duckdb --format json
+qavf list-checks --backend duckdb --format json
 qavf run --backend duckdb -c qavf.yaml
 qavf run --backend polars -c advanced.yaml
 ```
 
-`run`, `schema` and `list-rules` default to `--backend auto`, preserving the full
+`run`, `schema` and `list-checks` default to `--backend auto`, preserving the full
 backend when Polars is installed and selecting the native backend otherwise.
 The native schema describes the shared configuration plus supported native rule
 and source vocabulary; cross-field and runtime capability constraints remain
 runtime checks. It does not discover optional plugins. Explicit custom plugin
-discovery in a native schema/list-rules request reports a capability error.
+discovery in a native schema/list-checks request reports a capability error.
 
 Existing command names and options remain available. Help for every command is
 available in the core installation. `init`, `profile`, `compare`,

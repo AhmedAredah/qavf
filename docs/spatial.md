@@ -356,23 +356,20 @@ datasets:
   trips_2024: {path: trips/2024.parquet}
   trips_2025: {path: trips/2025.parquet}
   zones: {path: zones/taz.parquet}            # GeoParquet with columns taz and geometry
-rules:
-  CMP-001:
-    params:
-      comparisons:
-        - name: trips by zone
-          baseline: trips_2024
-          candidate: trips_2025
-          keys: [trip_id]
-          steps:
-            - {step: shift_time, column: day, offset: {years: 1}, unaligned: drop}
-            - {step: assign_zones, x: lon, y: lat, layer: {dataset: zones, id: taz},
-               max_unassigned: 0.001}
-          levels:
-            - {level: spatial, measures: [count, sum(passengers)], weights: {method: rook}}
-            - {level: temporal, time_column: day, bucket: week, group_by: [zone],
-               measures: [count]}
-            - {level: locations, x: lon, y: lat, max_distance: 25}
+checks:
+  - check: compare
+    name: trips by zone
+    datasets: [trips_2024, trips_2025]
+    keys: [trip_id]
+    steps:
+      - {step: shift_time, column: day, offset: {years: 1}, unaligned: drop}
+      - {step: assign_zones, x: lon, y: lat, layer: {dataset: zones, id: taz},
+         max_unassigned: 0.001}
+    levels:
+      - {level: spatial, measures: [count, sum(passengers)], weights: {method: rook}}
+      - {level: temporal, time_column: day, bucket: week, group_by: [zone],
+         measures: [count]}
+      - {level: locations, x: lon, y: lat, max_distance: 25}
 ```
 
 ## Rules

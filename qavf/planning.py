@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
+from qavf.checks.placement import placed_items
 from qavf.engine.compilation import (
     ConfigurationError,
     build_registry,
@@ -42,6 +43,10 @@ class DatasetExplanation(SnapshotModel):
 
 class RuleExplanation(SnapshotModel):
     rule_id: str
+    check_name: str | None = None
+    """The check's name in configurations."""
+    item_name: str | None = None
+    """The check item this rule instance runs for (``None`` for schema contracts)."""
     name: str
     severity: str
     datasets: tuple[str, ...]
@@ -79,7 +84,7 @@ def _work(rule_id: str) -> tuple[str, ...]:
 
 
 def _registered_rule_gaps(settings: QAVFSettings, registry: RuleRegistry) -> list[str]:
-    """Disclose active in-code rules without invoking their configuration hooks.
+    """Disclose configured in-code rules without invoking their configuration hooks.
 
     The runner merges the process registry even when no plugin discovery was
     requested. Reading class metadata is sufficient to identify that omitted
@@ -87,7 +92,7 @@ def _registered_rule_gaps(settings: QAVFSettings, registry: RuleRegistry) -> lis
     """
     with visibility(settings.plugins.entry_points):
         registered = tuple(default_registry)
-    engine = settings.engine
+    configured = {placed.item.check for placed in placed_items(settings)}
     gaps = []
     for rule in registered:
         if rule.rule_id in registry:
@@ -95,19 +100,28 @@ def _registered_rule_gaps(settings: QAVFSettings, registry: RuleRegistry) -> lis
             if (rule.__module__, rule.__qualname__) != (builtin.__module__, builtin.__qualname__):
                 gaps.append(f"registered rule {rule.rule_id!r} conflicts with a built-in rule")
             continue
-        # Explicit custom rules are already disclosed as unresolved below,
-        # including disabled rules whose supplied parameters still need checks.
-        if rule.rule_id in settings.rules or not engine.run_unconfigured_rules:
-            continue
-        if (
-            engine.include_categories is not None and rule.category not in engine.include_categories
-        ) or rule.category in engine.exclude_categories:
-            continue
-        gaps.append(
-            f"registered rule {rule.rule_id!r} was not planned; "
-            "load_plugins=True allows its configuration hooks"
-        )
+        if rule.check_name in configured:
+            gaps.append(
+                f"registered check {rule.check_name!r} was not planned; "
+                "load_plugins=True allows its configuration hooks"
+            )
     return gaps
+
+
+def _known_checks_only(settings: QAVFSettings, known: set[str]) -> QAVFSettings:
+    """``settings`` without check items whose check is not in ``known``."""
+    datasets = {
+        name: spec.model_copy(
+            update={"checks": [item for item in spec.checks if item.check in known]}
+        )
+        for name, spec in settings.datasets.items()
+    }
+    return settings.model_copy(
+        update={
+            "datasets": datasets,
+            "checks": [item for item in settings.checks if item.check in known],
+        }
+    )
 
 
 def explain(
@@ -158,11 +172,11 @@ def explain(
     else:
         registry = RuleRegistry().discover(packages=("qavf.rules",), use_entry_points=False)
         sources = SourceRegistry().discover(use_entry_points=False)
-        known = {rule.rule_id for rule in registry}
+        known = {rule.check_name for rule in registry}
         unresolved.extend(_registered_rule_gaps(settings, registry))
         unresolved.extend(
-            f"plugin rule {rule_id!r} was not imported"
-            for rule_id in sorted(set(settings.rules) - known)
+            f"plugin check {check!r} was not imported"
+            for check in sorted({placed.item.check for placed in placed_items(settings)} - known)
         )
         plugins = settings.plugins
         if (
@@ -173,9 +187,8 @@ def explain(
             or plugins.required
         ):
             unresolved.append("Configured or installed plugin discovery was not performed.")
-        planned_settings = settings.model_copy(
+        planned_settings = _known_checks_only(settings, known).model_copy(
             update={
-                "rules": {key: value for key, value in settings.rules.items() if key in known},
                 "plugins": plugins.model_copy(
                     update={
                         "packages": ["qavf.rules"],
@@ -196,6 +209,8 @@ def explain(
             rules.append(
                 RuleExplanation(
                     rule_id=rule.rule_id,
+                    check_name=rule.check_name,
+                    item_name=rule.binding.name if rule.binding else None,
                     name=rule.name,
                     severity=rule.severity.value,
                     datasets=tuple(dependency["datasets"]),
@@ -205,10 +220,6 @@ def explain(
                 )
             )
         excluded = dict(compiled.excluded)
-        unresolved.extend(
-            f"{rule_id} requires parameters: {', '.join(fields)}"
-            for rule_id, fields in compiled.needs_configuration.items()
-        )
     except ConfigurationError as exc:
         if load_plugins:
             raise

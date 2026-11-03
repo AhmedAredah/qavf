@@ -212,6 +212,12 @@ class RuleResult(SnapshotModel):
     """Which of a rule's separately graded checks this is (``None`` for single-check rules)."""
     check_id: str = ""
     scope: str = "rule"
+    check_name: str | None = None
+    """The check's name in configurations, e.g. ``missing_periods`` (``None`` in reports
+    written before QAVF 0.7)."""
+    item_name: str | None = None
+    """The configured check item's name (its default ``<check> on <dataset>`` when the
+    configuration gives none); ``None`` for schema contracts."""
     columns: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     checks: list[CheckIdentity] = Field(default_factory=list)
@@ -282,8 +288,24 @@ class RuleResult(SnapshotModel):
 
     @property
     def label(self) -> str:
-        """``rule_id`` plus the check, e.g. ``INP-003 [traffic.aadt: ge 0]``."""
-        return f"{self.rule_id} [{self.check}]" if self.check else self.rule_id
+        """Check name, dataset, item name and rule code, plus the separately graded
+        check when there is one: ``missing_periods · counts · no missing years
+        (TMP-004)``. Reports written before QAVF 0.7 keep ``TMP-004 [check]``."""
+        if self.check_name is None:
+            return f"{self.rule_id} [{self.check}]" if self.check else self.rule_id
+        parts = [self.check_name]
+        default_prefix = f"{self.check_name} on "
+        if self.datasets:
+            parts.append(", ".join(self.datasets))
+        elif self.item_name and self.item_name.startswith(default_prefix):
+            parts.append(self.item_name.removeprefix(default_prefix).replace(" and ", ", "))
+        name = self.item_name
+        if name and name != self.check_name and not name.startswith(default_prefix):
+            parts.append(name)
+        label = f"{' · '.join(parts)} ({self.rule_id})"
+        if self.check and self.check != name and not self.check.endswith(f": {name}"):
+            label += f" [{self.check}]"
+        return label
 
     @property
     def failed(self) -> bool:
@@ -331,6 +353,10 @@ class RuleInfo(SnapshotModel):
     audit_fields: ClassVar[tuple[str, ...]] = ("params",)
 
     rule_id: str
+    check_name: str | None = None
+    """The check's name in configurations (``None`` in reports before QAVF 0.7)."""
+    item_name: str | None = None
+    """The configured check item this rule instance ran for, if any."""
     severity: Severity
     params: dict[str, Any] = Field(default_factory=dict)
     """Effective parameters, defaults included."""

@@ -75,20 +75,18 @@ class ResultCollector:
         self._positions = {name: index for index, name in enumerate(settings.datasets)}
 
     def enabled(self, rule_id, dataset=None):
-        rule = self.settings.rules.get(rule_id)
-        engine = self.settings.engine
-        return (
-            (rule is None or rule.enabled)
-            and (
-                dataset is None
-                or rule is None
-                or rule.params.get("datasets") is None
-                or dataset in rule.params["datasets"]
+        """Whether ``rule_id`` reports: schema contracts always run, and the
+        ``expression``/``sql`` rules run only for configured check items."""
+        if rule_id == "INP-006":
+            specs = (
+                [self.settings.datasets[dataset]]
+                if dataset in self.settings.datasets
+                else self.settings.datasets.values()
             )
-            and (engine.run_unconfigured_rules or rule is not None)
-            and "input" not in engine.exclude_categories
-            and (engine.include_categories is None or "input" in engine.include_categories)
-        )
+            return any(spec.expressions for spec in specs)
+        if rule_id == "INP-007":
+            return bool(self.settings.assertions)
+        return rule_id != "INP-008"  # freshness checks are not native
 
     def records(self, query):
         from qavf.core.evidence import SqlEvidenceReader
@@ -109,16 +107,16 @@ class ResultCollector:
         return position, next(self._sequence)
 
     def rule_severity(self, rule_id):
-        configured = self.settings.rules.get(rule_id)
-        if configured is not None and configured.severity:
-            return Severity(configured.severity)
         return INPUT_RULES[rule_id].default_severity
 
-    def _rule_parameters(self, rule_id):
-        configured = self.settings.rules.get(rule_id)
-        if configured is None:
-            return {}
-        return {key: value for key, value in configured.params.items() if value is not None}
+    @staticmethod
+    def item_name(check_id, check, datasets, parameters):
+        """The ``expression``/``sql`` check item a result reports on, as the full backend."""
+        if check_id == "row.expression" and datasets:
+            return (parameters or {}).get("name") or f"expression on {datasets[0]}"
+        if check_id == "sql.assertion":
+            return check
+        return None
 
     def report(
         self,
@@ -179,8 +177,10 @@ class ResultCollector:
                 category=rule.category,
                 check=check,
                 check_id=check_id or rule_id,
+                check_name=rule.check_name,
+                item_name=self.item_name(check_id, check, datasets, parameters),
                 columns=list(columns),
-                parameters=redact(parameters if parameters else self._rule_parameters(rule_id)),
+                parameters=redact(parameters or {}),
                 checks=[check_identity(rule_id, **redact(dict(item))) for item in checks],
                 status=status,
                 severity=severity,
@@ -229,21 +229,6 @@ class ResultCollector:
         """Time spent on contracts that passed, for their rules' summaries."""
         for rule_id in rule_ids:
             self._elapsed[rule_id] = self._elapsed.get(rule_id, 0.0) + elapsed / len(rule_ids)
-
-    def exclusions(self):
-        """Why each input rule that does not run was left out of this run."""
-        engine, excluded = self.settings.engine, {}
-        for rule_id in INPUT_RULES:
-            rule = self.settings.rules.get(rule_id)
-            if rule is None and not engine.run_unconfigured_rules:
-                excluded[rule_id] = "not configured (run_unconfigured_rules: false)"
-            elif rule is not None and not rule.enabled:
-                excluded[rule_id] = "disabled in the configuration"
-            elif engine.include_categories is not None and "input" not in engine.include_categories:
-                excluded[rule_id] = "category 'input' not in engine.include_categories"
-            elif "input" in engine.exclude_categories:
-                excluded[rule_id] = "category 'input' in engine.exclude_categories"
-        return excluded
 
     def mark(self):
         """A point to roll back to when a stage's results must be discarded."""

@@ -92,9 +92,7 @@ def check_optional_capability_error() -> None:
     try:
         validate(
             pa.table({"v": [1]}),
-            config={
-                "rules": {"STA-002": {"enabled": True}},
-            },
+            config={"checks": [{"check": "coverage", "entity": "v"}]},
         )
     except ImportError as exc:
         require("qavf[polars]" in str(exc), "missing backend error lacks actionable guidance")
@@ -119,7 +117,7 @@ def check_shared_services() -> None:
     report = validate(
         BatchSource(batches, pa.schema([("v", pa.int64())])),
         schema={"primary_key": ["v"]},
-        config={"engine": {"require": ["INP-004"]}},
+        config={"run": {"require": ["data"]}},
     )
     require(
         report.verdict() == "passed" and events == ["open", "close"],
@@ -127,7 +125,21 @@ def check_shared_services() -> None:
     )
     report = validate(
         pa.table({"v": [1]}),
-        config={"engine": {"require": ["INP-004"]}, "rules": {"INP-004": {"enabled": False}}},
+        config={
+            "datasets": {
+                "data": {
+                    "checks": [
+                        {
+                            "check": "expression",
+                            "expr": "v > 0",
+                            "name": "positive",
+                            "enabled": False,
+                        }
+                    ]
+                }
+            },
+            "run": {"require": ["positive"]},
+        },
     )
     require(report.verdict() == "incomplete", "a disabled required check was accepted")
     with TemporaryDirectory() as directory:

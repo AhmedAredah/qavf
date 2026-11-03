@@ -54,6 +54,8 @@ class DataRequirements:
 
 @dataclass(frozen=True, slots=True)
 class _RuleDependencies:
+    key: str
+    """The rule instance's key: its check item, or its rule id."""
     rule_id: str
     requirements: DataRequirements
     mode: str
@@ -63,16 +65,16 @@ class ExecutionPlan:
     """Thread-safe reference counts released only after actual rule completion."""
 
     def __init__(self, dependencies: Sequence[_RuleDependencies]) -> None:
-        self._rules = {entry.rule_id: entry for entry in dependencies}
+        self._rules = {entry.key: entry for entry in dependencies}
         if len(self._rules) != len(dependencies):
-            raise ValueError("an execution plan cannot repeat rule IDs")
+            raise ValueError("an execution plan cannot repeat rule instances")
         self._remaining: Counter[str] = Counter(
             name for entry in dependencies for name in entry.requirements.datasets
         )
         self._completed: set[str] = set()
         self._lock = threading.Lock()
 
-    def complete(self, rule_id: str) -> set[str]:
+    def complete(self, key: str) -> set[str]:
         """Datasets whose last planned consumer just stopped executing.
 
         Calling this twice is harmless. A timeout notification is not completion
@@ -80,10 +82,10 @@ class ExecutionPlan:
         worker's ``finally`` block, not the reporting/deadline thread.
         """
         with self._lock:
-            if rule_id in self._completed:
+            if key in self._completed:
                 return set()
-            entry = self._rules[rule_id]
-            self._completed.add(rule_id)
+            entry = self._rules[key]
+            self._completed.add(key)
             released = set()
             for name in entry.requirements.datasets:
                 self._remaining[name] -= 1
@@ -128,7 +130,7 @@ def build_plan(
         else:
             requirements = DataRequirements(universe | frozenset(rule.requires))
             mode = "opaque"
-        dependencies.append(_RuleDependencies(rule.rule_id, requirements, mode))
+        dependencies.append(_RuleDependencies(rule.key, rule.rule_id, requirements, mode))
     return ExecutionPlan(dependencies)
 
 

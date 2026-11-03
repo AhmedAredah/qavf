@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from operator import attrgetter
 from types import MappingProxyType
 
 from pydantic import ValidationError
@@ -59,18 +60,11 @@ class RulePlan:
     """
 
     rules: tuple[Rule, ...]
-    needs_configuration: Mapping[str, tuple[str, ...]]
     excluded: Mapping[str, str]
+    """Disabled check items, by item name, with the reason."""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "rules", tuple(self.rules))
-        object.__setattr__(
-            self,
-            "needs_configuration",
-            MappingProxyType(
-                {key: tuple(value) for key, value in self.needs_configuration.items()}
-            ),
-        )
         object.__setattr__(self, "excluded", MappingProxyType(dict(self.excluded)))
 
 
@@ -93,94 +87,52 @@ def compile_rules(
 def _compile_rules(
     settings: QAVFSettings, registry: RuleRegistry, sources: SourceRegistry
 ) -> RulePlan:
+    # Imported here: the check catalog imports the built-in rule implementations.
+    from qavf.checks.catalog import CONTRACT_RULES
+    from qavf.checks.compiler import CheckCompilationError, compile_checks
+
     check_config_keys(settings)
-    engine = settings.engine
     check_required_plugins(settings, registry, sources)
-    unknown = sorted(set(settings.rules) - {rule.rule_id for rule in registry})
-    if unknown:
-        raise ConfigurationError(
-            f"configuration refers to unknown rule id(s): {', '.join(unknown)}. "
-            f"Run 'qavf list-rules' to see what is available (plugins must be installed)."
-        )
-
-    known = set(registry.categories())
-    requested = set(engine.include_categories or ()) | set(engine.exclude_categories)
-    if requested - known:
-        raise ConfigurationError(
-            f"unknown categor{'y' if len(requested - known) == 1 else 'ies'} in engine "
-            f"filters: {', '.join(sorted(requested - known))}; "
-            f"known: {', '.join(sorted(known)) or 'none'}"
-        )
-
-    required = {required_rule(entry) for entry in engine.require}
-    unknown_required = sorted(required - {rule.rule_id for rule in registry})
-    if unknown_required:
-        raise ConfigurationError(
-            f"engine.require names unknown rule id(s): {', '.join(unknown_required)}"
-        )
+    try:
+        compiled = compile_checks(settings, registry)
+    except CheckCompilationError as exc:
+        raise ConfigurationError(str(exc)) from None
 
     planned: list[Rule] = []
-    needs_configuration: dict[str, list[str]] = {}
     excluded: dict[str, str] = {}
-    for rule_cls in registry:
-        override = settings.rules.get(rule_cls.rule_id)
-        if override is None and not engine.run_unconfigured_rules:
-            excluded[rule_cls.rule_id] = "not configured (run_unconfigured_rules: false)"
+    # Schema contracts always run; they come from each dataset's schema.
+    planned.extend(registry.get(rule_id)() for rule_id in CONTRACT_RULES if rule_id in registry)
+    list_driven: set[str] = set()
+    for check in compiled:
+        if not check.enabled:
+            excluded[check.name] = "disabled in the configuration"
+        if check.definition.list_driven:
+            if check.enabled:
+                list_driven.add(check.rule_id)
             continue
-        if override is not None and not override.enabled:
-            excluded[rule_cls.rule_id] = "disabled in the configuration"
-            # Parameters given for a disabled rule are still checked, so a typo is
-            # caught now rather than when the rule is switched on.
-            if "params" in override.model_fields_set:
-                try:
-                    rule_cls.Params.model_validate(override.params)
-                except ValidationError as exc:
-                    raise ConfigurationError(
-                        f"invalid parameters for disabled rule {rule_cls.rule_id}: "
-                        f"{exception_details(exc)}"
-                    ) from None
-            continue
-        if engine.include_categories is not None and (
-            rule_cls.category not in engine.include_categories
-        ):
-            excluded[rule_cls.rule_id] = (
-                f"category {rule_cls.category!r} not in engine.include_categories"
-            )
-            continue
-        if rule_cls.category in engine.exclude_categories:
-            excluded[rule_cls.rule_id] = (
-                f"category {rule_cls.category!r} in engine.exclude_categories"
-            )
-            continue
+        if not check.enabled and not check.item.settings:
+            continue  # switched off before any settings were given
         try:
-            planned.append(
-                rule_cls(
-                    params=override.params if override else None,
-                    severity=override.severity if override else None,
-                )
-            )
+            rule = check.rule()
         except ValidationError as exc:
-            if override is None:
-                # Discovered but never configured, and it has required parameters
-                # (typically a plugin rule): it cannot apply until configured. An
-                # installed plugin must not break configurations that ignore it.
-                needs_configuration[rule_cls.rule_id] = sorted(
-                    str(error["loc"][0]) for error in exc.errors() if error["loc"]
-                )
-                continue
             raise ConfigurationError(
-                f"invalid parameters for rule {rule_cls.rule_id}: {exception_details(exc)}"
+                f"invalid settings for {check.placed.path} ({check.check}): "
+                f"{exception_details(exc)}"
             ) from None
+        if check.enabled:
+            planned.append(rule)
+    # Row expressions and SQL checks are evaluated together, each with its item's
+    # severity and name.
+    planned.extend(registry.get(rule_id)() for rule_id in sorted(list_driven))
+    planned.sort(key=attrgetter("rule_id"))
     problems = [
-        f"{rule.rule_id}: {problem}"
+        f"{rule.key}: {problem}"
         for rule in planned
         for problem in rule.configuration_errors(settings)
     ]
     if problems:
         raise ConfigurationError("; ".join(problems))
-    return RulePlan(
-        tuple(planned), {key: tuple(value) for key, value in needs_configuration.items()}, excluded
-    )
+    return RulePlan(tuple(planned), excluded)
 
 
 def check_config_keys(settings: QAVFSettings) -> None:
@@ -231,13 +183,3 @@ def check_required_plugins(
     if problems:
         detail = "; ".join(f"{name}: {state}" for name, state in sorted(problems.items()))
         raise ConfigurationError(f"required plugin(s) not available: {detail}")
-
-
-def required_rule(entry: str) -> str:
-    return entry.split("[", 1)[0].strip()
-
-
-def required_check(entry: str) -> str | None:
-    if "[" not in entry or not entry.rstrip().endswith("]"):
-        return None
-    return entry.split("[", 1)[1].rstrip()[:-1]

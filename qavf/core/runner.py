@@ -13,6 +13,7 @@ import duckdb
 
 from qavf import input_rules as wording
 from qavf._version import __version__
+from qavf.checks.requirements import Requirements, input_rule_description
 from qavf.core.checks import DatasetChecks
 from qavf.core.configuration import prepare
 from qavf.core.evidence import FileRows
@@ -87,9 +88,7 @@ def _must_assess(out, rule_id, name, spec):
     Required datasets, and datasets a rule was explicitly pointed at, must be
     assessed; an optional dataset that is simply absent is not an error.
     """
-    rule = out.settings.rules.get(rule_id)
-    selection = rule.params.get("datasets") if rule is not None else None
-    return spec.required or (selection is not None and name in selection)
+    return bool(spec.required)
 
 
 def _unavailable(out, name, spec, reason):
@@ -140,6 +139,10 @@ def _unavailable(out, name, spec, reason):
                 parameters=expression.model_dump(mode="python"),
                 severity=expression.severity,
             )
+
+
+def _input_rule(rule_id):
+    return input_rule_description(rule_id) if rule_id in INPUT_RULES else None
 
 
 def _referenced(settings, sql):
@@ -439,7 +442,7 @@ class NativeRunner:
         from qavf.audit_codec import canonical_digest
         from qavf.core.connections import SourceConnections
         from qavf.core.planning import NativePlan
-        from qavf.core.provenance import environment, requirements
+        from qavf.core.provenance import environment
         from qavf.engine.thread_budget import connection_threads
         from qavf.reports.models import RuleInfo
         from qavf.resource_plan import ResourcePlan
@@ -525,12 +528,15 @@ class NativeRunner:
             self._release(reader, retained)
             out.finish(INPUT_RULES)
         config = redact(settings.model_dump(mode="python", by_alias=True))
-        results = requirements(out.results, settings.engine.require, out.exclusions())
+        results = Requirements(
+            settings, _input_rule, {rule.check_name: rule.rule_id for rule in INPUT_RULES.values()}
+        ).apply(out.results)
         rules = [
             RuleInfo(
                 rule_id=rule_id,
+                check_name=INPUT_RULES[rule_id].check_name,
                 severity=next(result.severity for result in results if result.rule_id == rule_id),
-                params=settings.rules[rule_id].params if rule_id in settings.rules else {},
+                params={},
                 module="qavf.core.checks",
                 distribution=f"qavf=={__version__}",
             )
@@ -551,8 +557,8 @@ class NativeRunner:
                 finished_at=datetime.now(UTC),
                 datasets=self.datasets,
                 config_path=str(settings.source_path) if settings.source_path else None,
-                fail_on=settings.engine.fail_on,
-                fail_on_incomplete=settings.engine.fail_on_incomplete,
+                fail_on=settings.run.fail_on,
+                fail_on_incomplete=settings.run.fail_on_incomplete,
                 cancelled=self.control is not None and self.control.cancelled,
                 config=config,
                 config_digest=canonical_digest(config),

@@ -49,6 +49,26 @@ datasets:
         count_type: {dtype: str, isin: [permanent, portable]}
     foreign_keys:
       - {columns: [site_id], ref_dataset: sites}
+    # Checks of this dataset. `qavf list-checks` lists every check and its settings.
+    checks:
+      - check: change_rate            # period-over-period change
+        series: {value: aadt, group_by: [site_id], time_column: year}
+        max: 0.15                     # 15 % per year
+      - check: trend                  # trend direction (needs qavf[stats])
+        series: {value: aadt, group_by: [site_id], time_column: year}
+        expect: increasing
+        tags: [stats]
+      - check: trend_outliers         # off-trend years (needs qavf[stats])
+        series: {value: aadt, group_by: [site_id], time_column: year}
+        tags: [stats]
+      - check: missing_periods
+        name: no missing years
+        series: {value: aadt, group_by: [site_id], time_column: year}
+        expected: [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+      - check: matches_baseline       # compare with the accepted counts
+        path: baseline/counts.csv
+        keys: [site_id, year]
+        rtol: 1.0e-9
 
   crashes:
     description: Annual crashes per site, from a Parquet file.
@@ -60,96 +80,55 @@ datasets:
         fatal: {dtype: int, ge: 0}
     foreign_keys:
       - {columns: [site_id], ref_dataset: sites}
-    expressions:
-      - {expr: fatal <= crashes, name: fatal within total}
+    checks:
+      - {check: expression, expr: fatal <= crashes, name: fatal within total}
       # Expressions may query other datasets by name:
-      - expr: year IN (SELECT year FROM counts)
+      - check: expression
+        expr: year IN (SELECT year FROM counts)
         name: year has counts
         severity: WARNING
+      - check: entity_outliers        # sites whose crash rate is an outlier
+        metric:
+          value: crashes
+          entity: site_id
+          group_by: [year]
+          normalize_by: {dataset: counts, value: aadt}
+        method: modified_zscore
+        min_entities: 5
+      - check: group_comparison       # site vs. its region
+        metric:
+          value: crashes
+          entity: site_id
+          group_by: [year]
+          normalize_by: {dataset: counts, value: aadt}
+        max_ratio: 1.6
+        groups:
+          North: [S01, S02, S03, S04, S05, S06]
+          South: [S07, S08, S09, S10, S11, S12]
 
 # Databases attached for `database` and `query` sources.
 connections:
   inventory: {type: duckdb, path: data/sites.duckdb}
 
-# SQL that returns offending rows, across any datasets.
-assertions:
-  - name: every site has counts
+# ---------------------------------------------------------------------------
+# Checks relating several datasets. Only configured checks run.
+# ---------------------------------------------------------------------------
+checks:
+  - check: sql                      # SQL that returns offending rows
+    name: every site has counts
     severity: WARNING
     sql: |
       SELECT s.site_id FROM sites s
       WHERE s.site_id NOT IN (SELECT site_id FROM counts)
+  - check: coverage
+    name: every site in every year
+    datasets: [counts, crashes]
+    entity: site_id
+    time_column: year
+    reference: sites                # the authoritative list of sites
 
-# ---------------------------------------------------------------------------
-# Rules: everything runs with defaults unless configured here.
-# ---------------------------------------------------------------------------
-rules:
-  TMP-001:                          # period-over-period change
-    params:
-      max_change_rate: 0.15         # 15 % per year
-      series:
-        - {dataset: counts, value: aadt, group_by: [site_id], time_column: year}
-
-  TMP-002:                          # trend direction
-    params:
-      series:
-        - {dataset: counts, value: aadt, group_by: [site_id], time_column: year,
-           expected_trend: increasing}
-
-  TMP-003:                          # off-trend years (needs qavf[stats])
-    params:
-      series:
-        - {dataset: counts, value: aadt, group_by: [site_id], time_column: year}
-
-  TMP-004:                          # missing years
-    params:
-      expected_periods: [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
-      series:
-        - {dataset: counts, value: aadt, group_by: [site_id], time_column: year}
-
-  SPA-001:                          # sites whose crash rate is an outlier
-    params:
-      method: modified_zscore
-      min_entities: 5
-      metrics:
-        - dataset: crashes
-          value: crashes
-          entity_column: site_id
-          group_by: [year]
-          normalize_by: {dataset: counts, value: aadt}
-
-  SPA-002:                          # site vs. its region
-    params:
-      max_ratio: 1.6
-      groups:
-        North: [S01, S02, S03, S04, S05, S06]
-        South: [S07, S08, S09, S10, S11, S12]
-      metrics:
-        - dataset: crashes
-          value: crashes
-          entity_column: site_id
-          group_by: [year]
-          normalize_by: {dataset: counts, value: aadt}
-
-  SPA-003:                          # every site in every year
-    params:
-      entity_column: site_id
-      time_column: year
-      reference_dataset: sites      # the authoritative list of sites
-      datasets: [counts, crashes]
-
-  STA-001:
-    enabled: false                  # nothing configured for generic outlier scans
-
-  REG-001:                          # compare with the accepted counts
-    params:
-      rtol: 1.0e-9
-      baselines:
-        - {dataset: counts, path: baseline/counts.csv, keys: [site_id, year]}
+run:
+  fail_on: ERROR
 
 engine:
   parallel: true
-  fail_on: ERROR
-
-report:
-  title: Traffic Monitoring QA
-  output_dir: qa_output

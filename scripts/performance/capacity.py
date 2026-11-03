@@ -9,6 +9,7 @@ from typing import Any
 import polars as pl
 
 from qavf import Status, validate
+from qavf.migrate import Migrator
 
 from .models import PreparedWorkload, WorkloadOptions
 from .policy import resources
@@ -93,12 +94,19 @@ def build_workload(
             "threshold": 3,
             "min_group_size": 8,
         }
-    config = {
-        "plugins": {"entry_points": False},
-        "engine": {"parallel": False, "run_unconfigured_rules": False},
-        "rules": {rule: {"params": params}},
-        "datasets": {name: {} for name in inputs},
-    }
+    # The workload is defined by rule parameters; convert them to check items.
+    config = (
+        Migrator()
+        .migrate(
+            {
+                "plugins": {"entry_points": False},
+                "engine": {"parallel": False},
+                "rules": {rule: {"params": params}},
+                "datasets": {name: {} for name in inputs},
+            }
+        )
+        .config
+    )
     policy = resources(work_dir / "temporary", options)
 
     def verify(report):

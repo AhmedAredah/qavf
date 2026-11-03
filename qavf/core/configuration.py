@@ -6,11 +6,11 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from qavf.checks.legacy import reject_legacy
+from qavf.checks.placement import ROW_CHECKS, placed_items
 from qavf.inputs.descriptors import Dataset
 from qavf.optional import unsupported
 from qavf.settings import DatasetSpec, QAVFSettings, SchemaSpec, _read_config_mapping
-
-SUPPORTED_RULES = frozenset(f"INP-{n:03d}" for n in (*range(1, 8), 9))
 
 
 def prepare(data, schema, config, resources, profile):
@@ -26,8 +26,10 @@ def prepare(data, schema, config, resources, profile):
         }
     elif isinstance(config, str | os.PathLike):
         raw, source_path = _read_config_mapping(Path(config))
+        reject_legacy(raw, str(source_path))
     elif config is None or isinstance(config, Mapping):
         raw = dict(config or {})
+        reject_legacy(raw)
     else:
         raise TypeError("config must be settings, a configuration mapping, or a YAML/JSON path")
     configured = dict(raw.get("datasets", {}))
@@ -91,23 +93,9 @@ def prepare(data, schema, config, resources, profile):
 
 def _capabilities(settings):
     """Never omit configured work because its optional implementation is absent."""
-    for rule_id, rule in settings.rules.items():
-        if rule.enabled and rule_id not in SUPPORTED_RULES:
-            unsupported(f"rule {rule_id}")
-        if rule.enabled and rule.params:
-            allowed = (
-                {"datasets"}
-                if rule_id in {"INP-002", "INP-003", "INP-004", "INP-005", "INP-006", "INP-009"}
-                else set()
-            )
-            if rule.params.keys() - allowed:
-                unsupported(f"custom parameters for {rule_id}")
-            selected = rule.params.get("datasets")
-            if selected is not None and (
-                not isinstance(selected, list | tuple)
-                or any(name not in settings.datasets for name in selected)
-            ):
-                raise ValueError(f"{rule_id}.datasets must list configured dataset names")
+    for placed in placed_items(settings):
+        if placed.item.enabled and placed.item.check not in ROW_CHECKS:
+            unsupported(f"the {placed.item.check} check")
     plugins = settings.plugins
     if plugins.modules or plugins.paths or plugins.required or plugins.packages != ["qavf.rules"]:
         unsupported("custom rule/source plugins")

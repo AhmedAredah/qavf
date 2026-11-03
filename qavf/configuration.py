@@ -150,8 +150,11 @@ def read_config_mapping(path: str | Path) -> tuple[dict[str, Any], Path]:
     return parse_config_text(source.read_text(encoding="utf-8"), source), source
 
 
-def parse_config_text(text: str, source: Path) -> dict[str, Any]:
-    """Parse configuration text as the content of ``source`` (its suffix picks the format)."""
+def parse_config_text(text: str, source: Path, *, expand: bool = True) -> dict[str, Any]:
+    """Parse configuration text as the content of ``source`` (its suffix picks the format).
+
+    ``expand=False`` keeps ``${NAME}`` references unexpanded (for rewriting a file).
+    """
     match source.suffix.lower():
         case ".yaml" | ".yml":
             try:
@@ -176,6 +179,8 @@ def parse_config_text(text: str, source: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"{source}: top level of the configuration must be a mapping")
     raw.pop("$schema", None)
+    if not expand:
+        return raw
     result: dict[str, Any] = expand_env(raw)
     return result
 

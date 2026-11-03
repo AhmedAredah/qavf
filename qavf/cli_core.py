@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, create_model
+from pydantic import Field, create_model
 
 from qavf.capabilities import CORE_RULE_IDS
+from qavf.checks.items import ExpressionItem, SqlItem
+from qavf.checks.listing import NATIVE_PLACEMENT, ListedCheck
 from qavf.engine.severity import Severity
 from qavf.input_rules import INPUT_RULES
 from qavf.optional import unsupported
@@ -39,48 +41,42 @@ def core_rules(settings: QAVFSettings) -> tuple[CoreRule, ...]:
     return _RULES
 
 
-class _NoParams(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class _DatasetParams(_NoParams):
-    datasets: list[str] | None = None
+def core_checks(settings: QAVFSettings) -> tuple[ListedCheck, ...]:
+    """The native backend's checks: schema contracts plus ``expression`` and ``sql``."""
+    return tuple(
+        ListedCheck(
+            check_name=rule.check_name,
+            rule_id=rule.rule_id,
+            placement=NATIVE_PLACEMENT.get(rule.rule_id, "schema"),
+            category=rule.category,
+            default_severity=rule.default_severity.value,
+            name=rule.name,
+            description=rule.description,
+            module="qavf.core.checks",
+        )
+        for rule in (INPUT_RULES[core.rule_id] for core in core_rules(settings))
+    )
 
 
 def config_json_schema(settings: QAVFSettings) -> dict[str, Any]:
     """Describe native configuration without constructing or opening sources.
 
-    The catalog only restricts rule and source vocabulary. Cross-field policy,
-    SQL safety and backend admission checks are performed at validation time.
+    The catalog only restricts check and source vocabulary: the native backend
+    runs the schema contracts plus ``expression`` and ``sql`` checks. Cross-field
+    policy, SQL safety and backend admission checks are performed at validation time.
     """
-    rules = core_rules(settings)
-    strict = ConfigDict(extra="forbid", populate_by_name=True)
-    fields: dict[str, Any] = {}
-    for rule in rules:
-        params = _NoParams if rule.rule_id in {"INP-001", "INP-007"} else _DatasetParams
-        model_name = "NativeRule_" + rule.rule_id.replace("-", "_")
-        model = create_model(
-            model_name,
-            __config__=strict,
-            enabled=(bool, True),
-            severity=(Severity | None, None),
-            params=(params, Field(default_factory=params)),
-        )
-        fields[rule.rule_id.replace("-", "_")] = (
-            model,
-            Field(default_factory=model, alias=rule.rule_id, description=rule.description),
-        )
-    rule_model = create_model("NativeRules", __config__=strict, **fields)
+    core_rules(settings)
     dataset_model = create_model(
         "NativeDataset",
         __base__=DatasetSpec,
         source=(FileParams | QueryParams | DatabaseParams | None, Field(default=None)),
+        checks=(list[ExpressionItem], Field(default_factory=list)),
     )
     root = create_model(
         "NativeQAVFConfig",
         __base__=QAVFSettings,
         datasets=(dict[str, dataset_model], Field(default_factory=dict)),
-        rules=(rule_model, Field(default_factory=rule_model)),
+        checks=(list[SqlItem], Field(default_factory=list)),
     )
     schema = root.model_json_schema(by_alias=True)
     schema["properties"].pop("source_path", None)

@@ -37,7 +37,7 @@ from qavf import DataContext, Finding, Rule, RuleParams, Severity
 
 
 class ShareParams(RuleParams):
-    """Parameters; validated from `rules.ACME-002.params` in the configuration."""
+    """Settings of a `{check: heavy_share, max_share: 0.3}` item in the configuration."""
 
     max_share: float = Field(default=0.25, gt=0, le=1)
     """Largest acceptable share. Attribute docstrings become schema descriptions."""
@@ -45,6 +45,7 @@ class ShareParams(RuleParams):
 
 class HeavyShareRule(Rule):
     rule_id: ClassVar[str] = "ACME-002"
+    check_name: ClassVar[str] = "heavy_share"  # what configurations write; must be unique
     name: ClassVar[str] = "Heavy-vehicle share"
     description: ClassVar[str] = "The heavy-vehicle share of traffic stays below a ceiling."
     category: ClassVar[str] = "acme"
@@ -391,7 +392,7 @@ acme = "qavf_acme.rules"        # a module (scanned) or a single Rule class
 acme = "qavf_acme.sources"
 ```
 
-Once installed, `qavf list-rules` shows the rules and `qavf schema` / `qavf init`
+Once installed, `qavf list-checks` shows the rules and `qavf schema` / `qavf init`
 include their parameters. `qavf.docgen.rules_markdown(registry)` generates a
 reference page for your rules.
 

@@ -146,7 +146,7 @@ def _parser() -> argparse.ArgumentParser:
         "--json", type=Path, help="JSON report path (default: <output_dir>/qa_report.json)"
     )
     run.add_argument(
-        "--fail-on", type=Severity, choices=list(Severity), help="override engine.fail_on"
+        "--fail-on", type=Severity, choices=list(Severity), help="override run.fail_on"
     )
     run.add_argument("--no-parallel", action="store_true", help="run rules sequentially")
     run.add_argument(
@@ -198,10 +198,26 @@ def _parser() -> argparse.ArgumentParser:
     profile.add_argument("--margin", type=_margin, default=0.0, help="fraction of the range (>= 0)")
     profile.add_argument("--max-categories", type=int, default=20)
 
-    rules = commands.add_parser("list-rules", help="list discovered rules")
-    rules.add_argument("-c", "--config", type=Path, help="configuration (for plugin discovery)")
-    rules.add_argument("--format", choices=["table", "markdown", "json"], default="table")
-    rules.add_argument("--backend", choices=["auto", "duckdb", "polars"], default="auto")
+    checks = commands.add_parser("list-checks", help="list the checks a configuration can use")
+    checks.add_argument("-c", "--config", type=Path, help="configuration (for plugin discovery)")
+    checks.add_argument("--format", choices=["table", "markdown", "json"], default="table")
+    checks.add_argument("--backend", choices=["auto", "duckdb", "polars"], default="auto")
+
+    migrate = commands.add_parser(
+        "migrate", help="convert a QAVF 0.6 configuration (rules by code) to named checks"
+    )
+    migrate.add_argument("config", type=Path, help="configuration to convert")
+    migrate.add_argument("-o", "--output", type=Path, help="write here (default: stdout)")
+    migrate.add_argument(
+        "--check",
+        action="store_true",
+        help="report what would change without writing; exit 1 if anything would",
+    )
+    migrate.add_argument(
+        "--drop-disabled",
+        action="store_true",
+        help="leave out rules that were disabled instead of keeping them with enabled: false",
+    )
 
     capabilities = commands.add_parser("capabilities", help="show backend capabilities as JSON")
     capabilities.add_argument(
@@ -327,7 +343,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.no_parallel:
         settings.engine.parallel = False
     if args.fail_on:
-        settings.engine.fail_on = args.fail_on
+        settings.run.fail_on = args.fail_on
 
     output_dir = settings.resolve(settings.report.output_dir)
     html_path = args.html
@@ -356,7 +372,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             _use("QARunner")
             control = RunControl(on_event, token) if in_process else None
             report = QARunner(settings).run(control=control)
-    fail_on = settings.engine.fail_on
+    fail_on = settings.run.fail_on
     with protected.publication():
         written = []
         if html_path is not None:
@@ -484,7 +500,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     # writes protect individual files; destination planning prevents self-overwrite.
     for destination, content in artifacts:
         atomic_write(destination, content)
-    print(f"Configuration written: {output} ({len(registry)} rules)")
+    print(f"Configuration written: {output}")
     if not args.no_schema:
         print(f"JSON Schema written: {schema_path}")
     return EXIT_OK
@@ -519,40 +535,69 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _cmd_list_rules(args: argparse.Namespace) -> int:
-    rules: Sequence[Any]
+def _cmd_list_checks(args: argparse.Namespace) -> int:
     settings = _settings(args.config)
     if _native(args):
-        from qavf.cli_core import core_rules
+        from qavf.cli_core import core_checks
 
-        rules = core_rules(settings)
+        checks = core_checks(settings)
     else:
         _use("build_registry")
-        rules = list(build_registry(settings))
+        from qavf.checks.listing import listed_checks
+
+        checks = listed_checks(build_registry(settings))
     if args.format == "json":
-        payload = [
-            {
-                "rule_id": r.rule_id,
-                "name": r.name,
-                "category": r.category,
-                "default_severity": r.default_severity.value,
-                "description": r.description,
-                "module": r.__module__,
-            }
-            for r in rules
-        ]
-        print(json.dumps(payload, indent=2))
+        print(json.dumps([check.to_dict() for check in checks], indent=2))
     elif args.format == "markdown":
-        print("| ID | Category | Default severity | Name | Description |")
-        print("|---|---|---|---|---|")
-        for r in rules:
-            cells = [r.rule_id, r.category, r.default_severity.value, r.name, r.description]
+        print("| Check | Code | Where | Default severity | Name | Description |")
+        print("|---|---|---|---|---|---|")
+        for check in checks:
+            cells = [
+                f"`{check.check_name}`",
+                check.rule_id,
+                check.placement,
+                check.default_severity,
+                check.name,
+                check.description,
+            ]
             print("| " + " | ".join(cells) + " |")
     else:
-        print(f"{'ID':<12} {'CATEGORY':<12} {'SEVERITY':<9} NAME")
-        for r in rules:
-            print(f"{r.rule_id:<12} {r.category:<12} {r.default_severity.value:<9} {r.name}")
-        print(f"\n{len(rules)} rules.")
+        print(f"{'CHECK':<18} {'CODE':<9} {'WHERE':<9} {'SEVERITY':<9} NAME")
+        for check in checks:
+            print(
+                f"{check.check_name:<18} {check.rule_id:<9} {check.placement:<9} "
+                f"{check.default_severity:<9} {check.name}"
+            )
+        print(
+            f"\n{len(checks)} checks. 'schema' checks run from each dataset's schema; "
+            "the others are configured in 'checks' lists."
+        )
+    return EXIT_OK
+
+
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    from qavf.migrate import migrate_text
+
+    source = args.config.resolve()
+    migration, text = migrate_text(
+        source.read_text(encoding="utf-8"), source, drop_disabled=args.drop_disabled
+    )
+    if args.check:
+        if not migration.changed:
+            print(f"{args.config}: already uses named checks")
+            return EXIT_OK
+        print(f"{args.config}: would change:")
+        for note in migration.notes:
+            print(f"  - {note}")
+        return EXIT_QA_FAILED
+    if args.output is None:
+        sys.stdout.write(text)
+    else:
+        _use("atomic_write")
+        atomic_write(args.output, text)
+        print(f"Configuration written: {args.output}")
+    for note in migration.notes:
+        print(f"  - {note}", file=sys.stderr)
     return EXIT_OK
 
 
@@ -704,7 +749,8 @@ _COMMANDS = {
     "init": _cmd_init,
     "schema": _cmd_schema,
     "profile": _cmd_profile,
-    "list-rules": _cmd_list_rules,
+    "list-checks": _cmd_list_checks,
+    "migrate": _cmd_migrate,
     "compare": _cmd_compare,
     "compare-datasets": _cmd_compare_datasets,
     "baseline": _cmd_baseline,

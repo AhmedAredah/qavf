@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### 0.7.0 (in development): named checks
+
+These changes break existing configurations. Convert a configuration once with
+`qavf migrate old.yaml -o new.yaml` (`--check` shows what would change).
+
+- **Checks are configured by name, next to the data they test.** A dataset's
+  `checks` list and a top-level `checks` list replace `rules: {TMP-001: ...}`:
+  `{check: change_rate, series: {value: aadt, group_by: [site_id], time_column: year}, max: 0.15}`.
+  Every item takes `name`, `severity`, `where`, `tags`, `enabled` and `description`;
+  two items of the same check keep their own severity and name. `qavf list-checks`
+  (replacing `list-rules`) lists the checks, their rule codes and settings.
+- Row expressions are `check: expression` items and SQL assertions top-level
+  `check: sql` items; the `expressions` and `assertions` sections are removed.
+  Baselines are `matches_baseline` items and comparisons top-level `compare` items.
+- **Only configured checks run.** Schema contracts (columns, keys, foreign keys)
+  always run; `engine.run_unconfigured_rules`, `include_categories` and
+  `exclude_categories` are removed.
+- `engine.fail_on`, `fail_on_incomplete` and `require` move to a new `run`
+  section; `require` lists check names or dataset names.
+- Reports keep `rule_id` and `check_id` and add `check_name` and `item_name`;
+  labels read `missing_periods · counts · no missing years (TMP-004)`. Reports
+  from earlier versions still load.
+- A configuration written for 0.6 fails with an error naming its first old
+  setting and `qavf migrate`.
+- Plugins declare a `check_name` beside their `rule_id`; a missing or repeated
+  check name is a registration error.
+- `Dataset(..., expressions=...)` is now `Dataset(..., checks=...)`.
+
 ### Added
 
 - Progress events and cancellation: `validate(..., on_event=..., cancel=...)`

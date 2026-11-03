@@ -7,6 +7,7 @@ model, and implement :meth:`Rule.evaluate`::
 
     class NoNegativeVmt(Rule):
         rule_id = "CUSTOM-001"
+        check_name = "no_negative_vmt"
         name = "No negative VMT"
         description = "VMT must never be negative."
         category = "custom"
@@ -21,6 +22,10 @@ model, and implement :meth:`Rule.evaluate`::
 
 A rule may also return a list of findings, one per independent check, each
 with its own ``check`` label and optionally its own ``severity``.
+
+``check_name`` is what configurations write (``{check: no_negative_vmt}``) and
+must be unique among all installed rules. Each configured check item becomes one
+rule instance, bound to the item by :meth:`Rule.bind`.
 
 Any concrete ``Rule`` subclass defined in a scanned module is registered; no
 decorator or manual list is required. Modules whose name starts with an
@@ -175,6 +180,22 @@ class Finding:
         return cls(passed=False, message=message, assessed=False, **kwargs)
 
 
+@dataclass(frozen=True, slots=True)
+class CheckBinding:
+    """The configured check item a rule instance runs for."""
+
+    key: str
+    """Unique within a run: the item's location, e.g. ``datasets.counts.checks[2]``."""
+    check: str
+    """The check name, e.g. ``missing_periods``."""
+    name: str
+    """The item's name (its default ``<check> on <dataset>`` when not given)."""
+    datasets: tuple[str, ...] = ()
+    """The dataset the item is placed on, or the datasets a top-level item relates."""
+    tags: tuple[str, ...] = ()
+    description: str | None = None
+
+
 class Rule[P: RuleParams](ABC):
     """Base class for every QA rule.
 
@@ -185,6 +206,8 @@ class Rule[P: RuleParams](ABC):
 
     rule_id: ClassVar[str]
     """Stable identifier, conventionally ``PREFIX-NNN``."""
+    check_name: ClassVar[str]
+    """Name configurations use for this check (``{check: <check_name>}``)."""
     name: ClassVar[str]
     description: ClassVar[str]
     category: ClassVar[str]
@@ -209,6 +232,23 @@ class Rule[P: RuleParams](ABC):
         else:
             self.params = cast(P, self.Params.model_validate(dict(params or {})))
         self.severity = severity or self.default_severity
+        self.binding: CheckBinding | None = None
+
+    def bind(self, binding: CheckBinding) -> None:
+        """Attach the configured check item this instance runs for."""
+        self.binding = binding
+
+    @property
+    def key(self) -> str:
+        """Identifies this instance within a run: its check item, else its rule id."""
+        return self.binding.key if self.binding is not None else self.rule_id
+
+    def item_name(self, finding: Finding | None) -> str | None:
+        """Name of the check item ``finding`` belongs to (the bound item by default).
+
+        Rules that evaluate several configured items in one instance override it.
+        """
+        return self.binding.name if self.binding is not None else None
 
     def configuration_errors(self, settings: QAVFSettings) -> list[str]:
         """Problems with this rule's parameters that need the whole configuration to
@@ -238,7 +278,7 @@ class Rule[P: RuleParams](ABC):
         return f"<{type(self).__name__} {self.rule_id} severity={self.severity.value}>"
 
 
-_REQUIRED_METADATA = ("rule_id", "name", "description", "category")
+_REQUIRED_METADATA = ("rule_id", "check_name", "name", "description", "category")
 
 
 class RuleRegistry:
@@ -275,6 +315,19 @@ class RuleRegistry:
                     f"duplicate rule id {rule_cls.rule_id!r}: "
                     f"{existing.__module__}.{existing.__qualname__} and "
                     f"{rule_cls.__module__}.{rule_cls.__qualname__}"
+                )
+            clash = next(
+                (
+                    other
+                    for other in rules.values()
+                    if other.check_name == rule_cls.check_name and other.rule_id != rule_cls.rule_id
+                ),
+                None,
+            )
+            if clash is not None:
+                raise ValueError(
+                    f"duplicate check name {rule_cls.check_name!r}: rules {clash.rule_id} "
+                    f"and {rule_cls.rule_id}"
                 )
             rules[rule_cls.rule_id] = rule_cls
             origins = mapping(self, "_origins")

@@ -99,8 +99,7 @@ def _small_files(
     )
     config = {
         "plugins": {"entry_points": False},
-        "engine": {"parallel": False, "run_unconfigured_rules": False},
-        "rules": {"INP-003": {}},
+        "engine": {"parallel": False},
     }
     policy = resources(work_dir / "temporary", options)
     return PreparedWorkload(

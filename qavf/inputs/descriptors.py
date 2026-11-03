@@ -16,7 +16,8 @@ if TYPE_CHECKING:
     import polars as pl
     import pyarrow as pa
 
-from qavf.settings import DatasetSpec, ExpressionCheck, ForeignKeySpec, SchemaSpec, SourcePolicy
+from qavf.checks.items import CheckItem
+from qavf.settings import DatasetSpec, ForeignKeySpec, SchemaSpec, SourcePolicy
 from qavf.sources.base import SourceError
 from qavf.sources.formats import FileFormat
 from qavf.sources.parameters import FileParams
@@ -102,7 +103,8 @@ class Dataset:
     schema: SchemaSpec | Mapping[str, Any] | None = None
     rename: Mapping[str, str] | None = None
     foreign_keys: Sequence[ForeignKeySpec | Mapping[str, Any]] | None = None
-    expressions: Sequence[ExpressionCheck | Mapping[str, Any]] | None = None
+    checks: Sequence[CheckItem | Mapping[str, Any]] | None = None
+    """Check items of this dataset, e.g. ``{"check": "expression", "expr": "a <= b"}``."""
     load_policy: SourcePolicy | Mapping[str, Any] | None = None
     required: bool | None = None
     description: str | None = None
@@ -117,7 +119,7 @@ class Dataset:
                 "schema",
                 "rename",
                 "foreign_keys",
-                "expressions",
+                "checks",
                 "load_policy",
                 "required",
                 "description",
@@ -130,7 +132,7 @@ class Dataset:
             value = getattr(spec, "schema_spec" if name == "schema" else name)
             if name == "rename":
                 value = MappingProxyType(value)
-            elif name in ("foreign_keys", "expressions"):
+            elif name in ("foreign_keys", "checks"):
                 value = tuple(value)
             object.__setattr__(self, name, value)
 

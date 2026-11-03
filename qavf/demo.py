@@ -190,16 +190,18 @@ def stats_available() -> bool:
 def demo_config(with_stats: bool | None = None) -> str:
     """The demo project's annotated configuration (YAML text).
 
-    Without the ``stats`` extra the two trend rules that need it are disabled,
+    Without the ``stats`` extra the two trend checks that need it are disabled,
     with a note, so that a core install runs the demo to completion rather than
     reporting those configured checks as not assessed.
     """
     text = files("qavf").joinpath("demo_config.yaml").read_text(encoding="utf-8")
     if with_stats if with_stats is not None else stats_available():
         return text
-    note = "    enabled: false                # needs the stats extra: pip install 'qavf[stats]'\n"
-    for rule in ("TMP-002", "TMP-003"):
-        start = text.index(f"  {rule}:")
+    note = (
+        "        enabled: false              # needs the stats extra: pip install 'qavf[stats]'\n"
+    )
+    for check in ("trend", "trend_outliers"):
+        start = text.index(f"      - check: {check} ")
         line_end = text.index("\n", start) + 1
         text = text[:line_end] + note + text[line_end:]
     return text
