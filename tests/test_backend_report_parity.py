@@ -538,8 +538,52 @@ def _item_identity_scenario(directory: Path) -> dict[str, Any]:
     }
 
 
+def _views_scenario(directory: Path) -> dict[str, Any]:
+    """Views are filtered, projected slices both backends query alike (CFG-03)."""
+    roads = _write(directory, "roads.csv", "id,lanes,status\n1,2,open\n2,4,open\n3,0,closed\n")
+    crashes = _write(directory, "crashes.csv", "road_id\n1\n3\n")
+    return {
+        "datasets": {
+            "roads": {
+                "path": roads,
+                "schema": {"columns": {"id": {"dtype": "int"}, "lanes": {"dtype": "int"}}},
+                "views": {
+                    "active": {"where": "status = 'open'"},
+                    "ids": {"columns": ["id"], "where": "lanes > 0"},
+                    "all": {},
+                },
+            },
+            "crashes": {
+                "path": crashes,
+                "checks": [
+                    {
+                        "check": "expression",
+                        "name": "on an active road",
+                        "expr": 'road_id IN (SELECT id FROM "roads.active")',
+                    }
+                ],
+            },
+        },
+        "checks": [
+            {
+                "check": "sql",
+                "name": "active lanes",
+                "sql": 'SELECT * FROM "roads.active" WHERE lanes < 1',
+            },
+            {
+                "check": "sql",
+                "name": "closed seen",
+                "sql": "SELECT * FROM \"roads.all\" WHERE status = 'closed'",
+            },
+            {"check": "sql", "name": "ids only", "sql": 'SELECT id FROM "roads.ids" WHERE id > 2'},
+            {"check": "sql", "name": "projected", "sql": 'SELECT lanes FROM "roads.ids"'},
+        ],
+    }
+
+
 SCENARIOS = {
     "across": _across_scenario,
+    "views": _views_scenario,
     "item_identity": _item_identity_scenario,
     "named_checks": _named_checks_scenario,
     "columns": _columns_scenario,

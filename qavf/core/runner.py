@@ -19,6 +19,7 @@ from qavf.core.configuration import prepare
 from qavf.core.evidence import FileRows
 from qavf.core.results import ResultCollector
 from qavf.core.sources import InputReader
+from qavf.core.views import NativeViews
 from qavf.engine.severity import Severity, Status
 from qavf.input_rules import INPUT_RULES
 from qavf.redaction import redact, redact_text
@@ -147,8 +148,8 @@ def _input_rule(rule_id):
 
 
 def _referenced(settings, sql):
-    """Datasets an assertion reads as tables, matched case-insensitively like SQL."""
-    lookup = {name.lower(): name for name in settings.datasets}
+    """Datasets (and dataset views) an assertion reads as tables, matched like SQL."""
+    lookup = {name.lower(): name for name in (*settings.datasets, *settings.views())}
     try:
         tables = sql_table_names(sql)
     except Exception:
@@ -206,6 +207,7 @@ class NativeRunner:
         self.loaded = []
         self.unavailable = {}
         self.timings = {}
+        self.views = None
 
     def _stage(self, out, name, rule_ids, execute):
         from qavf.core.execution import Deadline
@@ -264,6 +266,8 @@ class NativeRunner:
 
     def _release(self, reader, checks):
         for executor in checks.values():
+            if self.views is not None:
+                self.views.drop(executor.data.name)
             for name in (executor.data.name, executor.expression_table, executor.typed):
                 reader.connection.execute(f"DROP VIEW IF EXISTS {qi(name)}")
             reader.release(executor.data)
@@ -358,6 +362,8 @@ class NativeRunner:
                 continue
             try:
                 checks[name] = DatasetChecks(out, loaded, spec)
+                if self.views is not None:
+                    self.views.create(name)
             except Exception as exc:
                 _blocked(out, name, _dataset_rules(spec), exc, stage="compile")
                 reader.release(loaded)
@@ -399,7 +405,7 @@ class NativeRunner:
             sql = resolve_sql_paths(
                 validate_query(assertion.sql),
                 self.settings.base_dir,
-                known_tables=self.settings.datasets,
+                known_tables=(*self.settings.datasets, *self.settings.views()),
             )
             out.connection.execute(f"CREATE TEMP TABLE {qi(snapshot)} AS {sql}")
             count = out.connection.execute(f"SELECT count(*) FROM {qi(snapshot)}").fetchone()[0]
@@ -501,6 +507,9 @@ class NativeRunner:
             )
             out = ResultCollector(con, settings)
             plan = NativePlan.build(settings, out, self.inputs)
+            # Only SQL names a view, and the plan reads every column whenever SQL runs.
+            if settings.views() and all(cols is None for cols in plan.projections.values()):
+                self.views = NativeViews(con, settings)
             sources = SourceConnections(con, settings)
             reader = InputReader(
                 con, settings, projections=plan.projections, query_resolver=sources.resolve
