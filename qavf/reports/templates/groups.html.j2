@@ -1,0 +1,44 @@
+{#- Checks relating many datasets: ranking, member x level matrix and pairs (bounded). -#}
+{% for group in groups %}
+<article class="card" id="group-{{ loop.index }}">
+  <header>
+    <h3><span class="mono">{{ group.check }}</span> · {{ group.name }}</h3>
+  </header>
+  <p class="sub">{{ group.members | length }} datasets, strategy {{ group.strategy }}{% if group.whole_group_levels %}; assessed over all members: {{ group.whole_group_levels | join(", ") }}{% endif %}.</p>
+  {% set shown = group.ranking[:group_rows] %}
+  <div class="scroll">
+    <table>
+      <thead><tr><th class="num">Rank</th><th>Dataset</th><th class="num">Failed</th><th class="num">Not assessed</th><th class="num">Changed records</th>{% for level in group.levels[:group_columns] %}<th>{{ level }}</th>{% endfor %}</tr></thead>
+      <tbody>
+      {% for rank in shown %}
+        {% set row = (group.matrix | selectattr("member", "equalto", rank.member) | first) %}
+        <tr>
+          <td class="num">{{ rank.rank }}</td>
+          <td class="mono">{{ rank.member }}</td>
+          <td class="num">{{ "{:,}".format(rank.failed) }}</td>
+          <td class="num">{{ "{:,}".format(rank.not_assessed) }}</td>
+          <td class="num">{{ "{:,}".format(rank.changed_records) }}</td>
+          {% for level in group.levels[:group_columns] %}
+          <td>{% if row and level in row.cells %}{{ status_chip(row.cells[level]) }}{% else %}<span class="muted">–</span>{% endif %}</td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if group.ranking | length > group_rows %}<p class="sub">{{ group.ranking | length - group_rows }} more datasets are in the JSON report.</p>{% endif %}
+  {% if group.levels | length > group_columns %}<p class="sub">{{ group.levels | length - group_columns }} more levels are in the JSON report.</p>{% endif %}
+  {% if group.pairs %}
+  <details>
+    <summary>Pairs compared ({{ group.pairs | length }})</summary>
+    <ul>
+    {% for pair in group.pairs[:group_rows] %}
+      <li>{{ status_chip(pair.status) }} <span class="mono">{{ pair.reference }}</span> vs <span class="mono">{{ pair.other }}</span>{% if pair.whole_group_level %} ({{ pair.whole_group_level }}){% endif %}: {{ pair.failed }} failed, {{ pair.not_assessed }} not assessed of {{ pair.results }}</li>
+    {% endfor %}
+    </ul>
+    {% if group.pairs | length > group_rows %}<p class="sub">{{ group.pairs | length - group_rows }} more pairs are in the JSON report.</p>{% endif %}
+  </details>
+  {% endif %}
+  {% for line in group.group_results %}<p class="sub">{{ line }}</p>{% endfor %}
+</article>
+{% endfor %}

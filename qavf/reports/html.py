@@ -35,6 +35,10 @@ if TYPE_CHECKING:
 _STATUS_ORDER = (Status.PASS, Status.FAIL, Status.ERROR, Status.SKIPPED)
 _SEVERITY_ORDER = (Severity.CRITICAL, Severity.ERROR, Severity.WARNING, Severity.INFO)
 _SLOWEST_RULES_SHOWN = 8
+_GROUP_ROWS_SHOWN = 50
+"""Datasets (and pairs) a checks-together section lists; the JSON report has them all."""
+_GROUP_LEVELS_SHOWN = 12
+"""Levels the member matrix shows as columns."""
 
 
 def _format_value(value: Any) -> str:
@@ -289,6 +293,9 @@ def iter_html(
     budget = ChartBudget(limits)
     context = _presentation(report, title, fail_on, budget)
     context["comparisons"] = report_views(report, limits, budget=budget)
+    context["groups"] = report.groups
+    context["group_rows"] = _GROUP_ROWS_SHOWN
+    context["group_columns"] = _GROUP_LEVELS_SHOWN
     yield from iter_template("report.html.j2", context, limits, env)
 
 

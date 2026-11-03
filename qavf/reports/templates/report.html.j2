@@ -123,6 +123,11 @@
   <p class="empty">No rule failed.</p>
   {% endfor %}
 
+  {% if groups %}
+  <h2 id="groups">Datasets checked together ({{ groups | length }})</h2>
+  {% include "groups.html.j2" %}
+  {% endif %}
+
   {% if comparisons %}
 
   <h2 id="comparisons">Dataset comparisons ({{ comparisons | length }})</h2>

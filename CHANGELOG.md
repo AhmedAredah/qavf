@@ -58,6 +58,28 @@ These changes break existing configurations. Convert a configuration once with
   in the source's path or table. Each copy is a dataset of its own,
   `counts@houston`; `counts@*` lists every copy in a check's `datasets`,
   `run.require` and `--dataset`.
+- **Many datasets in one check.** `compare`, `totals_match`, `key_sets_match` and
+  `drift` take any number of `datasets` and a `strategy`: `reference` (default;
+  `reference:` names the member, the first otherwise), `sequential`, `all_pairs`
+  (refused above `max_pairs`, default 28) or `consensus`. The two-sided engine runs
+  once per pair; two datasets with the default strategy report exactly as before.
+  `batch_consistent` and `coverage` accept `counts@*`.
+- **Consensus.** `strategy: consensus` compares each member with a consensus built
+  key by key: `consensus: {numeric: median|mean|trimmed_mean, trim: 0.1,
+  categorical: majority|plurality, min_agreement: 0.5, ties: report|reference}`.
+  A key without a consensus value (a tie, too little agreement, a key repeated
+  within a member) is left out of every pair and reported as not assessed, never
+  guessed. `drift` compares each member with the pooled data of all members.
+- **Whole-group levels.** With more than two members, `compare` assesses `coverage`
+  (a key x member presence matrix), `structure` (column names and types against
+  what most members have) and `distribution` (each member against the pooled data)
+  over all members at once.
+- **Group reports.** Results of such checks carry a `group` role (the member they
+  are about, the pair, the level); `report.groups` (also in the JSON report) rolls
+  them up per check into a matrix of members by levels, the pairs compared and a
+  ranking of the members by failures, results not assessed and changed records.
+  The HTML report shows them in a compact "Datasets checked together" section.
+  Reports from earlier versions load with no groups.
 - `qavf migrate` turns inline series and metrics into named `series`/`metrics`
   entries, merging identical ones (`<value>_by_<group>`).
 - The demo uses a named series and metric and `vars`.

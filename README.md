@@ -322,6 +322,40 @@ HTML reports show each comparison with a verdict per level, a drill-down with te
 and charts; `result.write_html(path)` and `qavf compare-datasets` write the same report
 for one comparison.
 
+### Many datasets
+
+A check relating datasets (`compare`, `totals_match`, `key_sets_match`, `drift`) takes
+any number of them and a `strategy`: `reference` (the default; each against
+`reference:`, the first unless named), `sequential` (each against the next),
+`all_pairs` (every pair, up to `max_pairs`, 28 by default) or `consensus` (each
+against the consensus of all, matched on `keys`). `across` copies one dataset across
+sources, and `counts@*` lists every copy:
+
+```yaml
+datasets:
+  counts:
+    path: 'data/{city}/counts.parquet'
+    across: {city: [houston, dallas, austin, el_paso]}   # counts@houston, ...
+    schema: {columns: {site_id: {dtype: str}, aadt: {dtype: int, ge: 0}}}
+checks:
+  - check: compare
+    name: cities agree
+    datasets: ['counts@*']
+    keys: [site_id]
+    strategy: consensus
+    consensus: {numeric: median, categorical: majority, min_agreement: 0.5, ties: report}
+  - {check: key_sets_match, datasets: ['counts@*'], keys: [site_id], strategy: all_pairs}
+```
+
+The consensus takes the median of the numbers and the majority of other values, key
+by key; a key without one (a tie, or too little agreement) is reported as not
+assessed, never guessed. With more than two members, `compare` assesses `coverage`
+(a key x member presence matrix), `structure` and `distribution` (each member against
+the pooled data) over all members at once. Reports add, per check, a matrix of
+members by levels (each cell the worst status), the pairs compared and a ranking of
+the members by failures and changed records (`report.groups`). Two datasets with the
+default strategy report exactly as a single comparison.
+
 ## CLI
 
 | Command | Purpose |
