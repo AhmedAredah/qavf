@@ -26,10 +26,12 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    SerializerFunctionWrapHandler,
     ValidatorFunctionWrapHandler,
     WrapValidator,
     field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -40,6 +42,7 @@ from qavf.config_paths import FilePath, PathRole, SourceSpec
 from qavf.configuration import (
     ConfigDocument,
     ConfigurationGraph,
+    LiteralReferences,
     read_config_document,
     resolve_config_document,
 )
@@ -1522,7 +1525,14 @@ class QAVFSettings(_Strict):
                 "include is resolved when a configuration file is read (load_settings, "
                 "settings_from_text or a configuration path); merge mappings yourself"
             )
-        return ItemPreparation.apply(AcrossExpansion.apply(VariableSubstitution.apply(data)))
+        # ``$${`` is a literal ``${`` once every reference is substituted.
+        substituted = LiteralReferences.unescape(VariableSubstitution.apply(data))
+        return ItemPreparation.apply(AcrossExpansion.apply(substituted))
+
+    @model_serializer(mode="wrap")
+    def _literal_references(self, handler: SerializerFunctionWrapHandler) -> Any:
+        """Literal ``${`` text is written as ``$${``, so the settings read back as they are."""
+        return LiteralReferences.escape(handler(self))
 
     @property
     def assertions(self) -> list[SqlAssertion]:

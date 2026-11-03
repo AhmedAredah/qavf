@@ -29,7 +29,8 @@ from qavf.configuration import ConfigurationGraph
 INCLUDE_KEY = "include"
 VARS_KEY = "vars"
 
-_VAR_REFERENCE = re.compile(r"\$\{vars\.([^}]*)\}")
+_VAR_REFERENCE = re.compile(r"(?<!\$)\$\{vars\.([^}]*)\}")
+"""``${vars.name}``; ``$${vars.name}`` is literal text (see :class:`LiteralReferences`)."""
 _VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _UNIQUE_SECTIONS = ("datasets",)
 """Top-level mappings whose entries may be defined in one file only."""

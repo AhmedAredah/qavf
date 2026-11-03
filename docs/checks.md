@@ -130,9 +130,16 @@ Resolution: `include` files merge first, in order, and the including file wins; 
 dataset or check name repeated across files is an error. `vars` and `${ENV}`
 substitute before validation, and an unknown variable is an error. A check's own
 settings win over `defaults`. A `series` or `metric` name resolves within its
-dataset first; `other.name` reaches another dataset's block. `2016..2024` or
-`{from: 2016, to: 2024, step: 1}` expands to every value; a plain list means just
-those values.
+dataset first; `other.name` reaches another dataset's block. In a check setting
+declared as a list (`missing_periods` `expected`, `key_grid`
+`dimensions.<column>.values`, ...), `2016..2024` or `{from: 2016, to: 2024, step: 1}`
+expands to every value; a plain list means just those values. Other settings keep
+such a value as written (an `outliers` `column: 2016..2024` is a column name), and
+so do plugin checks' settings.
+
+To write a literal `${...}` (in SQL, a description or an allowed value), double the
+dollar: `$${NAME}` and `$${vars.name}` are the text `${NAME}` and `${vars.name}`,
+never substituted.
 
 A relative file path written in an included file is relative to that file. Only
 settings that are file paths are rebased: a dataset's `path`, its source's
@@ -201,7 +208,9 @@ datasets:
 ```
 
 `volumes@*` selects every copy wherever datasets are named, as one string
-(`datasets: volumes@*`) or in a list; `volumes@houston` selects one.
+(`datasets: volumes@*`) or in a list; `volumes@houston` selects one. Each copy
+is named once: a repeated connection, copy name or template value (also as text,
+like `2023` and `'2023'`) is a configuration error naming it.
 
 ### Strategies
 

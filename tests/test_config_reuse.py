@@ -434,3 +434,38 @@ def test_validate_reads_included_files(tmp_path: Path) -> None:
     config = _write(tmp_path / "qa.yaml", "include: [base.yaml]\nengine: {parallel: false}\n")
     report = validate({"counts": COUNTS}, config=config)
     assert [r.status.value for r in report.results_for("INP-006")] == ["PASS"]
+
+
+# ------------------------------------------------------------------ literal ${
+
+
+@pytest.mark.parametrize("environment", [{}, {"QAVF_LITERAL_X": "set"}])
+def test_a_doubled_dollar_writes_a_literal_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environment: dict[str, str]
+) -> None:
+    monkeypatch.delenv("QAVF_LITERAL_X", raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    config = _write(
+        tmp_path / "qa.yaml",
+        """
+vars: {a: 1, b: '$${QAVF_LITERAL_X}'}
+project: "$${QAVF_LITERAL_X} $${vars.a} ${vars.a}"
+datasets:
+  d: {description: '${vars.b}'}
+checks:
+  - {check: sql, name: literal, sql: "SELECT 1 WHERE '$${vars.nope}' <> '$${X:-y}'"}
+""",
+    )
+    settings = load_settings(config)
+    assert settings.project == "${QAVF_LITERAL_X} ${vars.a} 1"
+    assert settings.datasets["d"].description == "${QAVF_LITERAL_X}"
+    assert settings.checks[0].settings["sql"] == "SELECT 1 WHERE '${vars.nope}' <> '${X:-y}'"
+
+
+def test_literal_references_survive_a_settings_round_trip() -> None:
+    settings = _settings({"vars": {"a": 1}, "project": "$${vars.a} $${HOME}"})
+    assert settings.project == "${vars.a} ${HOME}"
+    again = QAVFSettings.model_validate(settings.model_dump())
+    assert again.project == settings.project
+    assert QAVFSettings.model_validate_json(settings.model_dump_json()).project == settings.project

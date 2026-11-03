@@ -13,7 +13,10 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
-_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_ENV_REFERENCE = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+"""``${NAME}`` or ``${NAME:-default}``; ``$${NAME}`` is the literal text ``${NAME}``."""
+ESCAPED_REFERENCE = "$${"
+"""Written for a literal ``${`` that no ``${ENV}`` or ``${vars.name}`` substitution reads."""
 _YAML_MERGE_KEY = object()
 
 
@@ -304,6 +307,46 @@ class ConfigurationGraph:
             active.remove(identity)
         memo[identity] = copied
         return copied
+
+
+class LiteralReferences:
+    """The ``$${`` escape: once every reference is substituted, ``$${`` becomes the
+    literal ``${`` in one final pass (so the result is never substituted again);
+    serializing settings writes it back as ``$${``, so they read back unchanged.
+
+    Strings are rewritten in a copy; shared parts (YAML anchors) stay shared.
+    """
+
+    def __init__(self, old: str, new: str) -> None:
+        self.old, self.new = old, new
+        self._memo: dict[int, Any] = {}
+        self._kept: list[Any] = []  # keeps memoised originals alive, so ids stay unique
+
+    @classmethod
+    def unescape(cls, value: Any) -> Any:
+        """``value`` with each ``$${`` turned into ``${``."""
+        return cls(ESCAPED_REFERENCE, "${").rewrite(value)
+
+    @classmethod
+    def escape(cls, value: Any) -> Any:
+        """``value`` with each literal ``${`` written as ``$${``."""
+        return cls("${", ESCAPED_REFERENCE).rewrite(value)
+
+    def rewrite(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.replace(self.old, self.new) if self.old in value else value
+        if not isinstance(value, dict | list | tuple):
+            return value
+        identity = id(value)
+        if identity in self._memo:
+            return self._memo[identity]
+        self._kept.append(value)
+        if isinstance(value, dict):
+            result: Any = {key: self.rewrite(child) for key, child in value.items()}
+        else:
+            result = type(value)(self.rewrite(child) for child in value)
+        self._memo[identity] = result
+        return result
 
 
 def _children(value: Any) -> Iterable[Any] | None:
