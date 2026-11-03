@@ -13,6 +13,8 @@ import pytest
 from pydantic import ValidationError
 
 from qavf import validate
+from qavf.checks.placement import placed_items
+from qavf.checks.selection import Selection, narrow
 from qavf.engine.severity import Status
 from qavf.reports.models import RuleResult
 from qavf.settings import QAVFSettings
@@ -183,3 +185,23 @@ def test_dotted_dataset_names_stay_usable_when_unambiguous() -> None:
         }
     }
     QAVFSettings.model_validate(config)
+
+
+def test_a_view_of_a_dotted_dataset_belongs_to_that_dataset_in_a_selection() -> None:
+    config = {
+        "datasets": {
+            "roads.archive": {"path": "archive.csv", "views": {"recent": {"where": "y > 1"}}},
+            "lanes": {"path": "lanes.csv"},
+        },
+        "checks": [
+            {
+                "check": "key_sets_match",
+                "name": "same ids",
+                "keys": ["id"],
+                "datasets": ["roads.archive.recent", "lanes"],
+            }
+        ],
+    }
+    settings = QAVFSettings.model_validate(config)
+    narrowed = narrow(settings, Selection.of(datasets=["roads.archive", "lanes"]))
+    assert [placed.item.enabled for placed in placed_items(narrowed)] == [True]
