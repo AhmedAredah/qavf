@@ -28,7 +28,7 @@ from __future__ import annotations
 import copy
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,7 @@ import yaml
 
 from qavf.checks.catalog import BY_RULE, CONTRACT_RULES, Decompiled, PluginDefinition
 from qavf.checks.legacy import COLUMN_STATISTICS, LEGACY_ENGINE_KEYS, first_legacy_key
+from qavf.composition import INCLUDE_KEY, IncludedPaths
 from qavf.configuration import parse_config_text
 from qavf.engine.registry import Rule, RuleRegistry, default_registry
 
@@ -487,15 +488,85 @@ def leading_comments(text: str) -> str:
     return "".join(lines) + ("\n" if lines else "")
 
 
-def migrate_text(text: str, source: Path, *, drop_disabled: bool = False) -> tuple[Migration, str]:
-    """Convert configuration ``text`` (the content of ``source``); returns the new text."""
+def migrate_text(
+    text: str, source: Path, *, drop_disabled: bool = False, output: Path | None = None
+) -> tuple[Migration, str]:
+    """Convert configuration ``text`` (the content of ``source``); returns the new text.
+
+    ``output`` is where the text will be written: its suffix picks the format
+    (YAML or JSON) and, when it is in another directory, relative file paths
+    (and ``include`` entries) are rebased so they name the same files from
+    there. Without it the input's format and paths are kept. The text is read
+    back before it is returned, so it is always a valid document of its format.
+    """
     raw = parse_config_text(text, source, expand=False)
     migration = Migrator(drop_disabled=drop_disabled).migrate(raw)
-    if source.suffix.lower() == ".json":
-        import json
+    target = source if output is None else output
+    if output is not None:
+        migration = Relocation(source.parent, output.parent).apply(migration)
+    rendered = _rendered(migration, target, leading_comments(text))
+    _check_read_back(rendered, target, migration.config)
+    return migration, rendered
 
-        return migration, json.dumps(migration.config, indent=2, default=str) + "\n"
-    return migration, migration.yaml(leading_comments(text))
+
+def _rendered(migration: Migration, target: Path, header: str) -> str:
+    match target.suffix.lower():
+        case ".json":
+            import json
+
+            return json.dumps(migration.config, indent=2, default=str) + "\n"
+        case ".yaml" | ".yml":
+            return migration.yaml(header)
+        case other:
+            raise MigrationError(
+                f"{target}: unsupported configuration format {other!r}; use YAML or JSON"
+            )
+
+
+def _check_read_back(text: str, target: Path, config: dict[str, Any]) -> None:
+    """Refuse text that does not read back as the migrated configuration."""
+    import json
+
+    expected = config
+    if target.suffix.lower() == ".json":
+        expected = json.loads(json.dumps(config, default=str))
+    try:
+        read = parse_config_text(text, target, expand=False)
+    except ValueError as exc:
+        raise MigrationError(f"the migrated configuration does not read back: {exc}") from None
+    if read != expected:
+        raise MigrationError(f"the migrated configuration does not read back as written ({target})")
+
+
+class Relocation:
+    """Rebases a configuration's relative file paths when it moves to another directory.
+
+    The file-path settings are those :mod:`qavf.config_paths` declares, the same
+    ones an included file's paths are rebased by; ``include`` entries move too.
+    """
+
+    def __init__(self, source_dir: Path, target_dir: Path) -> None:
+        self.paths = IncludedPaths(source_dir.resolve(), target_dir.resolve())
+
+    def apply(self, migration: Migration) -> Migration:
+        """``migration`` with its configuration's relative paths rebased."""
+        if self.paths.directory == self.paths.root:
+            return migration
+        config = self.paths.rebase(migration.config)
+        entries = config.get(INCLUDE_KEY)
+        if isinstance(entries, str):
+            config[INCLUDE_KEY] = self.paths.path(entries)
+        elif isinstance(entries, list):
+            config[INCLUDE_KEY] = [
+                self.paths.path(entry) if isinstance(entry, str) else entry for entry in entries
+            ]
+        if config == migration.config:
+            return migration
+        note = (
+            f"relative file paths rebased from {self.paths.directory.as_posix()} "
+            f"to {self.paths.root.as_posix()}"
+        )
+        return replace(migration, config=config, notes=[*migration.notes, note])
 
 
 def migrate_file(
@@ -503,11 +574,12 @@ def migrate_file(
 ) -> Migration:
     """Convert the configuration at ``path``, writing ``output`` when given."""
     source = Path(path).resolve()
+    target = None if output is None else Path(output)
     migration, text = migrate_text(
-        source.read_text(encoding="utf-8"), source, drop_disabled=drop_disabled
+        source.read_text(encoding="utf-8"), source, drop_disabled=drop_disabled, output=target
     )
-    if output is not None:
-        Path(output).write_text(text, encoding="utf-8")
+    if target is not None:
+        target.write_text(text, encoding="utf-8")
     return migration
 
 

@@ -6,12 +6,12 @@ import gzip
 import logging
 import os
 import tempfile
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from io import IOBase
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 from qavf.output_format import table_output
 from qavf.redaction import redact_text
@@ -21,6 +21,7 @@ from qavf.sources.parameters import FileParams
 
 if TYPE_CHECKING:
     import polars as pl
+    from pydantic import BaseModel
 
     from qavf.settings import QAVFSettings
 
@@ -120,13 +121,13 @@ def write_table(frame: pl.DataFrame, path: str | Path, fmt: str | None = None) -
 
 
 class ProtectedInputs:
-    """The local files a run reads; a report destination may never replace one.
+    """The local files a command reads; an output destination may never replace one.
 
-    Report publication replaces its target atomically, so a destination that names
-    an input would destroy that input completely. Destinations are compared after
+    Publication replaces its target atomically, so a destination that names an
+    input would destroy that input completely. Destinations are compared after
     resolving symbolic links, and with ``samefile`` where both exist (hard links,
     case-insensitive file systems). SQL queries may read further files that are not
-    known here; only declared file sources, database files and named inputs are.
+    known here; only the declared inputs (:meth:`of_settings`) and named inputs are.
     """
 
     def __init__(self, paths: Iterable[str | Path | None]) -> None:
@@ -148,17 +149,37 @@ class ProtectedInputs:
             _PUBLICATION_CHECKS.reset(token)
 
     @classmethod
-    def of_settings(cls, settings: QAVFSettings, config: Path | None) -> ProtectedInputs:
-        """The configuration file, its file datasets and its database files."""
-        found: list[str | Path | None] = [config]
-        for spec in settings.datasets.values():
-            source = spec.source_config()
-            if source is not None and source.get("type") == "file":
-                found.append(_resolved(settings, str(source["path"])))
-        for connection in settings.connections.values():
-            if connection.file_based and connection.path:
-                found.append(_resolved(settings, connection.path))
-        return cls(found)
+    def of_settings(
+        cls, settings: QAVFSettings, config: Path | None = None, *extra: str | Path | None
+    ) -> ProtectedInputs:
+        """Every declared input of a configuration (and ``extra`` paths).
+
+        The configuration file and every file it includes, and each setting typed
+        as a file path (:mod:`qavf.config_paths`): data files, database files,
+        baselines with their acceptance manifests, zone layers, crosswalks and
+        plugin files.
+        """
+        return cls(
+            [
+                config,
+                settings.source_path,
+                *settings.included_paths,
+                *declared_inputs(settings),
+                *extra,
+            ]
+        )
+
+    @classmethod
+    def of_config(cls, raw: Mapping[str, Any], source: Path) -> ProtectedInputs:
+        """The declared inputs of an unvalidated configuration ``raw`` read from ``source``.
+
+        The file itself, the files its ``include`` names and each setting typed as
+        a file path (:meth:`of_settings`).
+        """
+        entries = raw.get("include") or []
+        includes = [entries] if isinstance(entries, str) else list(entries)
+        named = [source.parent / entry for entry in includes if isinstance(entry, str)]
+        return cls([source, *named, *declared_files(raw, source.parent)])
 
     def check(self, *destinations: Path | None) -> None:
         """Refuse a destination that is one of the inputs."""
@@ -170,13 +191,40 @@ class ProtectedInputs:
             for source in sources:
                 if _same_file(destination, source):
                     raise ValueError(
-                        f"report path {destination} would replace the input {source}; "
+                        f"output path {destination} would replace the input {source}; "
                         "choose another output path"
                     )
 
 
-def _resolved(settings: QAVFSettings, path: str) -> str:
-    return path if "://" in path else str(settings.resolve(path))
+def declared_inputs(settings: QAVFSettings) -> list[str]:
+    """The local files the file-path settings of ``settings`` name, resolved."""
+    return declared_files(settings.model_dump(by_alias=True), settings.base_dir)
+
+
+def declared_files(
+    raw: Mapping[str, Any], base_dir: Path, model: type[BaseModel] | None = None
+) -> list[str]:
+    """The local files the file-path settings of a configuration mapping name.
+
+    ``raw`` is the input of ``model`` (a QAVF configuration by default). Relative
+    paths resolve against ``base_dir``; URLs name no local file. An accepted
+    baseline brings its acceptance manifest.
+    """
+    from qavf.config_paths import BASELINE_MANIFEST_SUFFIX, PathRole, declared_paths
+
+    if model is None:
+        from qavf.settings import QAVFSettings
+
+        model = QAVFSettings
+    found: list[str] = []
+    for value, role in declared_paths(raw, model):
+        if not value or "://" in value:
+            continue
+        resolved = Path(value) if Path(value).is_absolute() else base_dir / value
+        found.append(str(resolved))
+        if role is PathRole.BASELINE:
+            found.append(str(resolved.with_name(resolved.name + BASELINE_MANIFEST_SUFFIX)))
+    return found
 
 
 def _local(path: str | Path) -> list[Path]:

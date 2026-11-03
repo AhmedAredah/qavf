@@ -8,9 +8,10 @@ from pathlib import Path
 
 from qavf.checks.legacy import reject_legacy
 from qavf.checks.placement import ROW_CHECKS, placed_items
+from qavf.configuration import read_config_mapping as _read_config_mapping
 from qavf.inputs.descriptors import Dataset
 from qavf.optional import unsupported
-from qavf.settings import DatasetSpec, QAVFSettings, SchemaSpec, _read_config_mapping
+from qavf.settings import DatasetSpec, QAVFSettings, SchemaSpec
 
 
 def prepare(data, schema, config, resources, profile, selection=None):

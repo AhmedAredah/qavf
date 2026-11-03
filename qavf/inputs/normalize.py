@@ -16,12 +16,12 @@ from qavf.checks.across import AcrossExpansion
 from qavf.checks.legacy import reject_legacy
 from qavf.composition import VariableSubstitution
 from qavf.configuration import ConfigurationGraph
+from qavf.configuration import read_config_mapping as _read_config_mapping
 from qavf.settings import (
     DatasetSpec,
     QAVFSettings,
     SchemaSpec,
     SourcePolicy,
-    _read_config_mapping,
     check_sql_names,
     validate_config_mapping_keys,
 )

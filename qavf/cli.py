@@ -28,7 +28,7 @@ from qavf.run_control import CancellationToken, RunControl, RunEvent
 if TYPE_CHECKING:
     import yaml
 
-    from qavf.configuration import read_config_mapping
+    from qavf.configuration import parse_config_text, read_config_mapping
     from qavf.engine.compilation import build_registry, build_source_registry
     from qavf.engine.runner import QARunner
     from qavf.io import ProtectedInputs, atomic_write
@@ -52,6 +52,7 @@ _LAZY_IMPORTS = {
     "build_registry": ("qavf.engine.compilation", "build_registry"),
     "build_source_registry": ("qavf.engine.compilation", "build_source_registry"),
     "read_config_mapping": ("qavf.configuration", "read_config_mapping"),
+    "parse_config_text": ("qavf.configuration", "parse_config_text"),
     "ProtectedInputs": ("qavf.io", "ProtectedInputs"),
     "atomic_write": ("qavf.io", "atomic_write"),
     "profile_input": ("qavf.profiling", "profile_input"),
@@ -214,6 +215,7 @@ def _parser() -> argparse.ArgumentParser:
     schema.add_argument("-o", "--output", type=Path, help="file to write (default: stdout)")
     schema.add_argument("-c", "--config", type=Path, help="configuration (for plugin discovery)")
     schema.add_argument("--backend", choices=["auto", "duckdb", "polars"], default="auto")
+    schema.add_argument("--force", action="store_true", help="overwrite an existing file")
 
     profile = commands.add_parser("profile", help="print inferred QA limits for a data file")
     profile.add_argument("path")
@@ -476,6 +478,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "build_source_registry",
         "write_json_schema",
         "atomic_write",
+        "ProtectedInputs",
     )
     output: Path = args.output
     if output.suffix.lower() not in {".yaml", ".yml", ".json"}:
@@ -484,11 +487,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     targets = [output] if args.no_schema else [output, schema_path]
     if len({path.resolve() for path in targets}) != len(targets):
         raise ValueError("configuration and JSON Schema outputs must be different paths")
+    parsed = [_parse_dataset(argument) for argument in args.dataset]
+    # A profiled input is never replaced, even with --force.
+    ProtectedInputs([path for _, path in parsed]).check(*targets)
     existing = [str(p) for p in targets if p.exists()]
     if existing and not args.force:
         raise ValueError(f"refusing to overwrite {', '.join(existing)} (use --force)")
 
-    parsed = [_parse_dataset(argument) for argument in args.dataset]
     names = [name for name, _ in parsed]
     if len(set(names)) != len(names):
         raise ValueError("dataset names must not be repeated")
@@ -540,6 +545,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 def _cmd_schema(args: argparse.Namespace) -> int:
     settings = _settings(args.config)
+    if args.output:
+        _use("ProtectedInputs")
+        # The configuration and its inputs are never replaced, even with --force.
+        ProtectedInputs.of_settings(settings, args.config).check(args.output)
+        if args.output.exists() and not args.force:
+            raise ValueError(f"refusing to overwrite {args.output} (use --force)")
     if _native(args):
         from qavf.cli_core import config_json_schema as core_schema
 
@@ -611,8 +622,15 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     from qavf.migrate import migrate_text
 
     source = args.config.resolve()
+    original = source.read_text(encoding="utf-8")
+    output = None if args.check else args.output
+    if output is not None:
+        _use("ProtectedInputs", "parse_config_text")
+        # The configuration and the files it names are never replaced.
+        raw = parse_config_text(original, source, expand=False)
+        ProtectedInputs.of_config(raw, source).check(output)
     migration, text = migrate_text(
-        source.read_text(encoding="utf-8"), source, drop_disabled=args.drop_disabled
+        original, source, drop_disabled=args.drop_disabled, output=output
     )
     if args.check:
         if not migration.changed:
@@ -686,12 +704,16 @@ def _comparison_spec(path: Path | None) -> dict[str, Any]:
 
 def _cmd_compare_datasets(args: argparse.Namespace) -> int:
     from qavf.compare.api import compare_datasets
+    from qavf.compare.spec import ComparisonSpec
+    from qavf.io import declared_files
 
     _use("ProtectedInputs")
     _check_report_destinations(args.html, args.json)
-    protected = ProtectedInputs([args.config, args.baseline, args.candidate])
-    protected.check(args.html, args.json)
     options = _comparison_spec(args.config)
+    # Crosswalks and zone layers of the spec resolve like the data files, from here.
+    named = declared_files(options, Path.cwd(), ComparisonSpec)
+    protected = ProtectedInputs([args.config, args.baseline, args.candidate, *named])
+    protected.check(args.html, args.json)
     for argument in (args.baseline, args.candidate):
         local = "://" not in argument and not any(c in argument for c in "*?[")
         if local and not Path(argument).exists():

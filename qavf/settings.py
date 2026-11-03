@@ -37,10 +37,13 @@ from qavf.checks.items import CheckItem, RunSettings, dataset_item_id, top_level
 from qavf.checks.legacy import reject_legacy
 from qavf.checks.relations import RelationNamespace
 from qavf.config_paths import FilePath, PathRole, SourceSpec
-from qavf.configuration import ConfigurationGraph
+from qavf.configuration import (
+    ConfigDocument,
+    ConfigurationGraph,
+    read_config_document,
+    resolve_config_document,
+)
 from qavf.configuration import expand_env as expand_env
-from qavf.configuration import read_config_mapping as _read_config_mapping
-from qavf.configuration import resolve_config_text as _resolve_config_text
 from qavf.engine.severity import Severity
 from qavf.number_grammar import AllowedValueDomain, NumberGrammar, Whitespace, converted_options
 from qavf.scalars import normalize_scalar, normalize_scalar_sequence
@@ -1472,6 +1475,7 @@ class QAVFSettings(_Strict):
     """File this configuration was loaded from; set by :func:`load_settings`."""
 
     _selection: AppliedSelection | None = PrivateAttr(default=None)
+    _included_paths: tuple[Path, ...] = PrivateAttr(default=())
 
     @model_validator(mode="before")
     @classmethod
@@ -1597,6 +1601,15 @@ class QAVFSettings(_Strict):
         return "~" in name and name in self.derived_datasets()
 
     @property
+    def included_paths(self) -> tuple[Path, ...]:
+        """Every file merged in by ``include`` when this configuration was loaded."""
+        return self._included_paths
+
+    def record_includes(self, paths: Iterable[Path]) -> None:
+        """Record the files ``include`` merged into this configuration."""
+        self._included_paths = tuple(paths)
+
+    @property
     def base_dir(self) -> Path:
         """Directory that relative paths in the configuration resolve against."""
         return self.source_path.parent if self.source_path else Path.cwd()
@@ -1704,9 +1717,9 @@ def load_settings(path: str | Path) -> QAVFSettings:
             environment variable.
         pydantic.ValidationError: if the content violates the schema.
     """
-    raw, source = _read_config_mapping(path)
-    settings = _validated(raw, source)
-    logger.info("Loaded configuration from %s", source)
+    document = read_config_document(path)
+    settings = _validated(document)
+    logger.info("Loaded configuration from %s", document.source)
     return settings
 
 
@@ -1717,13 +1730,14 @@ def settings_from_text(text: str, path: str | Path) -> QAVFSettings:
     format by its suffix and anchors relative paths; it need not exist. Raises
     the same errors as :func:`load_settings`.
     """
-    source = Path(path).resolve()
-    return _validated(_resolve_config_text(text, source), source)
+    return _validated(resolve_config_document(text, Path(path).resolve()))
 
 
-def _validated(raw: dict[str, Any], source: Path) -> QAVFSettings:
+def _validated(document: ConfigDocument) -> QAVFSettings:
+    raw, source = document.raw, document.source
     reject_legacy(raw, str(source))
     ConfigurationGraph().check(raw)
     settings = QAVFSettings.model_validate(raw)
     settings.source_path = source
+    settings.record_includes(document.included)
     return settings

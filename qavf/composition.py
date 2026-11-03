@@ -44,6 +44,8 @@ class IncludeResolver:
 
     def __init__(self, parse: Parser) -> None:
         self._parse = parse
+        self.included: list[Path] = []
+        """Every file merged in so far (resolved), in the order they were read."""
 
     def resolve(self, raw: dict[str, Any], source: Path) -> dict[str, Any]:
         """``raw`` (the content of ``source``) with its included files merged in."""
@@ -71,6 +73,8 @@ class IncludeResolver:
                 text = target.read_text(encoding="utf-8")
             except OSError as exc:
                 raise ValueError(f"{source}: cannot include {entry!r}: {exc.strerror}") from None
+            if target not in self.included:
+                self.included.append(target)
             parsed = IncludedPaths(target.parent, chain[0].parent).rebase(self._parse(text, target))
             included = self._resolve(parsed, target, (*chain, target))
             merged = ConfigMerge(str(target)).merge(merged, included)

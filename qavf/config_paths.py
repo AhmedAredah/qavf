@@ -55,6 +55,8 @@ SourceSpec = Annotated[dict[str, Any], PathRole.SOURCE]
 
 SOURCE_PATH_KEYS = ("path", "paths")
 """The keys of a source specification that name files."""
+BASELINE_MANIFEST_SUFFIX = ".manifest.json"
+"""Suffix of an accepted baseline's acceptance manifest, next to the baseline file."""
 
 PathVisitor = Callable[[str, PathRole], str]
 """Receives one path value and its role; returns the value to keep."""
@@ -244,6 +246,7 @@ def _may_hold_paths(annotation: Any) -> bool:
 
 
 __all__ = [
+    "BASELINE_MANIFEST_SUFFIX",
     "SOURCE_PATH_KEYS",
     "BaselinePath",
     "ConfigPaths",

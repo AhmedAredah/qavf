@@ -6,6 +6,7 @@ import json
 import os
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -144,13 +145,31 @@ def expand_env(value: Any, environ: Mapping[str, str] | None = None) -> Any:
         raise ValueError("configuration is nested too deeply") from exc
 
 
+@dataclass(frozen=True)
+class ConfigDocument:
+    """A configuration file's resolved content and every file it was assembled from."""
+
+    raw: dict[str, Any]
+    """The content with its included files merged and references substituted."""
+    source: Path
+    """The root configuration file (resolved)."""
+    included: tuple[Path, ...] = ()
+    """Every file merged in by ``include`` (resolved), in the order they were read."""
+
+
+def read_config_document(path: str | Path) -> ConfigDocument:
+    """Parse one configuration file and resolve its reuse, recording its included files."""
+    source = Path(path).resolve()
+    return resolve_config_document(source.read_text(encoding="utf-8"), source)
+
+
 def read_config_mapping(path: str | Path) -> tuple[dict[str, Any], Path]:
     """Parse one configuration document before callers assemble inline contracts."""
-    source = Path(path).resolve()
-    return resolve_config_text(source.read_text(encoding="utf-8"), source), source
+    document = read_config_document(path)
+    return document.raw, document.source
 
 
-def resolve_config_text(text: str, source: Path) -> dict[str, Any]:
+def resolve_config_document(text: str, source: Path) -> ConfigDocument:
     """Parse configuration text as the content of ``source`` and resolve its reuse.
 
     Included files merge first (relative to ``source``), then ``${vars.name}``
@@ -159,9 +178,15 @@ def resolve_config_text(text: str, source: Path) -> dict[str, Any]:
     from qavf.composition import IncludeResolver, VariableSubstitution
 
     raw = parse_config_text(text, source, expand=False)
-    merged = IncludeResolver(_parse_unexpanded).resolve(raw, source)
+    resolver = IncludeResolver(_parse_unexpanded)
+    merged = resolver.resolve(raw, source)
     result: dict[str, Any] = expand_env(VariableSubstitution.apply(merged))
-    return result
+    return ConfigDocument(result, source, tuple(resolver.included))
+
+
+def resolve_config_text(text: str, source: Path) -> dict[str, Any]:
+    """:func:`resolve_config_document`'s content alone."""
+    return resolve_config_document(text, source).raw
 
 
 def _parse_unexpanded(text: str, source: Path) -> dict[str, Any]:

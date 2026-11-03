@@ -28,13 +28,14 @@ from pydantic import BaseModel, Field, ValidationInfo, field_serializer, model_v
 
 from qavf._version import __version__
 from qavf.audit_codec import decode_audit, encode_audit
+from qavf.config_paths import BASELINE_MANIFEST_SUFFIX
 from qavf.inputs.normalize import Configuration
 from qavf.inputs.resources import ResourceLimits
 from qavf.io import atomic_write
 from qavf.regression._baseline_writer import stage_baseline
 from qavf.regression._columns import column_names
 
-MANIFEST_SUFFIX = ".manifest.json"
+MANIFEST_SUFFIX = BASELINE_MANIFEST_SUFFIX
 MANIFEST_FORMAT_VERSION = 2
 
 
