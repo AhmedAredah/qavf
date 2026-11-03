@@ -98,6 +98,22 @@ Reports written by earlier versions still load.
 - Testing helpers: `qavf.testing.rule_results` and `run_rule` run one rule instance
   with any parameters; `checks_config` converts rule-code mappings and `with_checks`
   configures every rule of a test registry.
+- `qavf explain -c CONFIG` validates a configuration and prints its plan without
+  reading data (`--dataset`, `--tags`, `--skip-tags`, `--only`, `--backend`,
+  `--format text|json`, `-o`); it exits 2 naming the invalid field. `explain()`
+  takes `backend=`, `only=`, `tags=`, `skip_tags=` and `datasets=`, applying the same
+  selection and backend admission as `validate`.
+- `qavf init --full` writes the complete reference configuration.
+
+### Changed
+
+- `qavf init` writes a minimal starter (project, datasets with their inferred
+  schemas, pointers to `explain`, `list-checks` and the docs) and never pins defaults
+  such as `engine.execution_mode`, so a process limit added later selects isolation.
+  Comparison examples use `decision: material`.
+- Usage and configuration errors print the message and field path without the
+  library file and line (shown with `-v`).
+- `mypy` checks the bodies of unannotated functions too (`check_untyped_defs`).
 
 ### Fixed
 
@@ -206,6 +222,25 @@ Reports written by earlier versions still load.
 - A records level's `categorical` naming a column neither aligned side has is a
   configuration error with suggestions, like `tolerances`; it had left the level not
   assessed during evaluation.
+- A `compare-datasets` spec's `resources` mapping (`{target_memory: 64MiB}`) is read
+  as `ResourceLimits`, and an invalid one is a usage error naming the field (it had
+  crashed with a traceback and exit 1). Relative paths in the spec resolve against
+  its folder.
+- On the Polars backend, a dataset selection no longer converts or consumes an
+  excluded input (a one-shot Arrow stream stays unread; a failing one no longer
+  fails the run).
+- A frame too large for the cache is spilled directly, instead of first spilling
+  every in-memory entry (which could falsely exhaust the spill budget).
+- A native SQL check that keeps no evidence (`max_affected_records: 0`) counts its
+  rows in one query, without a temporary table of every failing row.
+- Rule and source registration rejects a class that is not a concrete `Rule` /
+  `DataSource`, lacks its id or has a non-pydantic `Params`, before registering it;
+  rule and source lookups no longer copy the registry.
+- `from qavf import CheckIdentity` has its type for type checkers.
+- `docs/api.md` names `Dataset(..., checks=)` and `docs/plugins.md` the testing
+  helpers' `checks=` keyword (not the removed `expressions=` / `assertions=`).
+- An invalid dataset setting in `validate`/`explain` names its full path
+  (`datasets.<name>....`).
 
 ## [Unreleased]
 
