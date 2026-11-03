@@ -104,8 +104,9 @@ def build_workload(fixture: Path, work_dir: Path, options: WorkloadOptions) -> P
             elif kind == "row_removed":
                 valid = 0 <= identifier < rows and identifier % 101 == 0
             else:
-                before = identifier * 2 if item["column"] == "value" else f"label-{identifier % 7}"
-                after = before + 1 if item["column"] == "value" else "changed"
+                numeric = item["column"] == "value"
+                before = identifier * 2 if numeric else f"label-{identifier % 7}"
+                after = identifier * 2 + 1 if numeric else "changed"
                 residue = 1 if item["column"] == "value" else 2
                 valid = (
                     kind == "value_changed"

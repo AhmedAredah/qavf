@@ -21,6 +21,7 @@ import sys
 import time
 import types
 from pathlib import Path
+from typing import Any
 
 from peak_rss import peak_rss_kib
 
@@ -32,6 +33,9 @@ class _Patched:
 
     def __get__(self, instance, owner=None):
         return self if instance is None else types.MethodType(self, instance)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        raise NotImplementedError
 
 
 class _ObservedLoad(_Patched):
@@ -108,18 +112,19 @@ def worker(args):
 
     imported = time.perf_counter() - started
     config = {"engine": {"native_threads": 2, "parallel": False, "max_evidence_bytes": 1024}}
-    observations, captured = [], []
+    observations: list[Any] = []
+    captured: list[Any] = []
     if args.mode != "startup":
         from qavf.core.results import ResultCollector
         from qavf.core.sources import InputReader
 
         original_load, original_records = InputReader.load, ResultCollector.records
-        InputReader.load = _ObservedLoad(original_load, observations)
-        ResultCollector.records = _ObservedRecords(original_records, captured)
+        InputReader.load = _ObservedLoad(original_load, observations)  # type: ignore[method-assign,assignment]
+        ResultCollector.records = _ObservedRecords(original_records, captured)  # type: ignore[method-assign]
     rows = 2400 if args.mode == "startup" else args.rows
     columns = ", ".join(f"CAST(i+{n} AS BIGINT) AS c{n}" for n in range(args.width))
-    value = Query(f"SELECT {columns} FROM range({rows}) t(i)")
-    schema = {"primary_key": ["c0"]}
+    value: Any = Query(f"SELECT {columns} FROM range({rows}) t(i)")
+    schema: dict[str, Any] | None = {"primary_key": ["c0"]}
     if args.mode in {"startup", "narrow"}:
         value = Query(f"SELECT i AS c0 FROM range({rows}) t(i)")
     elif args.mode == "row_budget":
@@ -192,7 +197,7 @@ def main():
                     check=True,
                 )
                 runs.append(json.loads(process.stdout))
-            summary = {
+            summary: dict[str, Any] = {
                 "version": label,
                 "source": str(source.resolve()),
                 "mode": mode,

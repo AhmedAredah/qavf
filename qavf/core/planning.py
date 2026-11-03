@@ -13,11 +13,10 @@ def expression_columns(expression):
     from qavf.sources.sql import _parser
 
     try:
-        tree = json.loads(
-            _parser()
-            .execute("SELECT json_serialize_sql(?)", [f"SELECT {expression}"])
-            .fetchone()[0]
-        )
+        row = _parser().execute("SELECT json_serialize_sql(?)", [f"SELECT {expression}"]).fetchone()
+        if row is None:
+            return None
+        tree = json.loads(row[0])
     except Exception:
         return None
     if tree.get("error"):
@@ -84,7 +83,7 @@ class NativePlan:
         from qavf.sources.sql import _parser
 
         names = list(settings.datasets)
-        source_dependencies = {name: set() for name in names}
+        source_dependencies: dict[str, set[str]] = {name: set() for name in names}
         for name, value in (inputs or {}).items():
             sql = (
                 value.sql
@@ -136,10 +135,10 @@ class NativePlan:
         )
         if global_sql:
             return cls({name: None for name in names}, (ordered(names),), source_parents)
-        projections = {}
-        edges = {name: set() for name in names}
+        projections: dict[str, set[str] | None] = {}
+        edges: dict[str, set[str]] = {name: set() for name in names}
         for name, spec in settings.datasets.items():
-            columns = set()
+            columns: set[str] = set()
             conditions = []
             schema = spec.schema_spec
             if schema:
@@ -177,13 +176,14 @@ class NativePlan:
                     continue
                 if isinstance(evidence, list):
                     columns.update(evidence)
+            projected: set[str] | None = columns
             for condition in conditions:
                 dependencies = expression_columns(condition)
                 if dependencies is None:
-                    columns = None
+                    projected = None  # an unparsed condition may read any column
                     break
                 columns.update(dependencies)
-            projections[name] = columns
+            projections[name] = projected
         for name, spec in settings.datasets.items():
             if not collector.enabled("INP-005", name):
                 continue
@@ -193,10 +193,11 @@ class NativePlan:
                     continue
                 edges[name].add(parent)
                 edges[parent].add(name)
-                if projections[name] is not None:
-                    projections[name].update(key.columns)
-                if projections[parent] is not None:
-                    projections[parent].update(key.target_columns)
+                child_columns, parent_columns = projections[name], projections[parent]
+                if child_columns is not None:
+                    child_columns.update(key.columns)
+                if parent_columns is not None:
+                    parent_columns.update(key.target_columns)
         for name, dependencies in source_dependencies.items():
             for parent in dependencies:
                 edges[name].add(parent)

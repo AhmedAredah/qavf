@@ -528,7 +528,7 @@ class RuleRegistry:
                 return None
             if self._entry_points_enabled or installed_visible() or installed_origin():
                 return rule
-            return None if mapping(self, "_origins").get(rule_id, False) else rule
+            return None if mapping(self, "_origins").get(rule.rule_id, False) else rule
 
     def _visible(self) -> dict[str, type[Rule]]:
         with _registration_lock:

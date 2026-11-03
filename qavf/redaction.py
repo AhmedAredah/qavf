@@ -214,11 +214,11 @@ def exception_details(exc: BaseException, *, location: bool = True) -> str:
     trace = exc.__traceback__ if location else None
     while trace is not None and trace.tb_next is not None:
         trace = trace.tb_next
-    location = ""
+    where = ""
     if trace is not None:
         filename = trace.tb_frame.f_code.co_filename.replace("\\", "/").rsplit("/", 1)[-1]
-        location = f" at {filename}:{trace.tb_lineno}"
-    return redact_text(f"{type(exc).__name__}{location}: {details}")
+        where = f" at {filename}:{trace.tb_lineno}"
+    return redact_text(f"{type(exc).__name__}{where}: {details}")
 
 
 __all__ = ["MASK", "exception_details", "is_secret_name", "redact", "redact_text"]

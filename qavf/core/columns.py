@@ -222,7 +222,7 @@ class ColumnChecks:
         if spec.unit_column is not None:
             contracts.append(self._units(column, spec, base))
         checks = spec.all_checks()
-        descriptors = {}
+        descriptors: dict[str, list[Any]] = {}
         for check in checks:
             kind = "each_allowed_once" if check.each_allowed_once else "constraints"
             descriptors.setdefault(wording.check_label(check), []).append(

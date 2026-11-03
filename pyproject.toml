@@ -124,3 +124,4 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.12"
 plugins = ["pydantic.mypy"]
 ignore_missing_imports = true
+check_untyped_defs = true

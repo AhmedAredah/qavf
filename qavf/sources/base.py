@@ -513,7 +513,7 @@ class SourceRegistry:
                 return None
             if self._entry_points_enabled or installed_visible() or installed_origin():
                 return found
-            return None if mapping(self, "_origins").get(source_type, False) else found
+            return None if mapping(self, "_origins").get(found.kind, False) else found
 
     def get(self, source_type: str) -> type[DataSource]:
         """Return the class for ``source_type``.

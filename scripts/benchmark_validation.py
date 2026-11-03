@@ -18,13 +18,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 COLS = [f"c{i}" for i in range(14)]
 KEYS = COLS[:7]
 
 
 def package_versions():
-    versions = {}
+    versions: dict[str, str | None] = {}
     for package in ("duckdb", "pyarrow", "pandas", "numpy", "polars"):
         try:
             versions[package] = importlib.metadata.version(package)
@@ -56,6 +57,8 @@ def worker(args):
     if profiler:
         profiler.enable()
     t = time.perf_counter()
+    result: dict[str, Any]
+    config: dict[str, Any]
     if args.mode.startswith("qavf"):
         config = {}
         if args.mode == "qavf_serial":
@@ -119,15 +122,16 @@ def worker(args):
                 f"count(*) FILTER (WHERE bad_{c} OR {c} IS NULL OR {c}<0)" for c in COLS
             ]
             counts = con.execute("SELECT " + ",".join(reductions) + " FROM data").fetchone()
+            assert counts is not None
             assert counts[0] == args.rows and not any(counts[1:]), counts
             keys = ",".join(KEYS)
             con.execute(
                 f"CREATE TEMP TABLE groups AS SELECT {keys},count(*) AS occurrences "
                 f"FROM data GROUP BY {keys} HAVING count(*)>1"
             )
-            groups, involved = con.execute(
-                "SELECT count(*),sum(occurrences) FROM groups"
-            ).fetchone()
+            totals = con.execute("SELECT count(*),sum(occurrences) FROM groups").fetchone()
+            assert totals is not None
+            groups, involved = totals
             # Only sampled key groups need row-position evidence.
             con.execute(
                 f"CREATE TEMP TABLE wanted AS SELECT * FROM groups ORDER BY {keys} LIMIT 50"

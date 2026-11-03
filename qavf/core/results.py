@@ -277,7 +277,7 @@ class ResultCollector:
         return sorted(e for e in self._entries if e.rule_id == rule_id and e.kind == kind)
 
     def _exemptions(self, rule_id):
-        metrics = {}
+        metrics: dict[str, dict[str, int]] = {}
         for entry in self._entries_of(rule_id, "exempt"):
             metrics.setdefault(entry.name, {})[entry.label] = entry.rows
         return metrics

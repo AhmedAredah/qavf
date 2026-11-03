@@ -7,6 +7,7 @@ import functools
 import tempfile
 from datetime import UTC, datetime
 from time import perf_counter
+from typing import Any
 from uuid import uuid4
 
 import duckdb
@@ -145,6 +146,14 @@ def _unavailable(out, name, spec, reason):
 
 def _input_rule(rule_id):
     return input_rule_description(rule_id) if rule_id in INPUT_RULES else None
+
+
+def _scalar(connection: duckdb.DuckDBPyConnection, sql: str) -> Any:
+    """The single value ``sql`` returns."""
+    row = connection.execute(sql).fetchone()
+    if row is None:
+        raise RuntimeError(f"no row returned by {sql}")
+    return row[0]
 
 
 def _referenced(settings, sql):
@@ -471,7 +480,7 @@ class NativeRunner:
         settings = self.settings
         started = datetime.now(UTC)
         resources = ResourcePlan.build(settings, frames=self.inputs, requested_workers=1)
-        usage = {
+        usage: dict[str, Any] = {
             "backend": "duckdb",
             "duckdb_version": duckdb.__version__,
             "resource_plan": resources.diagnostics(),
@@ -508,9 +517,7 @@ class NativeRunner:
             con.execute(f"SET max_temp_directory_size={lit(str(resources.spill_bytes) + 'B')}")
             usage.update(
                 native_threads_per_connection=threads,
-                native_memory_limit=con.execute(
-                    "SELECT current_setting('memory_limit')"
-                ).fetchone()[0],
+                native_memory_limit=_scalar(con, "SELECT current_setting('memory_limit')"),
                 native_spill_limit_bytes=resources.spill_bytes,
                 native_connection_count=1,
             )

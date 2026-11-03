@@ -201,11 +201,11 @@ class SchemaConformance:
                 if column not in schema.columns
             )
         if data.rows < schema.min_rows:
-            problem = wording.row_count_problem(data.rows, schema.min_rows, at_least=True)
-            problems.append({"column": None, "problem": problem})
+            shortfall = wording.row_count_problem(data.rows, schema.min_rows, at_least=True)
+            problems.append({"column": None, "problem": shortfall})
         if schema.max_rows is not None and data.rows > schema.max_rows:
-            problem = wording.row_count_problem(data.rows, schema.max_rows, at_least=False)
-            problems.append({"column": None, "problem": problem})
+            excess = wording.row_count_problem(data.rows, schema.max_rows, at_least=False)
+            problems.append({"column": None, "problem": excess})
         if not problems:
             return False
         self.out.report(

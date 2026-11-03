@@ -9,6 +9,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import duckdb
@@ -207,9 +208,10 @@ class InputReader:
     def _load_once(self, name, value, spec, identity, owned, policy):
         con = self.connection
         table = "__qavf_input_" + uuid4().hex
-        metadata = {"loaded_at": datetime.now(UTC).isoformat()}
+        metadata: dict[str, Any] = {"loaded_at": datetime.now(UTC).isoformat()}
         source_options = source_path = source_format = None
-        files, file_count_sql = (), None
+        files: tuple[str, ...] = ()
+        file_count_sql = None
         budget = policy.row_budget
         try:
             if isinstance(value, BatchSource):
@@ -275,10 +277,11 @@ class InputReader:
                     value.parameters,
                     known_tables=self.settings.datasets,
                 )
-                if value.connection is not None and value.connection is not con:
+                borrowed = value.connection
+                if isinstance(borrowed, duckdb.DuckDBPyConnection) and borrowed is not con:
                     # Limit before crossing the connection boundary; never publish a prefix.
                     query = self._bounded(query.rstrip().removesuffix(";"), budget)
-                    relation = value.connection.sql(query, params=dict(parameters))
+                    relation = borrowed.sql(query, params=dict(parameters))
                     SourceNames.validate(relation.columns)
                     desc = list(zip(relation.columns, map(str, relation.types), strict=True))
                     projected = self._projection(name, spec, desc)

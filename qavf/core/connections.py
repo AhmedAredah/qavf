@@ -38,28 +38,28 @@ class SourceConnections:
             if isinstance(query.connection, str):
                 attach.append(query.connection)
         elif value.get("type") == "query":
-            params = QueryParams.model_validate(
+            query_params = QueryParams.model_validate(
                 {
                     key: item
                     for key, item in value.items()
                     if key not in {"connection", "parameters"}
                 }
             )
-            query = Query(params.sql, parameters=value.get("parameters", {}))
-            attach = params.connections or referenced_connections(
+            query = Query(query_params.sql, parameters=value.get("parameters", {}))
+            attach = query_params.connections or referenced_connections(
                 query.sql, self.settings.connections
             )
             if value.get("connection"):
                 attach.append(value["connection"])
         elif value.get("type") == "database":
-            params = DatabaseParams.model_validate(value)
+            database = DatabaseParams.model_validate(value)
             parts = [
-                params.connection,
-                *([params.db_schema] if params.db_schema else []),
-                params.table,
+                database.connection,
+                *([database.db_schema] if database.db_schema else []),
+                database.table,
             ]
-            sql = params.query or "SELECT * FROM " + ".".join(qi(part) for part in parts if part)
-            query, attach = Query(sql), [params.connection]
+            sql = database.query or "SELECT * FROM " + ".".join(qi(part) for part in parts if part)
+            query, attach = Query(sql), [database.connection]
         else:
             unsupported(f"source type {value.get('type')!r}")
         missing = [name for name in dict.fromkeys(attach) if name not in self.attached]
