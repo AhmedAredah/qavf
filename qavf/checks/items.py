@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from qavf.engine.severity import Severity
 
@@ -40,7 +41,10 @@ class CheckItem(BaseModel):
     severity: Severity | None = None
     """Overrides the check's default severity."""
     where: str | None = None
-    """SQL condition: assess only the rows that match it."""
+    """SQL condition: assess only the rows that match it. Only the checks that list
+    ``where`` among their settings take it (``expression``, ``compare`` and plugins
+    whose parameters declare it); for the others, check a view
+    (``<dataset>.<view>``) or a dataset of the filtered rows."""
     tags: list[str] = Field(default_factory=list)
     """Words grouping checks for run-time selection."""
     enabled: bool = True
@@ -106,6 +110,8 @@ class SqlItem(CheckItem):
     check: Literal["sql"]  # type: ignore[assignment]
     name: str = Field(min_length=1)
     """Your label; unique among the top-level checks; shown in reports."""
+    where: SkipJsonSchema[None] = None
+    """Not taken: the query has its own WHERE clause."""
     sql: str
     """Query returning offending rows; every dataset is a table under its name."""
 

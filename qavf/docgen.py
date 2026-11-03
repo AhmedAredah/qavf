@@ -173,8 +173,10 @@ def rules_markdown(registry: RuleRegistry, title: str = "Check reference") -> st
         "",
         "A check item names its check (`check: missing_periods`); the code (`TMP-004`)",
         "is its stable audit ID in reports. Besides the settings listed here, every item",
-        "takes the common fields `name`, `severity`, `where`, `tags`, `enabled` and",
-        "`description`. `qavf list-checks` prints the same catalog.",
+        "takes the common fields `name`, `severity`, `tags`, `enabled` and `description`.",
+        "Only the checks listing `where` take it; for the others, check a view",
+        "(`<dataset>.<view>`) or a dataset of the filtered rows. `qavf list-checks`",
+        "prints the same catalog.",
         "",
         "| Check | Code | Goes in | Category | Default severity | Summary |",
         "|---|---|---|---|---|---|",
@@ -201,7 +203,12 @@ def rules_markdown(registry: RuleRegistry, title: str = "Check reference") -> st
             ]
             if definition.configurable:
                 lines += [f"Goes in {_PLACES[definition.placement]}.", ""]
-                lines += model_reference(definition.item_model(), skip=COMMON_FIELDS)
+                skip = tuple(
+                    field
+                    for field in COMMON_FIELDS
+                    if field != "where" or not definition.supports_where
+                )
+                lines += model_reference(definition.item_model(), skip=skip)
             else:
                 lines += [
                     "Comes from the dataset's `schema` (and its availability); it has no check "

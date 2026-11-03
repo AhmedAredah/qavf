@@ -21,10 +21,24 @@ Only configured checks run. Every item takes these fields besides its own settin
 | `check` | The kind of check (required) |
 | `name` | Your label, unique within its list and different from every other item's default name there and from every dataset name; shown in reports, usable in `run.require` and `--only`. Defaults to `<check> on <dataset>` |
 | `severity` | `INFO`, `WARNING`, `ERROR` or `CRITICAL`, overriding the check's default |
-| `where` | SQL condition: assess only the rows that match |
 | `tags` | Words grouping checks for run-time selection |
-| `enabled` | `false` keeps a check configured but off |
+| `enabled` | `false` keeps a check configured but off; an item switched off before any settings are given may omit its required ones |
 | `description` | Shown in reports |
+
+`where` (a SQL condition: assess only the rows that match it) is taken only by
+`expression`, `compare` and plugin checks whose parameters declare it; any other
+check rejects it. To check a slice with those, check a view (`counts.recent`, where
+a check names datasets) or define a dataset of the filtered rows.
+
+A filtered `expression` is assessed on the rows its `where` selects (a `NULL`
+condition excludes the row): `1 row of 2 matching 'where: x > 0' in d violates
+'x < 10'`, with `population_rows`, `applicable_rows` and `excluded_rows` in its
+metrics. With `min_applicable_rows: N`, fewer than `N` matching rows leave it not
+assessed (an incomplete run) instead of passing vacuously:
+
+```yaml
+- {check: expression, name: valid speeds, expr: speed < 120, where: "status = 'valid'", min_applicable_rows: 1}
+```
 
 A result keeps its `rule_id` and `check_id` and adds the check name and the item's
 name; its label reads `missing_periods · counts · no missing years (TMP-004)`.

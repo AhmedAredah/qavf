@@ -185,14 +185,17 @@ class CheckDefinition(ABC):
             return tuple(named)
         return ()
 
+    @property
+    def supports_where(self) -> bool:
+        """Whether the check's items take the common ``where`` setting."""
+        return self.where_field is not None
+
     def where(self, item: CheckItem) -> dict[str, Any]:
         """The element field receiving the common ``where`` setting."""
         if item.where is None:
             return {}
         if self.where_field is None:
-            raise CheckSettingError(
-                "where", f"'where' is not supported by the {self.name} check yet"
-            )
+            raise CheckSettingError("where", unsupported_where(self.name))
         return {self.where_field: item.where}
 
     def errors(self, item: CheckItem, scope: Scope, *, parameters: bool = True) -> list[str]:
@@ -1128,6 +1131,10 @@ class ExpressionDefinition(CheckDefinition):
 
     list_driven = True
 
+    @property
+    def supports_where(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__(ExpressionRule, "dataset")
 
@@ -1224,11 +1231,26 @@ class PluginDefinition(CheckDefinition):
             ]
         return []
 
+    @property
+    def supports_where(self) -> bool:
+        """A plugin takes ``where`` when its parameters declare it."""
+        return "where" in self.rule_cls.Params.model_fields
+
     def compile(self, item: CheckItem, scope: Scope) -> dict[str, Any]:
-        self.where(item)
-        params = item.settings
+        params = copy.deepcopy(item.settings)
+        if item.where is not None:
+            if not self.supports_where:
+                raise CheckSettingError("where", unsupported_where(self.name))
+            params["where"] = item.where
         if scope.dataset is not None and "dataset" in self.rule_cls.Params.model_fields:
-            params.setdefault("dataset", scope.dataset)
+            named = params.get("dataset", scope.dataset)
+            if named != scope.dataset:
+                raise CheckSettingError(
+                    "dataset",
+                    f"the item is placed on dataset {scope.dataset!r} but names dataset "
+                    f"{named!r}; place it on {named!r} or leave 'dataset' out",
+                )
+            params["dataset"] = scope.dataset
         return params
 
     def decompile(self, params: Mapping[str, Any]) -> list[Decompiled]:
@@ -1362,11 +1384,25 @@ def _settings_required_when_enabled(schema: dict[str, Any]) -> None:
     schema["else"] = {"required": required}
 
 
+def unsupported_where(check: str) -> str:
+    """Why a check item cannot take ``where``, and what selects its rows instead."""
+    return (
+        f"'where' is not supported by the {check} check; check a view "
+        "(datasets.<dataset>.views.<view>, named as <dataset>.<view> where a check "
+        "names datasets) or a dataset of the filtered rows instead"
+    )
+
+
 @functools.cache
 def _item_model(definition: CheckDefinition) -> type[BaseModel]:
     fields = dict(definition.item_fields())
     for name in _COMMON_ITEM_FIELDS:
         fields.pop(name, None)
+    common = {
+        name: field
+        for name, field in _COMMON_ITEM_FIELDS.items()
+        if name != "where" or definition.supports_where
+    }
     model_name = "Check_" + "".join(ch if ch.isalnum() else "_" for ch in definition.name)
     return create_model(  # type: ignore[call-overload,no-any-return]
         model_name,
@@ -1380,7 +1416,7 @@ def _item_model(definition: CheckDefinition) -> type[BaseModel]:
             Literal[definition.name],  # type: ignore[valid-type]
             Field(description="Kind of check."),
         ),
-        **_COMMON_ITEM_FIELDS,
+        **common,
         **fields,
     )
 

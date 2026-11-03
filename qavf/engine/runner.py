@@ -915,6 +915,19 @@ class QARunner:
         )
         return locator.locate(bounded)
 
+    @staticmethod
+    def _datasets(rule: Rule, finding: Finding | None) -> tuple[str, ...]:
+        """The datasets a result is about: the finding's, the rule's, or the one its
+        check item is placed on (plugin findings need not name it)."""
+        if finding is not None and finding.datasets:
+            return tuple(finding.datasets)
+        if rule.requires:
+            return tuple(rule.requires)
+        binding = rule.binding
+        if binding is not None and binding.key.startswith("datasets."):
+            return tuple(binding.datasets)
+        return ()
+
     def _tags(self, rule: Rule, finding: Finding | None) -> list[str]:
         """The explicit tags of the check item a result reports on."""
         if rule.binding is not None:
@@ -1036,7 +1049,7 @@ class QARunner:
             execution_time_s=round(elapsed, 6),
             recommendation=rule.recommendation,
             metrics=metrics,
-            datasets=list(finding.datasets if finding and finding.datasets else rule.requires),
+            datasets=list(self._datasets(rule, finding)),
         )
         return _shown_names(result) if getattr(rule.params, "group", None) else result
 

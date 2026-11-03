@@ -4,8 +4,10 @@
 
 A check item names its check (`check: missing_periods`); the code (`TMP-004`)
 is its stable audit ID in reports. Besides the settings listed here, every item
-takes the common fields `name`, `severity`, `where`, `tags`, `enabled` and
-`description`. `qavf list-checks` prints the same catalog.
+takes the common fields `name`, `severity`, `tags`, `enabled` and `description`.
+Only the checks listing `where` take it; for the others, check a view
+(`<dataset>.<view>`) or a dataset of the filtered rows. `qavf list-checks`
+prints the same catalog.
 
 | Check | Code | Goes in | Category | Default severity | Summary |
 |---|---|---|---|---|---|
@@ -52,6 +54,7 @@ Goes in top-level `checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition: assess only the rows that match it. Only the checks that list ``where`` among their settings take it (``expression``, ``compare`` and plugins whose parameters declare it); for the others, check a view (``<dataset>.<view>``) or a dataset of the filtered rows. |
 | `datasets` | `list[str]` | **required** | The datasets related; the reference first (by default). |
 | `strategy` | `Literal['reference', 'sequential', 'all_pairs', 'consensus']` | `reference` | How the datasets are paired: the reference with each other (reference), each with the next (sequential), every pair (all_pairs) or each with the consensus of all (consensus). |
 | `reference` | `str \| None` | `None` | The authoritative dataset (default: the first); with consensus, the dataset whose value breaks ties under ties: reference. |
@@ -217,8 +220,10 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition: assess only the rows that match it. Only the checks that list ``where`` among their settings take it (``expression``, ``compare`` and plugins whose parameters declare it); for the others, check a view (``<dataset>.<view>``) or a dataset of the filtered rows. |
 | `expr` | `str` | **required** | Condition every row satisfies, e.g. ``pm25 <= pm10``; it may query other datasets by name in subqueries. |
 | `null_as` | `Literal['pass', 'fail']` | `pass` | How a row whose expression evaluates to NULL counts (SQL CHECK semantics: pass). |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this makes the check not assessed. |
 
 *When it fails:* An expression failure means a relationship between columns that must always hold does not. Inspect the listed rows for mismatched units or rows combined from different sources.
 
