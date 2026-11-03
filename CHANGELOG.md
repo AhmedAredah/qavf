@@ -147,6 +147,10 @@ Reports written by earlier versions still load.
   level, comparison). A column entry setting only `atol` had dropped the level's
   `rtol` for the comparison's default, so a group mean within the level's `rtol`
   failed (or a looser default passed it).
+- The records level describes a `Decimal(38, s)` change that needs 39 digits (e.g.
+  from 10^38-1 to -(10^38-1)) exactly; the overflow had made the whole level not
+  assessed although its counts were complete. A description that still fails is
+  reported as `description_unavailable` beside the counts and verdict.
 
 ## [Unreleased]
 

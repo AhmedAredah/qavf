@@ -96,21 +96,47 @@ def _categorical(dtype: pl.DataType) -> bool:
 
 def _difference(b: pl.Expr, c: pl.Expr, db: pl.DataType, dc: pl.DataType) -> pl.Expr:
     """Exact ``|c - b|`` for integers and decimals; binary64 when a float is involved."""
-    if db == pl.Int128 or dc == pl.Int128:
-        # The difference of two signed 128-bit values can need 129 bits. Compute
-        # it with Python's unbounded integers before rounding the display size.
+    if db == pl.Int128 or dc == pl.Int128 or _decimal_gap_overflows(db, dc):
+        # The difference of two signed 128-bit values can need 129 bits, and that of
+        # two 38-digit decimals 39 digits. Compute it with Python's unbounded
+        # integers and rationals before rounding the display size.
         return pl.struct(b.alias("before"), c.alias("after")).map_elements(
-            lambda pair: _difference_size(pair["before"], pair["after"])[0],
-            return_dtype=pl.Float64,
+            _pair_gap, return_dtype=pl.Float64
         )
     if db.is_integer() and dc.is_integer():
         return (c.cast(pl.Int128) - b.cast(pl.Int128)).abs()
     if not (db.is_float() or dc.is_float()):
-        scale = max(
-            (dtype.scale or 0) if isinstance(dtype, pl.Decimal) else 0 for dtype in (db, dc)
-        )
+        scale = max(_decimal_digits(dtype)[1] for dtype in (db, dc))
         return (c.cast(pl.Decimal(38, scale)) - b.cast(pl.Decimal(38, scale))).abs()
     return (c.cast(pl.Float64) - b.cast(pl.Float64)).abs()
+
+
+def _pair_gap(pair: dict[str, Any]) -> float | None:
+    """Exact ``|after - before|`` of one row, rounded to binary64 for display."""
+    return _difference_size(pair["before"], pair["after"])[0]
+
+
+_DECIMAL_DIGITS = 38
+"""Widest native decimal: a difference needing more digits is computed in Python."""
+
+
+def _decimal_digits(dtype: pl.DataType) -> tuple[int, int]:
+    """``(integer digits, scale)`` of an exact numeric type (integers up to 64 bits)."""
+    if isinstance(dtype, pl.Decimal):
+        precision = dtype.precision or _DECIMAL_DIGITS
+        scale = dtype.scale or 0
+        return precision - scale, scale
+    return 20, 0
+
+
+def _decimal_gap_overflows(db: pl.DataType, dc: pl.DataType) -> bool:
+    """Whether a decimal difference might not fit the widest native decimal."""
+    if not (isinstance(db, pl.Decimal) or isinstance(dc, pl.Decimal)):
+        return False
+    if db.is_float() or dc.is_float():
+        return False
+    (whole_b, scale_b), (whole_c, scale_c) = _decimal_digits(db), _decimal_digits(dc)
+    return max(whole_b, whole_c) + 1 + max(scale_b, scale_c) > _DECIMAL_DIGITS
 
 
 def _finite(b: pl.Expr, c: pl.Expr, db: pl.DataType, dc: pl.DataType) -> pl.Expr:
@@ -566,6 +592,14 @@ def _shift_check(
     return _Shift(check, family, columns, shifted)
 
 
+_DESCRIPTION_ERRORS = (
+    pl.exceptions.ComputeError,
+    pl.exceptions.InvalidOperationError,
+    ArithmeticError,
+)
+"""Failures of the optional per-column descriptions that leave the counts standing."""
+
+
 @register_level
 class RecordsLevel(ComparisonLevel):
     """Rows added, removed, changed and unchanged, with per-column change detail."""
@@ -599,7 +633,13 @@ class RecordsLevel(ComparisonLevel):
             schema=params.schema_policy,
         )
         result = _keyed(inputs, plan)
-        stats, changes = _describe(inputs, plan, params)
+        try:
+            stats, changes = _describe(inputs, plan, params)
+            unavailable: str | None = None
+        except _DESCRIPTION_ERRORS as error:
+            # Descriptions are optional detail; the counts and verdict above are not.
+            stats, changes = {column: {} for column in plan.values}, []
+            unavailable = f"{type(error).__name__}: {str(error).splitlines()[0]}"
         matched = result.baseline_rows - result.rows_removed
         columns = [
             ColumnChanges(
@@ -663,6 +703,11 @@ class RecordsLevel(ComparisonLevel):
                     "max_abs_diff": result.max_abs_diff,
                     "max_rel_diff": result.max_rel_diff,
                     "nonfinite_changes": result.nonfinite_changes,
+                    **(
+                        {"description_unavailable": {c: unavailable for c in plan.values}}
+                        if unavailable is not None
+                        else {}
+                    ),
                 },
             ),
         ]
