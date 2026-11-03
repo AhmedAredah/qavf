@@ -103,6 +103,23 @@ Reports written by earlier versions still load.
 
 - `qavf run` prints result labels on a console that is not UTF-8 (e.g. a Windows
   cp1252 pipe): `·` falls back to `-` instead of showing as `�`.
+- Two unnamed checks of one kind on a dataset no longer share an identity: a
+  failing `expression` could take the other item's tags, and with them a
+  `fail_on: never` tag policy, so the run passed. Every check item now has an
+  instance id, its location (`datasets.d.checks[0]`, `checks[2]`), which results
+  carry in the new `item_ids` field; tags, tag policies and `run.require` follow
+  it. Reports written without `item_ids` still load.
+- A `run.require` entry naming several items (one name in several datasets)
+  requires each of them to be assessed; a disabled one no longer passes unnoticed.
+  A selection still narrows requirements to the items it runs.
+- A required unnamed `expression` with `where` that passed is no longer reported
+  as not assessed.
+- An explicit check name equal to another item's default name in the same list,
+  or to a dataset name, is a configuration error.
+- A view, dataset, `across` copy or derived dataset with the name of another (or a
+  name differing only in case) is a configuration error naming both declarations.
+  A view `roads.active` could silently replace a dataset `roads.active` on the
+  Polars backend while the DuckDB backend read the dataset.
 
 ## [Unreleased]
 

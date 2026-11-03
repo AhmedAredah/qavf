@@ -19,7 +19,7 @@ Only configured checks run. Every item takes these fields besides its own settin
 | Field | Meaning |
 |---|---|
 | `check` | The kind of check (required) |
-| `name` | Your label, unique within its list; shown in reports, usable in `run.require` and `--only`. Defaults to `<check> on <dataset>` |
+| `name` | Your label, unique within its list and different from every other item's default name there and from every dataset name; shown in reports, usable in `run.require` and `--only`. Defaults to `<check> on <dataset>` |
 | `severity` | `INFO`, `WARNING`, `ERROR` or `CRITICAL`, overriding the check's default |
 | `where` | SQL condition: assess only the rows that match |
 | `tags` | Words grouping checks for run-time selection |
@@ -28,6 +28,14 @@ Only configured checks run. Every item takes these fields besides its own settin
 
 A result keeps its `rule_id` and `check_id` and adds the check name and the item's
 name; its label reads `missing_periods · counts · no missing years (TMP-004)`.
+
+Names are labels, not identities: unnamed items of one kind on a dataset share
+the default name. Each item is identified by its location, its *instance id*:
+`datasets.counts.checks[2]`, `checks[0]` for the top-level list, and
+`datasets.counts@a.checks[0]` for an item on an `across` copy. Results carry the
+ids of the items they report on in `item_ids` (a summary of passing checks lists
+all of them), and tags, tag policies and `run.require` follow the id, so two
+items sharing a name never take each other's tags or requirements.
 
 ## Column limits
 
@@ -97,6 +105,13 @@ datasets:
 | `include` | top level | Other YAML files merged first |
 | `vars` | top level | Named values, used as `${vars.name}` in any value |
 
+Datasets, their views (`<dataset>.<view>`), `across` copies (`<dataset>@<copy>`) and
+the datasets checks derive share one namespace, because SQL reads each of them as a
+table by name, ignoring case. Two of them with one name, or names differing only in
+case, are a configuration error naming both declarations. Dataset names may contain
+dots (a schema-qualified `roads.archive` is fine), but a dataset `roads.active` and
+a view `active` of dataset `roads` cannot both exist.
+
 Resolution: `include` files merge first, in order, and the including file wins; a
 dataset or check name repeated across files is an error. `vars` and `${ENV}`
 substitute before validation, and an unknown variable is an error. A check's own
@@ -123,6 +138,14 @@ selectors. Built-in checks carry their family as a tag (`input`, `temporal`,
 `statistical`, `reconciliation`, `spatial`, `regression`, `comparison`), so
 `--tags temporal` works without configuration. A `require` entry that matches
 nothing is a configuration error.
+
+A `require` entry naming a check stands for every item with that name (in any
+dataset's list), and **each** of them must be assessed: one that is disabled,
+skipped, produced no result or could not run leaves the requirement unmet. A
+dataset entry requires every check on that dataset and its schema contracts. A
+check may not be named like a dataset, so an entry is never ambiguous. A run-time
+selection narrows requirements: items it leaves out are not required, and entries
+matching no selected item are dropped.
 
 ## Many datasets
 
