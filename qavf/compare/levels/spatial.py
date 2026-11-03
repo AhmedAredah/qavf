@@ -59,6 +59,7 @@ from qavf.compare.levels.groups import (
     AlignedGroups,
     MeasureSpec,
     compare_measure,
+    ignored_measure_errors,
     materiality,
     measure_tests,
     member_values,
@@ -279,6 +280,10 @@ class SpatialLevel(ComparisonLevel):
         found = params.layer.datasets() if params.layer is not None else frozenset()
         table = params.weights.table
         return found | (table.datasets() if table is not None else frozenset())
+
+    def configuration_errors(self, spec: ComparisonSpec) -> list[str]:
+        params: SpatialParams = self.params  # type: ignore[assignment]
+        return [*super().configuration_errors(spec), *ignored_measure_errors(spec, params.measures)]
 
     def required_columns(self) -> frozenset[str]:
         from qavf.compare.levels.groups import measure_columns

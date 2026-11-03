@@ -35,6 +35,7 @@ from qavf.compare.levels.groups import (
     AlignedGroups,
     MeasureSpec,
     compare_measure,
+    ignored_measure_errors,
     materiality,
     measure_tests,
     member_values,
@@ -43,7 +44,7 @@ from qavf.compare.levels.groups import (
 )
 from qavf.compare.results import CheckResult, LevelResult, TemporalResult
 from qavf.compare.significance import Inference
-from qavf.compare.spec import InferenceParams, Side
+from qavf.compare.spec import ComparisonSpec, InferenceParams, Side
 from qavf.engine.registry import RuleParams
 from qavf.rules._grouped import ProjectedRelation
 from qavf.rules.helpers import fresh_internal, plural
@@ -224,6 +225,10 @@ class TemporalLevel(ComparisonLevel):
     )
     Params: ClassVar[type[RuleParams]] = TemporalParams
     Result: ClassVar[type[LevelResult]] = TemporalResult
+
+    def configuration_errors(self, spec: ComparisonSpec) -> list[str]:
+        params: TemporalParams = self.params  # type: ignore[assignment]
+        return [*super().configuration_errors(spec), *ignored_measure_errors(spec, params.measures)]
 
     def required_columns(self) -> frozenset[str]:
         from qavf.compare.levels.groups import measure_columns

@@ -306,9 +306,10 @@ class DeriveStep(AlignmentStep):
         schema = plan.collect_schema()
         if clash := [name for name in self.params.columns if name in schema]:
             raise context.refuse(f"derived column(s) {', '.join(clash)} already exist")
-        return plan.with_columns(
-            pl.sql_expr(expression).alias(name) for name, expression in self.params.columns.items()
-        )
+        # In mapping order, so a later column may use an earlier one.
+        for name, expression in self.params.columns.items():
+            plan = plan.with_columns(pl.sql_expr(expression).alias(name))
+        return plan
 
 
 class FilterParams(RuleParams):

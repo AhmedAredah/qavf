@@ -106,12 +106,26 @@ level parameters) uses **candidate names**.
 | `cast` | Convert types losslessly (`int`, `float`, `decimal` with `scale`, `str`, `bool`, `date`, `datetime`) on `both` sides or one. A value that would change refuses the alignment. | `{site: str, rate: {dtype: decimal, scale: 4}}` |
 | `units` | Multiply one side's column by an exact factor; integers and decimals stay exact. `from_unit` must match the declared `unit`; `to_unit` becomes it. | `{mass: {factor: 1000, to_unit: kg}}` |
 | `recode` | Replace values through a map; unmapped values are kept, made null or refused. | `{fc: {values: {"1": interstate}}}` |
-| `derive` | Add the same Polars SQL expression on both sides. | `{total: "cars + trucks"}` |
+| `derive` | Add the same Polars SQL expression on both sides, in mapping order: a later column may use an earlier one. | `{total: "cars + trucks", share: "cars / total"}` |
 | `steps` | Plugin (or built-in) steps, `{step: name, ...}`, e.g. `shift_time` ([calendar alignment](#calendar-alignment)) or `assign_zones` ([in space](#in-space)). | `[{step: trim, columns: [name]}]` |
 | `baseline_where`, `candidate_where`, `where` | Keep only rows in scope on one or both sides. | `"year >= 2020"` |
 
 Dataset-level `rename`, `missing_values` and `canonical_columns` apply before the
 pipeline, exactly as for every other rule.
+
+Column names are checked once both schemas are known, before any row is read; a
+misspelled name makes every level not assessed with a `configuration error` (with
+close spellings suggested), in `compare_datasets` and the `compare` check alike:
+
+- a `derive` expression must use columns of both aligned sides or earlier derived
+  columns;
+- every `tolerances` and `ignore_columns` name must be an aligned column (or a
+  derived one) of at least one side. A column present on only one side is accepted,
+  so it can be ignored while structure reports it as added or removed.
+
+`ignore_columns` leaves columns out of structure, coverage and record values. A
+`groups`, `temporal`, `spatial` or `contribution` measure of an ignored column
+contradicts it and is refused when the configuration loads.
 
 ## Levels
 

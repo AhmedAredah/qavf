@@ -177,6 +177,17 @@ def measure_columns(specs: Sequence[MeasureSpec]) -> set[str]:
     }
 
 
+def ignored_measure_errors(spec: ComparisonSpec, measures: Sequence[MeasureSpec]) -> list[str]:
+    """A measure of an ignored column contradicts ``ignore_columns``; refuse it."""
+    ignored = set(spec.ignore_columns)
+    return [
+        f"measure {measure.label!r} uses ignored column(s) "
+        f"{', '.join(sorted(used & ignored))}; remove the measure or the ignore_columns entry"
+        for measure in measures
+        if (used := measure_columns([measure])) & ignored
+    ]
+
+
 def materiality(spec: ComparisonSpec, level: _LevelTolerance, measure: MeasureSpec) -> Materiality:
     """The measure's tolerance, ``rtol`` and ``atol`` resolved independently.
 
@@ -668,6 +679,10 @@ class GroupsLevel(ComparisonLevel):
     )
     Params: ClassVar[type[RuleParams]] = GroupsParams
     Result: ClassVar[type[LevelResult]] = GroupsResult
+
+    def configuration_errors(self, spec: ComparisonSpec) -> list[str]:
+        params: GroupsParams = self.params  # type: ignore[assignment]
+        return [*super().configuration_errors(spec), *ignored_measure_errors(spec, params.measures)]
 
     def required_columns(self) -> frozenset[str]:
         params: GroupsParams = self.params  # type: ignore[assignment]

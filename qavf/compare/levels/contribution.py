@@ -38,6 +38,7 @@ from qavf.compare.levels.groups import (
     AlignedGroups,
     MeasureSpec,
     compare_measure,
+    ignored_measure_errors,
     materiality,
     measure_tests,
     precise_frame,
@@ -54,7 +55,7 @@ from qavf.compare.results import (
     RateEffect,
 )
 from qavf.compare.significance import Inference, MeasureTest, Member, family_check
-from qavf.compare.spec import InferenceParams
+from qavf.compare.spec import ComparisonSpec, InferenceParams
 from qavf.engine.registry import RuleParams
 from qavf.inference.registry import TESTS, TestInput
 from qavf.inference.results import TestResult
@@ -210,6 +211,13 @@ class ContributionLevel(ComparisonLevel):
     )
     Params: ClassVar[type[RuleParams]] = ContributionParams
     Result: ClassVar[type[LevelResult]] = ContributionResult
+
+    def configuration_errors(self, spec: ComparisonSpec) -> list[str]:
+        params: ContributionParams = self.params  # type: ignore[assignment]
+        return [
+            *super().configuration_errors(spec),
+            *ignored_measure_errors(spec, (params.measure,)),
+        ]
 
     def required_columns(self) -> frozenset[str]:
         from qavf.compare.levels.groups import measure_columns

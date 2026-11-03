@@ -18,6 +18,7 @@ import polars as pl
 from qavf.compare.align import AlignmentContext, AlignmentError, align, build_pipeline
 from qavf.compare.evidence import bound_level
 from qavf.compare.levels import LEVELS, SIDES, ComparisonLevel, LevelInputs, not_assessed
+from qavf.compare.names import ComparisonColumnNames, ComparisonConfigurationError
 from qavf.compare.results import DatasetComparison, LevelResult
 from qavf.compare.spec import ComparisonSpec, Side
 from qavf.engine.context import DataContext
@@ -123,9 +124,11 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
             return unassessed(
                 f"dataset {dataset!r} not available ({ctx.unavailable_reason(dataset)})"
             )
+    names = ComparisonColumnNames(spec)
     with ExitStack() as stack:
         try:
             requests: dict[str, list[str] | None] = {}
+            known: set[str] = set(spec.derive)
             for side in SIDES:
                 dataset = datasets[side]
                 columns = _source_columns(spec, needed, side)
@@ -137,6 +140,8 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
                 )
                 if clash := sorted(set(spec.derive) & set(aligned_schema)):
                     raise AlignmentError(f"derived column(s) {', '.join(clash)} already exist")
+                names.check_derive(side, aligned_schema)
+                known.update(aligned_schema)
                 if columns is not None:
                     columns = [column for column in columns if column in schema] or None
                 if dataset not in requests:
@@ -169,14 +174,16 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
                 )
                 aligned[side] = align(plan, steps, context)
                 identities[side] = aligned[side] is original
+                aligned_columns = aligned[side].collect_schema().names()
+                known.update(aligned_columns)
                 if needed:
-                    selected = [
-                        column for column in aligned[side].collect_schema() if column in needed
-                    ]
+                    selected = [column for column in aligned_columns if column in needed]
                     if selected:
                         aligned[side] = aligned[side].select(selected)
                 units[side], nullable[side] = context.units, context.nullable
                 outcome["alignment"].extend(context.notes)
+            # Before any row is read: a misspelled option must not be filtered out.
+            names.check_options(known)
             sides: dict[Side, Observation] = {
                 side: observed[datasets[side]]
                 if identities[side]
@@ -187,6 +194,8 @@ def compare_in_context(ctx: DataContext, spec: ComparisonSpec) -> DatasetCompari
                 side: int(sides[side].collect(sides[side].scan().select(pl.len())).item())
                 for side in SIDES
             }
+        except ComparisonConfigurationError as exc:
+            return unassessed(f"configuration error: {redact_text(str(exc))}")
         except Exception as exc:
             return unassessed(f"alignment failed: {_reason(exc)}")
         counts = {"baseline_rows": rows["baseline"], "candidate_rows": rows["candidate"]}

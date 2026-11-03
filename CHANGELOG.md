@@ -151,6 +151,13 @@ Reports written by earlier versions still load.
   from 10^38-1 to -(10^38-1)) exactly; the overflow had made the whole level not
   assessed although its counts were complete. A description that still fails is
   reported as `description_unavailable` beside the counts and verdict.
+- Comparison `tolerances` and `ignore_columns` naming a column neither aligned side
+  has are a configuration error (with suggestions) in `compare_datasets` and the
+  `compare` check; they had been dropped silently, so a typo passed. A measure of
+  an ignored column is refused when the configuration loads.
+- `derive` columns apply in mapping order, so a later one may use an earlier one;
+  every level had been not assessed with a missing column. A reference to a
+  column that does not exist is a configuration error before any row is read.
 
 ## [Unreleased]
 
