@@ -22,7 +22,7 @@ from qavf.engine.severity import Severity
 from qavf.inference.decision import DEFAULT_ALPHA, DEFAULT_POLICY
 from qavf.inference.resampling import DEFAULT_MAX_WORK, DEFAULT_SEED
 from qavf.inference.results import Correction, DecisionPolicy
-from qavf.parameters import text_or_mapping_schema
+from qavf.parameters import Count, text_or_mapping_schema
 from qavf.rules.regression_checks import ColumnTolerance
 from qavf.settings import DType, NumericBound
 
@@ -311,7 +311,7 @@ class ComparisonSpec(RuleParams):
     """Per-column tolerances, e.g. ``{share: {atol: 0.001}, code: {exact: true}}``."""
     levels: tuple[LevelConfig, ...] | None = None
     """Levels to compare; ``structure, coverage, records`` (``structure`` without keys)."""
-    min_rows: int = Field(default=1, ge=0)
+    min_rows: Count = Field(default=1, ge=0)
     """Fewest aligned rows on each side for the comparison to be assessed."""
     decision: DecisionPolicy = DEFAULT_POLICY
     """How materiality and significance combine: ``material_and_significant``

@@ -27,6 +27,7 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     ValidatorFunctionWrapHandler,
     WrapValidator,
     field_serializer,
@@ -35,7 +36,13 @@ from pydantic import (
     model_validator,
 )
 
-from qavf.checks.items import CheckItem, RunSettings, dataset_item_id, top_level_item_id
+from qavf.checks.items import (
+    CheckDefaults,
+    CheckItem,
+    RunSettings,
+    dataset_item_id,
+    top_level_item_id,
+)
 from qavf.checks.legacy import reject_legacy
 from qavf.checks.relations import RelationNamespace
 from qavf.config_paths import FilePath, PathRole, SourceSpec
@@ -49,6 +56,7 @@ from qavf.configuration import (
 from qavf.configuration import expand_env as expand_env
 from qavf.engine.severity import Severity
 from qavf.number_grammar import AllowedValueDomain, NumberGrammar, Whitespace, converted_options
+from qavf.parameters import Count
 from qavf.scalars import normalize_scalar, normalize_scalar_sequence
 from qavf.text_types import TEXT_DTYPES, TextType, Word
 from qavf.value_policy import TextNormalization
@@ -321,11 +329,11 @@ class ColumnConstraints(_Strict):
     """Forbidden values (sentinels such as -999)."""
     regex: str | None = None
     """Pattern every text value must match in full."""
-    min_length: int | None = Field(default=None, ge=0)
-    max_length: int | None = Field(default=None, ge=0)
+    min_length: Count | None = Field(default=None, ge=0)
+    max_length: Count | None = Field(default=None, ge=0)
     integral: bool = False
     """Every value is a whole number (for float columns; integers always are)."""
-    max_decimals: int | None = Field(default=None, ge=0)
+    max_decimals: Count | None = Field(default=None, ge=0)
     """At most this many decimal places; exact for decimals, bounded rounding noise for floats."""
     # column level
     max_null_fraction: float | None = Field(default=None, ge=0, le=1)
@@ -457,7 +465,7 @@ class ColumnCheck(ColumnConstraints):
     where: str | None = None
     """Apply the check only to rows matching this SQL condition (Polars SQL syntax),
     e.g. ``"status = 'valid'"``; other rows are outside its scope."""
-    min_applicable_rows: int = Field(default=0, ge=0)
+    min_applicable_rows: Count = Field(default=0, ge=0)
     """With ``where``: fewer matching rows than this makes the check not assessed."""
 
     @model_validator(mode="after")
@@ -491,8 +499,8 @@ class ColumnSpec(ColumnConstraints):
     trim_whitespace: Whitespace = "ascii"
     """Trim surrounding U+0020 spaces (``ascii``, default), the shared Unicode
     whitespace set (``unicode``), or no characters (``none``) before type parsing."""
-    decimal_precision: int | None = Field(default=None, ge=1, le=38)
-    decimal_scale: int | None = Field(default=None, ge=0, le=38)
+    decimal_precision: Count | None = Field(default=None, ge=1, le=38)
+    decimal_scale: Count | None = Field(default=None, ge=0, le=38)
     """Optional exact fixed-point contract; precision and scale must be supplied together."""
     datetime_unit: Literal["ms", "us", "ns"] = "us"
     timezone: str | None = None
@@ -527,6 +535,13 @@ class ColumnSpec(ColumnConstraints):
     ignored), e.g. ``[Y, yes, 1]``."""
     false_values: list[Word] = Field(default_factory=lambda: ["false"])
     """For ``bool`` written as text: the words meaning false."""
+
+    @field_validator("true_values", "false_values", mode="before")
+    @classmethod
+    def _quoted_words(cls, values: Any, info: ValidationInfo) -> Any:
+        _no_yaml_booleans(info.field_name or "true_values", values)
+        return values
+
     unit: str | None = None
     """The column's unit (``kg``, ``vehicle-miles``). Recorded in reports; ``REC-001``
     refuses to reconcile columns declared in different units."""
@@ -670,6 +685,9 @@ class ColumnSpec(ColumnConstraints):
                     raise ValueError(f"'{name}' applies to str columns, not {self.dtype}")
             if check.normalize and self.dtype != "str":
                 raise ValueError(f"'normalize' applies to str columns, not {self.dtype}")
+            if self.dtype == "str":
+                for name in ("isin", "notin"):
+                    _no_yaml_booleans(name, limits.get(name))
             for name in ("integral", "max_decimals"):
                 if name in limits and not numeric:
                     raise ValueError(f"'{name}' applies to numeric columns, not {self.dtype}")
@@ -679,6 +697,15 @@ class ColumnSpec(ColumnConstraints):
                         f"the '{name}' statistic needs a numeric column, not {self.dtype}"
                     )
         return self
+
+
+def _no_yaml_booleans(name: str, values: Any) -> None:
+    """A text option YAML read as a boolean (unquoted ``yes``, ``no``, ``on``, ``off``)."""
+    if isinstance(values, list | tuple) and any(isinstance(v, bool) for v in values):
+        raise ValueError(
+            f"'{name}' holds true or false where text is expected: YAML reads unquoted "
+            "yes, no, on, off, true and false as booleans; quote them ('yes')"
+        )
 
 
 class UniqueKeySpec(_Strict):
@@ -705,8 +732,8 @@ class GroupedValueSpec(_Strict):
     column: str
     group_by: list[str] = Field(min_length=1)
     allowed_values: list[Any] = Field(min_length=1)
-    min_occurrences: int = Field(default=1, ge=0)
-    max_occurrences: int | None = Field(default=1, ge=0)
+    min_occurrences: Count = Field(default=1, ge=0)
+    max_occurrences: Count | None = Field(default=1, ge=0)
     allow_other_values: bool = False
     where: str | None = None
     expected_groups: list[list[Any]] | None = None
@@ -743,8 +770,8 @@ class SchemaSpec(_Strict):
     """Columns that together must identify every row uniquely; none may be null."""
     strict: bool = False
     """Reject columns that are not declared."""
-    min_rows: int = Field(default=1, ge=0)
-    max_rows: int | None = Field(default=None, ge=0)
+    min_rows: Count = Field(default=1, ge=0)
+    max_rows: Count | None = Field(default=None, ge=0)
     unique_keys: list[list[str] | UniqueKeySpec] = Field(default_factory=list)
     """Alternate keys. Legacy column lists exempt null-bearing rows. Structured
     entries select ``nulls: exempt``, ``equal`` or ``forbid`` explicitly."""
@@ -881,7 +908,7 @@ class ExpressionCheck(_Strict):
     where: str | None = None
     """SQL condition selecting the rows the expression applies to (all rows when
     omitted); rows where it is false or NULL are excluded, not counted as passing."""
-    min_applicable_rows: int = Field(default=0, ge=0, strict=True)
+    min_applicable_rows: Count = Field(default=0, ge=0)
     """With ``where``: fewer matching rows than this makes the check not assessed."""
     item_id: str | None = Field(default=None, exclude=True)
     """The check item's instance id (``datasets.<d>.checks[<i>]``); not a parameter."""
@@ -953,11 +980,11 @@ class SourcePolicy(_Strict):
     a source declares that retrying is safe.
     """
 
-    retries: int = Field(default=0, ge=0, le=10)
+    retries: Count = Field(default=0, ge=0, le=10)
     """Extra attempts for explicitly retryable failures of a retry-safe source."""
     retry_delay_s: float = Field(default=1.0, ge=0, le=300)
     """Delay before the first retry, doubled on each additional attempt."""
-    row_budget: int | None = Field(default=None, ge=1)
+    row_budget: Count | None = Field(default=None, ge=1)
     """Maximum input result rows, preserved across representations. This does
     not authorize sampling and does not bound rows scanned by a source query."""
 
@@ -1365,9 +1392,9 @@ class EngineSettings(_Strict):
     process_file_bytes: int | None = Field(default=None, ge=0, strict=True)
     """OS maximum size of any individual file written by the isolated worker."""
     parallel: bool = True
-    max_workers: int | None = Field(default=None, ge=1)
+    max_workers: Count | None = Field(default=None, ge=1)
     """Thread count; defaults to ``min(8, cpu_count)``."""
-    max_affected_records: int = Field(default=50, ge=0)
+    max_affected_records: Count = Field(default=50, ge=0)
     """Cap on the offending-record sample kept per result."""
     rule_timeout_s: float | None = Field(default=None, gt=0)
     """Cooperative deadline: overdue work is unassessed and cancellation is requested.
@@ -1528,6 +1555,14 @@ class QAVFSettings(_Strict):
         # ``$${`` is a literal ``${`` once every reference is substituted.
         substituted = LiteralReferences.unescape(VariableSubstitution.apply(data))
         return ItemPreparation.apply(AcrossExpansion.apply(substituted))
+
+    @classmethod
+    def path_parts(cls, raw: Mapping[str, Any]) -> tuple[tuple[str | None, type[BaseModel]], ...]:
+        """The settings' own fields, and ``defaults`` by check (:mod:`qavf.config_paths`):
+        a file path in a check's defaults is typed by that check's item model."""
+        if isinstance(raw.get("defaults"), Mapping):
+            return ((None, cls), ("defaults", CheckDefaults))
+        return ((None, cls),)
 
     @model_serializer(mode="wrap")
     def _literal_references(self, handler: SerializerFunctionWrapHandler) -> Any:

@@ -469,3 +469,48 @@ def test_literal_references_survive_a_settings_round_trip() -> None:
     again = QAVFSettings.model_validate(settings.model_dump())
     assert again.project == settings.project
     assert QAVFSettings.model_validate_json(settings.model_dump_json()).project == settings.project
+
+
+# ------------------------------------------------------------- YAML booleans
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"datasets": {"x": {"schema": {"min_rows": True}}}},
+        {"datasets": {"x": {"schema": {"max_rows": False}}}},
+        {"datasets": {"x": {"load_policy": {"row_budget": True}}}},
+        {"engine": {"max_affected_records": True}},
+    ],
+)
+def test_a_boolean_is_not_a_count(raw: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError, match="a count must be a whole number, not true or false"):
+        _settings(raw)
+
+
+@pytest.mark.parametrize(
+    ("column", "name"),
+    [
+        ("{dtype: str, isin: [yes, no]}", "isin"),
+        ("{dtype: str, notin: [off]}", "notin"),
+        ("{dtype: bool, true_values: [yes]}", "true_values"),
+    ],
+)
+def test_unquoted_yaml_booleans_in_text_options_get_a_hint(
+    tmp_path: Path, column: str, name: str
+) -> None:
+    config = _write(
+        tmp_path / "qa.yaml", f"datasets:\n  x:\n    schema:\n      columns:\n        a: {column}\n"
+    )
+    with pytest.raises(ValidationError, match=f"'{name}' holds true or false .* quote them"):
+        load_settings(config)
+
+
+def test_quoted_yaml_words_stay_text(tmp_path: Path) -> None:
+    config = _write(
+        tmp_path / "qa.yaml",
+        "datasets:\n  x:\n    schema:\n      columns:\n"
+        "        a: {dtype: str, isin: ['yes', 'no']}\n",
+    )
+    column = load_settings(config).datasets["x"].schema_spec.columns["a"]
+    assert column.isin == ["yes", "no"]

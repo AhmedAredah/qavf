@@ -1,10 +1,21 @@
 """Shared immutable parameters for rules and other extension components."""
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, field_validator
 
 from qavf.scalars import normalize_scalar
+
+
+def _not_boolean(value: Any) -> Any:
+    """YAML reads ``true``/``yes``/``on`` as booleans, which are integers to Python."""
+    if isinstance(value, bool):
+        raise ValueError("a count must be a whole number, not true or false")
+    return value
+
+
+Count = Annotated[int, BeforeValidator(_not_boolean)]
+"""A row count, budget or limit: a whole number, never a boolean."""
 
 
 class RuleParams(BaseModel):

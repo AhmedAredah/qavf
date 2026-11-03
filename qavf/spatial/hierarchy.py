@@ -30,6 +30,7 @@ from qavf.engine.registry import RuleParams
 from qavf.keys import cast_key
 from qavf.missingness import missing_rows
 from qavf.numeric import exact_rational, report_number
+from qavf.parameters import Count
 from qavf.rules.helpers import fresh_internal, plural
 from qavf.typed_values import precise_frame
 
@@ -55,7 +56,7 @@ class Crosswalk(RuleParams):
     """Reader options for ``path``, including explicit CSV ``types`` for zone ids."""
     text_columns: tuple[str, ...] = ()
     """Path CSV columns that must be read as text, preserving leading zeros."""
-    row_budget: int | None = Field(default=None, ge=1)
+    row_budget: Count | None = Field(default=None, ge=1)
     """Maximum rows for a path input; configured datasets retain their own policies."""
     from_column: str = "from"
     """Column of the child (or old) zone ids."""

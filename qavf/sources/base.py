@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from qavf.parameters import Count
 from qavf.plugins.transactions import (
     LOCK,
     installed_origin,
@@ -118,7 +119,7 @@ class SourceParams(BaseModel):
     for transient failures of remote files and databases."""
     retry_delay_s: float = Field(default=1.0, ge=0, le=300)
     """Delay before the first retry; doubled before each further one."""
-    row_budget: int | None = Field(default=None, ge=1)
+    row_budget: Count | None = Field(default=None, ge=1)
     """Maximum result rows. Exceeding this fails the load. Query aggregates, sorts
     and joins may still scan more input rows; this is not a memory or scan budget."""
 
