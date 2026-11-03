@@ -205,3 +205,23 @@ def test_a_view_of_a_dotted_dataset_belongs_to_that_dataset_in_a_selection() -> 
     settings = QAVFSettings.model_validate(config)
     narrowed = narrow(settings, Selection.of(datasets=["roads.archive", "lanes"]))
     assert [placed.item.enabled for placed in placed_items(narrowed)] == [True]
+
+
+def test_a_dataset_named_like_a_derived_dataset_is_rejected() -> None:
+    config = {
+        "datasets": {
+            "a": {"path": "a.csv"},
+            "b": {"path": "b.csv"},
+            "Consensus~checks[0]": {"path": "c.csv"},
+        },
+        "checks": [
+            {
+                "check": "key_sets_match",
+                "keys": ["id"],
+                "datasets": ["a", "b"],
+                "strategy": "consensus",
+            }
+        ],
+    }
+    with pytest.raises(ValidationError, match="derived dataset"):
+        QAVFSettings.model_validate(config)

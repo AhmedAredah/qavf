@@ -16,6 +16,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from qavf.settings import QAVFSettings
 
+DERIVED_MARK = "~"
+"""Separates a derived dataset's role or member from its item's place."""
+
 
 @dataclass(frozen=True, slots=True)
 class Relation:
@@ -50,10 +53,20 @@ class RelationNamespace:
         for name, (parent, _) in settings.views().items():
             view = name.removeprefix(f"{parent}.")
             namespace.declare(Relation("view", name, f"datasets.{parent}.views.{view}"))
-        for name in settings.derived_datasets():
-            origin = name.rpartition("~")[2]
-            namespace.declare(Relation("derived dataset", name, origin))
+        if namespace.may_hold_derived_names():
+            for name in settings.derived_datasets():
+                origin = name.rpartition("~")[2]
+                namespace.declare(Relation("derived dataset", name, origin))
         return namespace
+
+    def may_hold_derived_names(self) -> bool:
+        """Whether a declared name could collide with a derived dataset's.
+
+        Derived names have the form ``<role or member>~checks[<n>]``, so only a
+        name containing ``~`` can collide; otherwise the check catalog (which
+        needs the optional Polars backend) is not consulted.
+        """
+        return any(DERIVED_MARK in relation.name for relation in self._relations.values())
 
     def declare(self, relation: Relation) -> None:
         """Add ``relation``.
@@ -74,4 +87,4 @@ class RelationNamespace:
         return isinstance(name, str) and name.lower() in self._relations
 
 
-__all__ = ["Relation", "RelationNamespace"]
+__all__ = ["DERIVED_MARK", "Relation", "RelationNamespace"]
