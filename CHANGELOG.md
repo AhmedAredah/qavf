@@ -143,6 +143,10 @@ Reports written by earlier versions still load.
   of emitting nothing, and Ctrl-C, SIGTERM or Ctrl-Break stops the worker and exits
   1 with `QA CANCELLED`; it had printed a cancellation notice, let the worker
   finish and reported QA PASSED.
+- Comparison tolerances resolve `rtol` and `atol` independently (measure, column,
+  level, comparison). A column entry setting only `atol` had dropped the level's
+  `rtol` for the comparison's default, so a group mean within the level's `rtol`
+  failed (or a looser default passed it).
 
 ## [Unreleased]
 

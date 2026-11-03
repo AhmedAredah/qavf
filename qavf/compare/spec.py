@@ -393,14 +393,22 @@ class ComparisonSpec(RuleParams):
         """
         return self._datasets
 
-    def tolerance(self, column: str | None) -> tuple[float, float]:
-        """``(rtol, atol)`` for a column: its own tolerance, else the comparison's."""
+    def column_tolerance(self, column: str | None) -> tuple[float | None, float | None]:
+        """``(rtol, atol)`` set for a column itself; ``None`` for a field it leaves unset.
+
+        ``exact: true`` sets both fields to 0.
+        """
         override = self.tolerances.get(column) if column is not None else None
         if override is None:
-            return self.rtol, self.atol
+            return None, None
         if override.exact:
             return 0.0, 0.0
+        return override.rtol, override.atol
+
+    def tolerance(self, column: str | None) -> tuple[float, float]:
+        """``(rtol, atol)`` for a column: each field its own, else the comparison's."""
+        rtol, atol = self.column_tolerance(column)
         return (
-            self.rtol if override.rtol is None else override.rtol,
-            self.atol if override.atol is None else override.atol,
+            self.rtol if rtol is None else rtol,
+            self.atol if atol is None else atol,
         )

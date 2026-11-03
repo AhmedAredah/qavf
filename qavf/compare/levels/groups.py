@@ -178,18 +178,24 @@ def measure_columns(specs: Sequence[MeasureSpec]) -> set[str]:
 
 
 def materiality(spec: ComparisonSpec, level: _LevelTolerance, measure: MeasureSpec) -> Materiality:
-    """The measure's tolerance: its own, the column's, the level's, then the comparison's."""
+    """The measure's tolerance, ``rtol`` and ``atol`` resolved independently.
+
+    Each field comes from the most specific scope that sets it: the measure, the
+    column's ``tolerances`` entry, the level, then the comparison. ``exact: true``
+    (on the measure or the column) sets both fields at that scope to 0.
+    """
     if measure.exact:
         return Materiality(0.0, 0.0)
-    rtol, atol = spec.tolerance(measure.column)
-    column = spec.tolerances.get(measure.column) if measure.column is not None else None
-    if column is None:
-        rtol = level.rtol if level.rtol is not None else rtol
-        atol = level.atol if level.atol is not None else atol
+    column_rtol, column_atol = spec.column_tolerance(measure.column)
     return Materiality(
-        measure.rtol if measure.rtol is not None else rtol,
-        measure.atol if measure.atol is not None else atol,
+        _first_set(measure.rtol, column_rtol, level.rtol, spec.rtol),
+        _first_set(measure.atol, column_atol, level.atol, spec.atol),
     )
+
+
+def _first_set(*values: float | None) -> float:
+    """The first value that is set; the last scope always sets one."""
+    return next(value for value in values if value is not None)
 
 
 def _rows(frame: pl.DataFrame, columns: list[str]) -> Iterator[tuple[Any, ...]]:

@@ -153,10 +153,14 @@ integers is exact.
 ### Materiality
 
 A change is material beyond `max(atol, rtol * max(|b|, |c|))`, evaluated exactly.
-Tolerances resolve from the most specific setting: a measure's own `rtol`/`atol`/
-`exact`, then the comparison's per-column `tolerances`, then the level's `rtol`/`atol`,
-then the comparison's `rtol` (1e-6) and `atol` (1e-9). Record values use the
-comparison's and per-column tolerances, with the regression engine's exact arithmetic.
+`rtol` and `atol` resolve independently, each from the most specific scope that sets
+it: the measure's own `rtol`/`atol`, then the measured column's entry in the
+comparison's `tolerances`, then the level's `rtol`/`atol`, then the comparison's `rtol`
+(1e-6) and `atol` (1e-9). A scope that sets only one field leaves the other to the next
+scope: with a level `rtol: 0.1` and `tolerances: {x: {atol: 0.01}}`, a measure of `x`
+uses `rtol=0.1, atol=0.01`. `exact: true` (on a measure or a column) sets both fields
+to 0 at that scope. Record values use the per-column tolerances, then the comparison's,
+field by field, with the regression engine's exact arithmetic.
 
 Materiality is one half of the default decision; [significance](#significance) is
 the other.
