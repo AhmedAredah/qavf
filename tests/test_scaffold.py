@@ -133,14 +133,14 @@ def test_profile_frame_infers_limits() -> None:
     columns = profile_frame(frame)["columns"]
     assert columns["id"] == {"dtype": "str", "min_length": 6, "max_length": 6}
     assert columns["kind"] == {"dtype": "str", "isin": ["a", "b", "c"]}
-    assert columns["n"] == {"dtype": "int", "ge": 0, "le": 29}
-    assert columns["x"] == {"dtype": "float", "nullable": True, "ge": 0, "le": 14}
-    assert columns["d"] == {"dtype": "date", "ge": date(2020, 1, 1), "le": date(2020, 1, 28)}
+    assert columns["n"] == {"dtype": "int", "between": [0, 29]}
+    assert columns["x"] == {"dtype": "float", "nullable": True, "between": [0, 14]}
+    assert columns["d"] == {"dtype": "date", "between": [date(2020, 1, 1), date(2020, 1, 28)]}
     assert columns["flag"] == {"dtype": "bool"}
     widened = profile_frame(frame, margin=0.1, bounds=True)["columns"]["n"]
     # Integer bounds stay integers and are rounded outwards (-2.9 -> -3, 31.9 -> 32).
-    assert (widened["ge"], widened["le"]) == (-3, 32)
-    assert "ge" not in profile_frame(frame, bounds=False)["columns"]["n"]
+    assert widened["between"] == [-3, 32]
+    assert "between" not in profile_frame(frame, bounds=False)["columns"]["n"]
 
 
 def test_profiled_schema_validates_its_own_data(demo) -> None:

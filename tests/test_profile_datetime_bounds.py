@@ -16,8 +16,8 @@ def test_nanosecond_profile_rounds_outwards_and_validates(ticks, zone):
     frame = pl.DataFrame({"t": pl.Series(ticks, dtype=pl.Int64).cast(pl.Datetime("ns", zone))})
     schema = profile_frame(frame)
     spec = schema["columns"]["t"]
-    for key, expected in (("ge", min(ticks) // 1000), ("le", -(-max(ticks) // 1000))):
-        bound = pl.Series([spec[key]]).cast(pl.Datetime("us", zone)).cast(pl.Int64)[0]
+    for side, expected in ((0, min(ticks) // 1000), (1, -(-max(ticks) // 1000))):
+        bound = pl.Series([spec["between"][side]]).cast(pl.Datetime("us", zone)).cast(pl.Int64)[0]
         assert bound == expected
     assert ("description" in spec) == any(tick % 1000 for tick in ticks)
     # YAML roundtrip exercises the same representation that qavf init writes.
@@ -29,7 +29,7 @@ def test_nanosecond_profile_rounds_outwards_and_validates(ticks, zone):
 def test_exact_microsecond_profile_needs_no_precision_disclosure():
     value = datetime(2026, 1, 1, 12, tzinfo=UTC)
     spec = profile_frame(pl.DataFrame({"t": [value]}))["columns"]["t"]
-    assert spec == {"dtype": "datetime", "ge": value, "le": value}
+    assert spec == {"dtype": "datetime", "between": [value, value]}
 
 
 def test_profile_without_bounds_does_not_emit_precision_disclosure():

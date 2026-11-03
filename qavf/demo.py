@@ -8,6 +8,7 @@ family::
       data/counts.csv        traffic counts           (file source)
       data/crashes.parquet   crashes                  (file source)
       data/sites.duckdb      site inventory           (database source)
+      data/published/*.csv   AADT as three offices publish it (one dataset across files)
       baseline/counts.csv    accepted counts          (regression baseline)
 
 The data is synthetic and has no meaning beyond demonstrating QA. Named defects
@@ -42,6 +43,8 @@ _CLASSES = {
 }
 _CRASH_RATE = 1.1e-5  # crashes per vehicle-day, purely illustrative
 _GROWTH = 0.02
+OFFICES: tuple[str, ...] = ("state", "metro", "county")
+"""The offices publishing AADT: the copies of the demo's ``published`` dataset."""
 
 
 def make_demo_data(seed: int = 0) -> Datasets:
@@ -146,6 +149,19 @@ def _future_date(d: Datasets) -> None:
     )
 
 
+def _published_mismatch(d: Datasets) -> None:
+    if "published_county" in d:
+        d["published_county"] = _where(
+            d["published_county"], "aadt", _site_year("S06", 2020), pl.col("aadt") + 5_000
+        )
+
+
+def published_copies(counts: pl.DataFrame) -> Datasets:
+    """The AADT each office publishes (``published_<office>``): the same values."""
+    table = counts.select("site_id", "year", "aadt").sort("site_id", "year")
+    return {f"published_{office}": table for office in OFFICES}
+
+
 def _declining_site(d: Datasets) -> None:
     factor = (1 + _GROWTH) ** (-4 * (pl.col("year") - YEARS[0]))
     d["counts"] = _where(
@@ -164,6 +180,7 @@ DEFECTS: dict[str, Callable[[Datasets], None]] = {
     "bad_site_id": _bad_site_id,
     "future_date": _future_date,
     "declining_site": _declining_site,
+    "published_mismatch": _published_mismatch,
 }
 """Named defects accepted by :func:`inject_defects`."""
 
@@ -221,10 +238,13 @@ def write_demo_project(
     data_dir = root / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     accepted = make_demo_data()
+    accepted.update(published_copies(accepted["counts"]))
     data = accepted if clean else inject_defects(accepted, defects)
 
     write_table(data["counts"], data_dir / "counts.csv")
     write_table(data["crashes"], data_dir / "crashes.parquet")
+    for office in OFFICES:
+        write_table(data[f"published_{office}"], data_dir / "published" / f"{office}.csv")
     database = data_dir / "sites.duckdb"
     database.unlink(missing_ok=True)
     with duckdb.connect(str(database)) as con:

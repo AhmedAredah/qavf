@@ -164,6 +164,7 @@ EXPECTED = {
     "bad_site_id": {"INP-003", "INP-005"},
     "future_date": {"INP-003"},
     "declining_site": {"TMP-002"},
+    "published_mismatch": {"CMP-001"},
 }
 
 

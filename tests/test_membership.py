@@ -218,6 +218,7 @@ def test_parallel_and_sequential_runs_agree_on_everything_but_timing() -> None:
     config.pop("datasets", None)
     settings = {k: v for k, v in config.items() if k in ("rules", "assertions", "vars")}
     datasets = yaml.safe_load(demo_config())["datasets"]
+    datasets.pop("published")  # read across files; not part of these frames
     for spec in datasets.values():
         spec.pop("path", None)
         spec.pop("source", None)
@@ -238,6 +239,7 @@ def test_shuffling_rows_does_not_change_verdicts_or_counts() -> None:
 
     config = yaml.safe_load(demo_config())
     datasets = config["datasets"]
+    datasets.pop("published")  # read across files; not part of these frames
     for spec in datasets.values():
         spec.pop("path", None)
         spec.pop("source", None)

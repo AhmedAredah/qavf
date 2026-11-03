@@ -9,6 +9,10 @@ project: Traffic monitoring demo
 vars:
   years: 2016..2024
 
+# Default settings per check name; a check's own settings win.
+defaults:
+  change_rate: {max: 0.15}          # 15 % per year
+
 # ---------------------------------------------------------------------------
 # Datasets: where each table comes from, and the QA limits for its columns.
 # ---------------------------------------------------------------------------
@@ -22,9 +26,9 @@ datasets:
         site_id: {dtype: str, regex: 'S\d{2}'}
         region: {dtype: str, isin: [North, South]}
         functional_class: {dtype: str, isin: [Interstate, Arterial, Collector]}
-        lanes: {dtype: int, ge: 1, le: 12}
-        latitude: {dtype: float, ge: 25.8, le: 36.5}       # Texas bounding box
-        longitude: {dtype: float, ge: -106.7, le: -93.5}
+        lanes: {dtype: int, between: [1, 12]}
+        latitude: {dtype: float, between: [25.8, 36.5]}       # Texas bounding box
+        longitude: {dtype: float, between: [-106.7, -93.5]}
 
   counts:
     description: Annual traffic counts per site, from a CSV file.
@@ -34,19 +38,18 @@ datasets:
       columns:
         site_id:
           dtype: str
-          checks:
+          conditions:                                    # limits with their own severity
             - {regex: 'S\d{2}', severity: WARNING, name: site id format}
-        year: {dtype: int, ge: 2000, le: 2030}
+        year: {dtype: int, between: [2000, 2030]}
         aadt:
           dtype: int
-          ge: 0                                          # ERROR (the rule's default)
-          checks:
+          ge: 0                                          # ERROR (the default severity)
+          conditions:
             - {le: 200000, severity: WARNING, name: implausibly high AADT}
-            - {mean: {ge: 1000, le: 100000}, severity: INFO, name: network average}
+            - {stats: {mean: {between: [1000, 100000]}}, severity: INFO, name: network average}
         truck_share:
           dtype: float
-          ge: 0
-          le: 1                                          # a share, not a percentage
+          between: [0, 1]                                # a share, not a percentage
         count_date:
           dtype: date
           le: 2025-12-31
@@ -58,9 +61,8 @@ datasets:
       aadt_by_site: {value: aadt, group_by: [site_id], time_column: year}
     # Checks of this dataset. `qavf list-checks` lists every check and its settings.
     checks:
-      - check: change_rate            # period-over-period change
+      - check: change_rate            # period-over-period change (max from defaults)
         series: aadt_by_site
-        max: 0.15                     # 15 % per year
       - check: trend                  # trend direction (needs qavf[stats])
         series: aadt_by_site
         expect: increasing
@@ -108,6 +110,15 @@ datasets:
           North: [S01, S02, S03, S04, S05, S06]
           South: [S07, S08, S09, S10, S11, S12]
 
+  published:
+    description: AADT as each office publishes it, one CSV per office.
+    path: data/published/{office}.csv
+    across: {office: [state, metro, county]}   # copies published@state, @metro, @county
+    schema:                           # one contract for every copy
+      primary_key: [site_id, year]
+      columns:
+        aadt: {dtype: int, ge: 0}
+
 # Databases attached for `database` and `query` sources.
 connections:
   inventory: {type: duckdb, path: data/sites.duckdb}
@@ -128,9 +139,15 @@ checks:
     entity: site_id
     time_column: year
     reference: sites                # the authoritative list of sites
+  - check: compare
+    name: offices agree
+    datasets: published@*           # every copy of published
+    strategy: consensus             # each office against the majority of offices
+    keys: [site_id, year]
 
 run:
-  fail_on: ERROR
+  fail_on: ERROR                    # lowest severity that fails the run
+  require: [no missing years]       # must be assessed, not skipped
 
 engine:
   parallel: true

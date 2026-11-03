@@ -48,8 +48,7 @@ datasets:
           max_length: 5
         timestamp:
           dtype: datetime
-          ge: 2020-01-01
-          le: 2030-12-31
+          between: [2020-01-01, 2030-12-31]   # inclusive; or ge / le / gt / lt
         value:
           dtype: float
           nullable: true              # nulls allowed ...
@@ -65,14 +64,15 @@ datasets:
             special_values: true      # admit nan/inf spellings; missing/finite rules still apply
           convert_options: false      # numeric isin/notin literals use the declared grammar
           each_allowed_once: false    # with isin: require every converted allowed value once
-          ge: 0                       # inline limits: graded at INP-003's severity
+          ge: 0                       # inline limits: graded at the default severity
           notin: [-999, -9999]        # sentinel values
-          checks:                     # extra checks, each with its own severity
+          conditions:                 # more limits, each with its own severity and where
             - name: plausible maximum
               le: 2000
               severity: WARNING
             - name: network level
-              mean: {ge: 5, le: 60}   # aggregates: min max mean median std sum distinct_count
+              stats:                  # min max mean median std sum distinct_count
+                mean: {between: [5, 60]}
               severity: INFO
             - name: valid readings have a value
               where: "status = 'valid'"
@@ -197,6 +197,17 @@ datasets:
     source: {type: python, callable: my_package.loaders:load_forecasts, kwargs: {horizon: 7}}
     required: false
 
+  # One dataset across many sources: one contract and one set of checks for every
+  # copy. The copies are station_counts@warehouse and station_counts@archive.
+  station_counts:
+    source: {type: database, table: station_counts}
+    across: [warehouse, archive]      # connection names; or {copy: {source overrides}}
+                                      # or a template {city: [a, b]} filling {city} in a path
+    schema:
+      primary_key: [station, day]
+      columns:
+        readings: {dtype: int, ge: 0}
+
 # ---------------------------------------------------------------------------
 # connections: databases DuckDB attaches (duckdb | sqlite | postgres | mysql)
 # ---------------------------------------------------------------------------
@@ -293,6 +304,19 @@ checks:
           min_ccc: 0.99
           max_slope_deviation: 0.05
         # correlation: {columns: [a, b, c]}  ratios: ["fatal / crashes"]
+
+  - check: compare                    # many datasets: pairs by strategy, whole-group levels
+    name: stations agree
+    datasets: station_counts@*        # every copy; or a list of datasets
+    strategy: consensus               # reference (default) | sequential | all_pairs | consensus
+    # reference: station_counts@warehouse   # the authoritative member (default: the first)
+    # max_pairs: 28                   # all_pairs refuses more pairs than this
+    consensus:                        # how the consensus is formed (these are the defaults)
+      numeric: median                 # median | mean | trimmed_mean (trim: 0.1)
+      categorical: majority           # majority (more than half) | plurality
+      min_agreement: 0.5              # share of members that must agree
+      ties: report                    # report (not assessed) | reference
+    keys: [station, day]
 
   - check: compare
     name: daily by zone             # spatial comparison (docs/spatial.md)

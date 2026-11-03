@@ -156,9 +156,11 @@ class _Column:
             elif isinstance(low, date) and isinstance(high, date) and margin:
                 low, high = _widen_dates(low, high, margin)
             # A bound on an observed infinite side would reject the original data.
-            if not self.negative_infinity:
+            if not self.negative_infinity and not self.positive_infinity:
+                result["between"] = [_plain(low), _plain(high)]
+            elif not self.negative_infinity:
                 result["ge"] = _plain(low)
-            if not self.positive_infinity:
+            elif not self.positive_infinity:
                 result["le"] = _plain(high)
             if self.rounded_datetime:
                 result["description"] = (

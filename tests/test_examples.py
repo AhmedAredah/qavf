@@ -60,6 +60,14 @@ def test_full_example_runs_clean(tmp_path) -> None:
         "stations": pl.DataFrame({"station": STATIONS}),
         "forecasts": pl.DataFrame({"station": STATIONS, "horizon": [7] * len(STATIONS)}),
     }
+    counts = pl.DataFrame(
+        {
+            "station": STATIONS,
+            "day": [date(2024, 1, 1)] * len(STATIONS),
+            "readings": [24] * len(STATIONS),
+        }
+    )
+    frames |= {f"station_counts@{copy}": counts for copy in ("warehouse", "archive")}
     report = _run(config, frames)
     _assert_clean(report)
     # The configured temporal, spatial and statistical checks were all assessed.

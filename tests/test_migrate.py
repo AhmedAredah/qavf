@@ -29,6 +29,15 @@ def _old_demo(tmp_path: Path) -> Path:
     return old
 
 
+def _without_published(text: str) -> dict[str, Any]:
+    """The shipped demo without what QAVF 0.6 had no form for: the dataset read
+    across three files and the check comparing its copies."""
+    config = yaml.safe_load(text)
+    del config["datasets"]["published"]
+    config["checks"] = [item for item in config["checks"] if item["check"] != "compare"]
+    return config
+
+
 def _outcome(results: list[RuleResult]) -> list[tuple[Any, ...]]:
     return sorted(
         (r.rule_id, r.status.value, r.severity.value, r.affected_count, r.message)
@@ -101,8 +110,11 @@ def test_old_demo_converts_and_gives_the_same_results(tmp_path: Path) -> None:
     assert [item["check"] for item in converted["checks"]] == ["sql", "coverage"]
     migrated = QARunner(load_settings(new)).run()
     shipped = old.parent / "shipped.yaml"
-    shipped.write_text(demo_config(), encoding="utf-8")
+    shipped.write_text(yaml.safe_dump(_without_published(demo_config())), encoding="utf-8")
     assert _outcome(QARunner(load_settings(shipped)).run().results) == _outcome(migrated.results)
+    aadt = converted["datasets"]["counts"]["schema"]["columns"]["aadt"]
+    assert aadt["conditions"][1]["stats"] == {"mean": {"ge": 1000, "le": 100000}}
+    assert "checks" not in aadt
 
 
 def test_migrate_check_reports_changes_without_writing(tmp_path: Path, capsys) -> None:
