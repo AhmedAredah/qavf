@@ -6,6 +6,9 @@
   entry's dataset (or at the top level for checks relating datasets), with the
   catalog's setting renames; rule-level parameters, ``severity`` and
   ``enabled: false`` are copied onto every generated item;
+* the series and metrics of temporal and spatial checks become named entries
+  of their dataset (``series``/``metrics``); identical ones merge into one entry,
+  named ``<value>_by_<group>``, that the items refer to;
 * ``datasets.<d>.expressions`` become ``check: expression`` items and
   ``assertions`` top-level ``check: sql`` items;
 * ``engine.fail_on``, ``fail_on_incomplete`` and ``require`` move to ``run``;
@@ -20,6 +23,7 @@ block at the top of the original file is kept.
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -247,6 +251,9 @@ class Migrator:
             return str(item.get("name") or _default_name(item["check"], datasets))
         self._declare(config, [dataset], migration)
         spec = config["datasets"][dataset]
+        for setting, block in _NAMED_BLOCKS.items():
+            if isinstance(item.get(setting), dict):
+                item[setting] = block.hoist(spec, item[setting])
         spec["checks"] = [*(spec.get("checks") or []), item]
         return str(item.get("name") or _default_name(item["check"], [dataset]))
 
@@ -351,6 +358,50 @@ class Migrator:
                     if isinstance(spec, Mapping) and (spec.get("schema") or spec.get("checks"))
                 )
         return list(dict.fromkeys(names))
+
+
+class NamedBlock:
+    """Moves inline definitions into a dataset's named ``series``/``metrics`` section.
+
+    Identical definitions on one dataset share one entry, named ``<value>_by_<group>``
+    (``<value>_by_<entity>`` for a metric), with a numeric suffix when two different
+    definitions would take the same name.
+    """
+
+    def __init__(self, section: str, grouping: str) -> None:
+        self.section = section
+        self.grouping = grouping
+        """The definition key naming what the values are grouped by."""
+
+    def name(self, definition: Mapping[str, Any]) -> str:
+        value = definition.get("value")
+        group = definition.get(self.grouping)
+        parts = [value if isinstance(value, str) else self.section]
+        groups = group if isinstance(group, list) else [group] if isinstance(group, str) else []
+        if groups:
+            parts.append("by_" + "_".join(str(name) for name in groups))
+        return re.sub(r"\W+", "_", "_".join(parts)).strip("_") or self.section
+
+    def hoist(self, spec: dict[str, Any], definition: dict[str, Any]) -> str:
+        """The name of ``definition`` in ``spec``'s section, adding it when new."""
+        defined = spec.setdefault(self.section, {})
+        for name, existing in defined.items():
+            if existing == definition:
+                return str(name)
+        base = self.name(definition)
+        name, number = base, 1
+        while name in defined:
+            number += 1
+            name = f"{base}_{number}"
+        defined[name] = definition
+        return name
+
+
+_NAMED_BLOCKS = {
+    "series": NamedBlock("series", "group_by"),
+    "metric": NamedBlock("metrics", "entity"),
+}
+"""Check settings whose inline definitions become named dataset entries."""
 
 
 def _default_name(check: str, datasets: list[str]) -> str:

@@ -162,7 +162,10 @@ def test_rule_level_settings_reach_every_generated_item() -> None:
         assert item["check"] == "missing_periods"
         assert item["expected"] == [1, 2]
         assert item["severity"] == "WARNING" and item["enabled"] is False
-    assert b_item["series"] == {"value": "y", "time_column": "t", "group_by": ["g"]}
+    assert b_item["series"] == "y_by_g"
+    assert config["datasets"]["b"]["series"] == {
+        "y_by_g": {"value": "y", "time_column": "t", "group_by": ["g"]}
+    }
     totals, drift = config["checks"]
     assert totals == {
         "check": "totals_match",
@@ -180,6 +183,42 @@ def test_rule_level_settings_reach_every_generated_item() -> None:
     assert any("--skip-tags spatial" in note for note in migration.notes)
     settings = QAVFSettings.model_validate(config)
     assert settings.run.require == ["missing_periods on a", "missing_periods on b", "a"]
+
+
+def test_identical_series_and_metrics_merge_into_named_entries() -> None:
+    series = {"dataset": "a", "value": "x", "time_column": "t", "group_by": ["g"]}
+    other = {**series, "aggregate": "mean"}
+    metric = {
+        "dataset": "a",
+        "value": "x",
+        "entity_column": "g",
+        "normalize_by": {"dataset": "b", "value": "y"},
+    }
+    raw = {
+        "datasets": {"a": {}, "b": {}},
+        "rules": {
+            "TMP-001": {"params": {"series": [series, other]}},
+            "TMP-004": {"params": {"series": [series], "expected_periods": [1, 2]}},
+            "SPA-001": {"params": {"metrics": [metric]}},
+            "SPA-002": {"params": {"metrics": [metric], "groups": {"n": ["g1"]}}},
+        },
+    }
+    config = Migrator().migrate(raw).config
+    dataset = config["datasets"]["a"]
+    assert dataset["series"] == {
+        "x_by_g": {"value": "x", "time_column": "t", "group_by": ["g"]},
+        "x_by_g_2": {"value": "x", "time_column": "t", "group_by": ["g"], "aggregate": "mean"},
+    }
+    assert [item.get("series") for item in dataset["checks"]] == [
+        "x_by_g",
+        "x_by_g_2",
+        "x_by_g",
+        None,
+        None,
+    ]
+    assert dataset["metrics"] == {"x_by_g": {"value": "x", "entity": "g", "per": "b.y"}}
+    assert [item.get("metric") for item in dataset["checks"][3:]] == ["x_by_g", "x_by_g"]
+    QAVFSettings.model_validate(config)
 
 
 def test_drop_disabled_leaves_disabled_rules_out() -> None:
