@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from typing import Any, ClassVar
 
 from qavf.compare.engine import compare_in_context
+from qavf.compare.group_levels import group_levels
+from qavf.compare.pairing import GroupPlan
 from qavf.compare.registry import entry_point_scope, entry_points_enabled
 from qavf.compare.results import DatasetComparison
 from qavf.compare.spec import ComparisonSpec
@@ -14,6 +16,7 @@ from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
+from qavf.rules._groups import GroupedFindings
 from qavf.settings import QAVFSettings
 
 CATEGORY = "comparison"
@@ -24,6 +27,9 @@ class ComparisonParams(RuleParams):
 
     comparisons: tuple[ComparisonSpec, ...] = ()
     """Pairs of configured datasets and how to compare them."""
+    group: GroupPlan | None = None
+    """For a check relating many datasets: which member each comparison is about, the
+    consensus and the levels assessed over the whole group."""
 
 
 def comparison_findings(
@@ -155,16 +161,26 @@ class DatasetComparisonRule(Rule):
         return problems
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements:
-        return DataRequirements(
-            frozenset(dataset for spec in self.params.comparisons for dataset in spec.datasets())
-        )
+        datasets = {dataset for spec in self.params.comparisons for dataset in spec.datasets()}
+        plan = self.params.group
+        if plan is not None:
+            datasets |= GroupedFindings(plan).requirements()
+            if group_levels(plan):
+                datasets |= set(plan.members)
+        return DataRequirements(frozenset(datasets))
 
     def evaluate(self, ctx: DataContext) -> Finding | list[Finding]:
-        if not self.params.comparisons:
+        plan = self.params.group
+        if not self.params.comparisons and plan is None:
             return Finding.skip("No comparisons are configured.")
         findings: list[Finding] = []
+        if plan is not None:
+            for level in group_levels(plan):
+                findings.extend(level.evaluate(ctx))
         with entry_point_scope(self._installed_plugins):
             for spec in self.params.comparisons:
                 found = comparison_findings(compare_in_context(ctx, spec), spec, ctx.evidence_bytes)
                 findings.extend(found)
+        if plan is not None:
+            return GroupedFindings(plan).finish(ctx, findings)
         return findings

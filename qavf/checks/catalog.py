@@ -13,7 +13,8 @@ Definitions differ only in how an item maps onto rule parameters:
   a share, a freshness column), plus rule-level settings.
 * :class:`InlineCheck`: the item names an inline ``series:`` or ``metric:``
   mapping (temporal and spatial checks), plus rule-level settings.
-* :class:`PairCheck` subclasses: top-level checks relating ``datasets: [a, b]``.
+* :class:`PairCheck` subclasses: top-level checks relating ``datasets: [a, b, ...]``,
+  paired by a ``strategy`` (:mod:`qavf.compare.pairing`).
 * :class:`WholeCheck`: the item's settings are the rule's parameters.
 * :class:`ExpressionDefinition` and :class:`SqlDefinition`: row expressions and
   SQL queries, evaluated together by one rule each.
@@ -37,8 +38,23 @@ from qavf.checks.placement import (
     CheckSettingError,
     Scope,
     expression_errors,
+    placed_items,
     sql_errors,
 )
+from qavf.compare.consensus import ROWS
+from qavf.compare.pairing import (
+    CONSENSUS,
+    DEFAULT_MAX_PAIRS,
+    POOLED,
+    ConsensusSettings,
+    DatasetGroup,
+    GroupPlan,
+    PairingError,
+    PairRole,
+    Strategy,
+    pair_label,
+)
+from qavf.engine.derived import DerivedParams, derived_name
 from qavf.engine.registry import Rule
 from qavf.input_rules import INPUT_RULES
 from qavf.rules.comparison_checks import DatasetComparisonRule
@@ -74,13 +90,11 @@ from qavf.rules.temporal_checks import (
     TrendDirectionRule,
     TrendOutlierRule,
 )
-from qavf.settings import ExpressionCheck, expression_check, sql_assertion
+from qavf.settings import ExpressionCheck, QAVFSettings, expression_check, sql_assertion
 
 Placement = Literal["dataset", "top"]
 FieldSpec = tuple[Any, Any]
 """A field's annotation and its ``FieldInfo``, as ``create_model`` takes them."""
-
-LATER_VERSION = "arrives in a later version of QAVF"
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,33 +477,44 @@ class MetricCheck(InlineCheck):
         return fields
 
 
-def _two(item: CheckItem, scope: Scope) -> tuple[str, str]:
-    """The two datasets of a pair check, the reference member first."""
-    settings = item.settings
-    datasets = settings.get("datasets")
-    if not isinstance(datasets, list | tuple) or not all(isinstance(n, str) for n in datasets):
-        raise CheckSettingError("datasets", "give the datasets to relate as a list of names")
-    if len(datasets) > 2:
-        raise CheckSettingError(
-            "datasets", f"relating more than two datasets in one check {LATER_VERSION}"
-        )
-    if len(datasets) != 2 or datasets[0] == datasets[1]:
-        raise CheckSettingError("datasets", "give exactly two different datasets")
-    strategy = settings.get("strategy", "reference")
-    if strategy != "reference":
-        raise CheckSettingError("strategy", f"strategy {strategy!r} {LATER_VERSION}")
-    reference = settings.get("reference", datasets[0])
-    if reference not in datasets:
-        raise CheckSettingError("reference", "the reference must be one of the datasets")
-    first, second = datasets
-    return (first, second) if reference == first else (second, first)
+def _group(item: CheckItem) -> DatasetGroup:
+    """The members of a check relating datasets and how they pair."""
+    try:
+        return DatasetGroup.of(item.settings)
+    except PairingError as exc:
+        raise CheckSettingError(exc.field, exc.message) from None
 
 
-_PAIR_SETTINGS = ("datasets", "strategy", "reference")
+_PAIR_SETTINGS = ("datasets", "strategy", "reference", "max_pairs", "consensus")
+_CONSENSUS_SIDE_SETTINGS = (
+    "columns",
+    "baseline_where",
+    "candidate_where",
+    "cast",
+    "units",
+    "recode",
+    "steps",
+)
+"""Comparison settings that align one side only, which a consensus has no use for."""
+
+
+@dataclass(frozen=True, slots=True)
+class PairLayout:
+    """A check relating many datasets: one list entry per pair, the group plan and the
+    datasets derived from the members (consensus, pooled data)."""
+
+    elements: list[dict[str, Any]]
+    plan: GroupPlan
+    derived: dict[str, DerivedParams]
 
 
 class PairCheck(CheckDefinition):
-    """A top-level check relating two datasets (``datasets: [reference, other]``)."""
+    """A top-level check relating datasets (``datasets: [reference, other, ...]``).
+
+    Two datasets with the default strategy compile to exactly one list entry, as
+    before; more datasets, or another strategy, to one entry per pair and a
+    :class:`~qavf.compare.pairing.GroupPlan` naming which member each pair is about.
+    """
 
     def __init__(self, rule_cls: type[Rule], list_param: str, *, where_field: str | None = None):
         super().__init__(rule_cls, "top", where_field=where_field)
@@ -504,13 +529,114 @@ class PairCheck(CheckDefinition):
     """Rule-level parameters an item may set."""
 
     def compile(self, item: CheckItem, scope: Scope) -> dict[str, Any]:
-        reference, other = _two(item, scope)
+        group = _group(item)
         settings = {k: v for k, v in item.settings.items() if k not in _PAIR_SETTINGS}
         rule = {key: settings.pop(key) for key in self.rule_fields if key in settings}
-        element = self.element(reference, other, settings) | self.where(item)
-        if item.name is not None and "name" in self.element_model.model_fields:
-            element["name"] = item.name
-        return {**rule, self.list_param: [element]}
+        if group.plain:
+            ((reference, other),) = group.pairs()
+            element = self.element(reference, other, settings) | self.where(item)
+            if item.name is not None and "name" in self.element_model.model_fields:
+                element["name"] = item.name
+            return {**rule, self.list_param: [element]}
+        layout = self.layout(item, scope, group, settings)
+        return {**rule, self.list_param: layout.elements, "group": layout.plan.model_dump()}
+
+    def derived(self, item: CheckItem, scope: Scope) -> dict[str, DerivedParams]:
+        """The datasets the item derives from its members (none for a plain pair)."""
+        group = _group(item)
+        if group.plain:
+            return {}
+        settings = {k: v for k, v in item.settings.items() if k not in _PAIR_SETTINGS}
+        for key in self.rule_fields:
+            settings.pop(key, None)
+        return self.layout(item, scope, group, settings).derived
+
+    def layout(
+        self, item: CheckItem, scope: Scope, group: DatasetGroup, settings: dict[str, Any]
+    ) -> PairLayout:
+        """One list entry per pair of ``group``, each labelled ``<name>: <a> vs <b>``."""
+        if group.strategy == CONSENSUS:
+            return self.consensus_layout(item, scope, group, settings)
+        name = item.effective_name(group.members)
+        elements, roles = [], []
+        for reference, other in group.pairs():
+            label = pair_label(name, reference, other)
+            pair_settings = self.pair_settings(settings, group, (reference, other))
+            element = self.element(reference, other, pair_settings) | self.where(item)
+            elements.append(element | {"name": label})
+            members = group.concerned(reference, other)
+            roles.append(PairRole(label=label, reference=reference, other=other, members=members))
+        plan = GroupPlan(
+            name=name,
+            check=self.name,
+            strategy=group.strategy,  # type: ignore[arg-type]
+            members=group.members,
+            reference=group.reference if group.strategy == "reference" else None,
+            pairs=tuple(roles),
+        )
+        return PairLayout(elements, plan, {})
+
+    def consensus_layout(
+        self, item: CheckItem, scope: Scope, group: DatasetGroup, settings: dict[str, Any]
+    ) -> PairLayout:
+        """Each member against the consensus of all members, matched on the keys."""
+        name = item.effective_name(group.members)
+        keys, consensus = self.consensus_source(settings)
+        full = derived_name("full", scope.path)
+        agreed = derived_name("consensus", scope.path)
+        derived = {
+            full: DerivedParams(
+                role="consensus_full",
+                members=group.members,
+                keys=keys,
+                reference=group.reference,
+                consensus=group.consensus or ConsensusSettings(),
+                **consensus,
+            ),
+            agreed: DerivedParams(role="consensus", full=full, keys=keys),
+        }
+        elements, roles = [], []
+        for member in group.members:
+            restricted = derived_name("member", scope.path, member)
+            derived[restricted] = DerivedParams(role="member", full=full, member=member, keys=keys)
+            label = pair_label(name, CONSENSUS, member)
+            pair_settings = self.pair_settings(settings, group, ())
+            element = self.consensus_element(agreed, restricted, pair_settings, consensus)
+            elements.append(element | self.where(item) | {"name": label})
+            roles.append(
+                PairRole(label=label, reference=CONSENSUS, other=member, members=(member,))
+            )
+        plan = GroupPlan(
+            name=name,
+            check=self.name,
+            strategy="consensus",
+            members=group.members,
+            reference=group.reference,
+            pairs=tuple(roles),
+            consensus=group.consensus,
+            consensus_dataset=full,
+            keys=keys,
+        )
+        return PairLayout(elements, plan, derived)
+
+    def consensus_source(self, settings: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, Any]]:
+        """The consensus keys and how the consensus combines the members' rows."""
+        keys = settings.get("keys")
+        if not isinstance(keys, list | tuple) or not keys:
+            raise CheckSettingError("keys", "strategy consensus matches members on keys; give keys")
+        return tuple(keys), {}
+
+    def consensus_element(
+        self, agreed: str, member: str, settings: dict[str, Any], consensus: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The list entry relating the consensus and one member."""
+        return self.element(agreed, member, settings)
+
+    def pair_settings(
+        self, settings: dict[str, Any], group: DatasetGroup, pair: tuple[str, ...]
+    ) -> dict[str, Any]:
+        """The settings of one pair's list entry (a copy: entries are built from them)."""
+        return copy.deepcopy(settings)
 
     def locate(self, loc: Sequence[Any]) -> str:
         if loc and loc[0] == self.list_param:
@@ -551,17 +677,41 @@ class PairCheck(CheckDefinition):
                 list[str],
                 Field(
                     min_length=2,
-                    max_length=2,
-                    description="The two datasets related; the reference first.",
+                    description="The datasets related; the reference first (by default).",
                 ),
             ),
             "strategy": (
-                Literal["reference"],
-                Field(default="reference", description="How the datasets are paired."),
+                Strategy,
+                Field(
+                    default="reference",
+                    description=(
+                        "How the datasets are paired: the reference with each other "
+                        "(reference), each with the next (sequential), every pair "
+                        "(all_pairs) or each with the consensus of all (consensus)."
+                    ),
+                ),
             ),
             "reference": (
                 str | None,
-                Field(default=None, description="The authoritative dataset (the first)."),
+                Field(
+                    default=None,
+                    description=(
+                        "The authoritative dataset (default: the first); with consensus, the "
+                        "dataset whose value breaks ties under ties: reference."
+                    ),
+                ),
+            ),
+            "max_pairs": (
+                int,
+                Field(
+                    default=DEFAULT_MAX_PAIRS,
+                    ge=1,
+                    description="all_pairs refuses more pairs than this.",
+                ),
+            ),
+            "consensus": (
+                ConsensusSettings | None,
+                Field(default=None, description="How the consensus is built (strategy consensus)."),
             ),
         }
 
@@ -579,15 +729,48 @@ class DriftCheck(PairCheck):
     def split(self, element: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
         return element.pop("reference"), element.pop("dataset"), element
 
+    def consensus_layout(
+        self, item: CheckItem, scope: Scope, group: DatasetGroup, settings: dict[str, Any]
+    ) -> PairLayout:
+        """Each member's distribution against the pooled data of all members."""
+        if "consensus" in item.settings:
+            raise CheckSettingError(
+                "consensus",
+                "drift compares each member with the pooled data of all members; consensus "
+                "settings apply to checks matched on keys",
+            )
+        name = item.effective_name(group.members)
+        pooled = derived_name("pooled", scope.path)
+        derived = {pooled: DerivedParams(role="pooled", members=group.members)}
+        elements, roles = [], []
+        for member in group.members:
+            label = pair_label(name, POOLED, member)
+            element = self.element(pooled, member, copy.deepcopy(settings)) | self.where(item)
+            elements.append(element | {"name": label})
+            roles.append(PairRole(label=label, reference=POOLED, other=member, members=(member,)))
+        plan = GroupPlan(
+            name=name,
+            check=self.name,
+            strategy="consensus",
+            members=group.members,
+            pairs=tuple(roles),
+        )
+        return PairLayout(elements, plan, derived)
+
     def item_fields(self) -> dict[str, FieldSpec]:
         fields = self.pair_fields()
         fields |= _fields_of(self.element_model, {}, ("name", "dataset", "reference"))
-        fields |= _fields_of(self.rule_cls.Params, {}, (self.list_param,))
+        fields |= _fields_of(self.rule_cls.Params, {}, (self.list_param, "group"))
         return fields
 
 
 class CompareCheck(PairCheck):
-    """``compare``: the other dataset (candidate) against the reference (baseline)."""
+    """``compare``: the other dataset (candidate) against the reference (baseline).
+
+    With more than two members, the ``coverage``, ``structure`` and ``distribution``
+    levels assess all members together (each member against the pooled data, for
+    ``distribution``) instead of pair by pair.
+    """
 
     plugin_components = True
 
@@ -597,10 +780,135 @@ class CompareCheck(PairCheck):
     def split(self, element: dict[str, Any]) -> tuple[str, str, dict[str, Any]]:
         return element.pop("baseline"), element.pop("candidate"), element
 
+    def consensus_source(self, settings: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, Any]]:
+        if aligned := [key for key in _CONSENSUS_SIDE_SETTINGS if settings.get(key)]:
+            raise CheckSettingError(
+                aligned[0],
+                f"with strategy consensus every member is aligned the same way; "
+                f"{aligned[0]!r} aligns one side only",
+            )
+        keys, consensus = super().consensus_source(settings)
+        ignored = settings.get("ignore_columns") or ()
+        return keys, consensus | {"ignore": tuple(ignored)}
+
+    def layout(
+        self, item: CheckItem, scope: Scope, group: DatasetGroup, settings: dict[str, Any]
+    ) -> PairLayout:
+        layout = super().layout(item, scope, group, settings)
+        if len(group.members) <= 2:
+            return layout
+        return WholeGroupLevels(self, item, scope, group, settings).apply(layout)
+
     def item_fields(self) -> dict[str, FieldSpec]:
         fields = self.pair_fields()
         exclude = ("name", "baseline", "candidate", "where")
         return fields | _fields_of(self.element_model, {}, exclude)
+
+
+class WholeGroupLevels:
+    """``compare`` with more than two members: the levels assessed over all members.
+
+    ``coverage`` and ``structure`` run once over every member (in the rule, from the
+    group plan); ``distribution`` compares each member with the pooled data of all
+    members. Pairs keep the other levels; a pair left with none is dropped.
+    """
+
+    LEVELS = ("coverage", "structure", "distribution")
+
+    def __init__(
+        self,
+        check: CompareCheck,
+        item: CheckItem,
+        scope: Scope,
+        group: DatasetGroup,
+        settings: dict[str, Any],
+    ) -> None:
+        self.check = check
+        self.item = item
+        self.scope = scope
+        self.group = group
+        self.settings = settings
+
+    def configured(self) -> list[tuple[Any, Any]] | None:
+        """``(raw entry, LevelConfig)`` of each configured (or default) level."""
+        from qavf.compare.spec import DEFAULT_LEVELS, LevelConfig
+
+        raw = self.settings.get("levels")
+        if raw is None:
+            raw = list(DEFAULT_LEVELS if self.settings.get("keys") else DEFAULT_LEVELS[:1])
+        if not isinstance(raw, list | tuple):
+            return None
+        try:
+            return [(entry, LevelConfig.model_validate(entry)) for entry in raw]
+        except (ValidationError, ValueError, TypeError):
+            return None  # reported by the pairs' own validation
+
+    def apply(self, layout: PairLayout) -> PairLayout:
+        configured = self.configured()
+        if configured is None:
+            return layout
+        whole = {config.level: config for _, config in configured if config.level in self.LEVELS}
+        if not whole:
+            return layout
+        kept = [entry for entry, config in configured if config.level not in self.LEVELS]
+        elements, roles = [], []
+        if kept:
+            for element, role in zip(layout.elements, layout.plan.pairs, strict=True):
+                elements.append(element | {"levels": copy.deepcopy(kept)})
+                roles.append(role)
+        derived = dict(layout.derived)
+        if not kept:
+            derived = {}  # no pair is compared: the consensus is not needed
+        if "distribution" in whole:
+            self.pooled(whole["distribution"], configured, elements, roles, derived)
+        coverage, structure = whole.get("coverage"), whole.get("structure")
+        plan = layout.plan.model_copy(
+            update={
+                "pairs": tuple(roles),
+                "consensus_dataset": layout.plan.consensus_dataset if kept else None,
+                "keys": tuple(self.settings.get("keys") or ()),
+                "coverage": coverage.label if coverage else None,
+                "coverage_severity": coverage.severity if coverage else None,
+                "structure": structure.label if structure else None,
+                "structure_severity": structure.severity if structure else None,
+                "where": self.item.where,
+                "ignore_columns": tuple(self.settings.get("ignore_columns") or ()),
+            }
+        )
+        return PairLayout(elements, GroupPlan.model_validate(plan.model_dump()), derived)
+
+    def pooled(
+        self,
+        config: Any,
+        configured: list[tuple[Any, Any]],
+        elements: list[dict[str, Any]],
+        roles: list[PairRole],
+        derived: dict[str, DerivedParams],
+    ) -> None:
+        """Each member's distribution against the pooled data of all members."""
+        entry = next(raw for raw, level in configured if level is config)
+        pooled = derived_name("pooled", self.scope.path)
+        derived[pooled] = DerivedParams(role="pooled", members=self.group.members)
+        name = self.item.effective_name(self.group.members)
+        settings = {
+            key: value
+            for key, value in self.settings.items()
+            if key not in _CONSENSUS_SIDE_SETTINGS
+        }
+        for member in self.group.members:
+            label = pair_label(name, POOLED, member)
+            element = self.check.element(pooled, member, copy.deepcopy(settings))
+            element |= self.check.where(self.item)
+            elements.append(element | {"levels": [copy.deepcopy(entry)], "name": label})
+            roles.append(
+                PairRole(
+                    label=label,
+                    reference=POOLED,
+                    other=member,
+                    members=(member,),
+                    level=config.label,
+                )
+            )
 
 
 class _SideSettings(BaseModel):
@@ -612,6 +920,22 @@ class _SideSettings(BaseModel):
     """Column to sum on this dataset (overrides the check's ``value``)."""
     keys: list[str] | None = None
     """Key columns on this dataset, in the order of the check's ``keys``."""
+
+
+def _sides_of(settings: dict[str, Any], group: DatasetGroup, pair: tuple[str, ...]) -> Any:
+    """The ``sides`` overrides of one pair, checked against every member."""
+    sides = settings.get("sides")
+    if not sides:
+        return sides
+    if not isinstance(sides, Mapping) or set(sides) - set(group.members):
+        raise CheckSettingError("sides", "give overrides keyed by the check's datasets")
+    if group.strategy == CONSENSUS:
+        raise CheckSettingError(
+            "sides",
+            "with strategy consensus every member is read the same way; per-dataset "
+            "overrides do not apply",
+        )
+    return {name: override for name, override in sides.items() if name in pair}
 
 
 class TotalsCheck(PairCheck):
@@ -638,6 +962,30 @@ class TotalsCheck(PairCheck):
         }
         if keys is not None:
             element["on"] = keys
+        return element
+
+    def pair_settings(
+        self, settings: dict[str, Any], group: DatasetGroup, pair: tuple[str, ...]
+    ) -> dict[str, Any]:
+        result = copy.deepcopy(settings)
+        if "sides" in result:
+            result["sides"] = _sides_of(result, group, pair)
+        return result
+
+    def consensus_source(self, settings: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, Any]]:
+        keys, consensus = super().consensus_source(settings)
+        value = settings.get("value")
+        return keys, consensus | (
+            {"total": "sum", "value": value, "columns": (value,)}
+            if value is not None
+            else {"total": "rows", "columns": (ROWS,)}
+        )
+
+    def consensus_element(
+        self, agreed: str, member: str, settings: dict[str, Any], consensus: dict[str, Any]
+    ) -> dict[str, Any]:
+        element = self.element(agreed, member, settings)
+        element["left"]["value"] = consensus.get("value") or ROWS
         return element
 
     @staticmethod
@@ -709,6 +1057,18 @@ class KeySetsCheck(PairCheck):
             "right": {"dataset": other, "columns": self.columns(keys, sides.get(other))},
         }
         return element | settings
+
+    def pair_settings(
+        self, settings: dict[str, Any], group: DatasetGroup, pair: tuple[str, ...]
+    ) -> dict[str, Any]:
+        result = copy.deepcopy(settings)
+        if "sides" in result:
+            result["sides"] = _sides_of(result, group, pair)
+        return result
+
+    def consensus_source(self, settings: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, Any]]:
+        keys, consensus = super().consensus_source(settings)
+        return keys, consensus | {"columns": ()}
 
     @staticmethod
     def columns(keys: Any, override: Any) -> Any:
@@ -969,6 +1329,27 @@ _COMMON_ITEM_FIELDS: dict[str, Any] = {
 }
 
 
+def derived_datasets(settings: QAVFSettings) -> dict[str, DerivedParams]:
+    """The datasets checks relating many datasets derive from their members.
+
+    A consensus (with the members restricted to the keys that have one) and the
+    pooled data of all members are datasets of the run like views; they are named
+    after the item's place (:func:`~qavf.engine.derived.derived_name`). Items with
+    invalid settings derive nothing; their errors are reported where items are
+    validated.
+    """
+    derived: dict[str, DerivedParams] = {}
+    for placed in placed_items(settings):
+        definition = CATALOG.get(placed.item.check)
+        if not isinstance(definition, PairCheck) or placed.scope.dataset is not None:
+            continue
+        try:
+            derived |= definition.derived(placed.item, placed.scope)
+        except CheckSettingError:
+            continue
+    return derived
+
+
 def _settings_required_when_enabled(schema: dict[str, Any]) -> None:
     """A check switched off (``enabled: false``) may omit its required settings."""
     required = [name for name in schema.get("required", ()) if name != "check"]
@@ -1021,9 +1402,9 @@ __all__ = [
     "BY_RULE",
     "CATALOG",
     "CONTRACT_RULES",
-    "LATER_VERSION",
     "CheckDefinition",
     "Decompiled",
     "PluginDefinition",
     "definition_for",
+    "derived_datasets",
 ]

@@ -67,6 +67,7 @@ from qavf.plugins.transactions import (
     transaction,
 )
 from qavf.redaction import exception_details, redact_text
+from qavf.reports.models import GroupRole
 from qavf.settings import QAVFSettings
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,8 @@ class Finding:
     parameters: dict[str, Any] = field(default_factory=dict, kw_only=True)
     checks: tuple[Mapping[str, Any], ...] = field(default=(), kw_only=True)
     """Structured identities of checks combined into this finding (e.g. passes)."""
+    group: GroupRole | None = field(default=None, kw_only=True)
+    """For a check relating many datasets: which member the finding is about."""
 
     def __post_init__(self) -> None:
         """Reject ambiguous plugin outcomes before the engine interprets them.
@@ -242,6 +245,17 @@ class Rule[P: RuleParams](ABC):
     def key(self) -> str:
         """Identifies this instance within a run: its check item, else its rule id."""
         return self.binding.key if self.binding is not None else self.rule_id
+
+    def group_role(self) -> GroupRole | None:
+        """The member role of a result that has no finding (the rule failed as a whole).
+
+        A check relating many datasets carries its group plan as the ``group``
+        parameter; such a result concerns every member.
+        """
+        plan = getattr(self.params, "group", None)
+        fallback = getattr(plan, "whole_role", None)
+        role = fallback() if callable(fallback) else None
+        return role if isinstance(role, GroupRole) else None
 
     def item_name(self, finding: Finding | None) -> str | None:
         """Name of the check item ``finding`` belongs to (the bound item by default).

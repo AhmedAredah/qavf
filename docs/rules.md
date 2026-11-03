@@ -51,6 +51,7 @@ Each configured pair of datasets (for example two versions of an output) agrees 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `comparisons` | `tuple[ComparisonSpec, ...]` | `[]` | Pairs of configured datasets and how to compare them. |
+| `group` | `GroupPlan \| None` | `None` | For a check relating many datasets: which member each comparison is about, the consensus and the levels assessed over the whole group. |
 
 #### `ComparisonSpec`
 
@@ -144,6 +145,52 @@ A comparison level: ``records`` or ``{level: groups, group_by: [...], ...}``.
 | `name` | `str \| None` | `None` | Label in reports; the level name when omitted. |
 | `severity` | `Severity \| None` | `None` | Severity of this level's failures; the rule's when omitted. |
 | `params` | `dict[str, Any]` | `{}` |  |
+
+#### `GroupPlan`
+
+How one check relates its members: pairs, consensus and whole-group levels.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | **required** | The check item's name. |
+| `check` | `str` | **required** | The check's name (``compare``, ``totals_match``, ...). |
+| `strategy` | `Literal['reference', 'sequential', 'all_pairs', 'consensus']` | **required** | How the members are paired. |
+| `members` | `tuple[str, ...]` | **required** | Every member, in the check's order. |
+| `reference` | `str \| None` | `None` | The reference member (``reference`` and ``consensus`` strategies). |
+| `pairs` | `tuple[PairRole, ...]` | `[]` | The pairs, in the order of the rule's list entries. |
+| `consensus` | `ConsensusSettings \| None` | `None` | How the consensus is built (strategy ``consensus``). |
+| `consensus_dataset` | `str \| None` | `None` | The derived dataset holding the consensus and, per key, why none was found. |
+| `keys` | `tuple[str, ...]` | `[]` | Columns identifying a record on every member (whole-group levels, consensus). |
+| `coverage` | `str \| None` | `None` | Name of the whole-group ``coverage`` level (``compare`` with more than two members). |
+| `coverage_severity` | `Severity \| None` | `None` | Severity of the whole-group ``coverage`` level's failures. |
+| `structure` | `str \| None` | `None` | Name of the whole-group ``structure`` level. |
+| `structure_severity` | `Severity \| None` | `None` | Severity of the whole-group ``structure`` level's failures. |
+| `where` | `str \| None` | `None` | Condition selecting the rows whole-group levels assess. |
+| `ignore_columns` | `tuple[str, ...]` | `[]` | Columns whole-group structure ignores. |
+
+#### `PairRole`
+
+One pair of a group: its label in findings and the members it concerns.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `label` | `str` | **required** | The pair's name, the label (prefix) of its findings. |
+| `reference` | `str` | **required** | The reference side, as reports show it (a member, ``consensus`` or ``pooled``). |
+| `other` | `str` | **required** | The other side, as reports show it. |
+| `members` | `tuple[str, ...]` | **required** | The members whose results these are (both, for ``all_pairs``). |
+| `level` | `str \| None` | `None` | For a whole-group level run as pairs (``distribution`` against the pooled members): that level's name. |
+
+#### `ConsensusSettings`
+
+How the consensus of the members is built, key by key (``consensus:``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `numeric` | `Literal['median', 'mean', 'trimmed_mean']` | `median` | Consensus of a number: the median, the mean or the trimmed mean of the members. |
+| `trim` | `float` | `0.1` | Fraction trimmed from each end for ``trimmed_mean``. |
+| `categorical` | `Literal['majority', 'plurality']` | `majority` | Consensus of any other value: held by more than half of the members (``majority``), or by more members than any other value (``plurality``). |
+| `min_agreement` | `float` | `0.5` | Share of the members holding a key that must agree for a consensus value; for numbers, the share that reports one. |
+| `ties` | `Literal['report', 'reference']` | `report` | A tie leaves the key without a consensus value (``report``: not assessed for that key), or takes the reference member's value (``reference``). |
 
 *When it fails:* Decide whether each difference is intended. Start with structure and coverage (renamed, missing or new columns and keys), then the largest record and group changes. Map, convert or recode intended differences in the comparison.
 
@@ -281,6 +328,7 @@ For each configured reconciliation, the sum (or row count) of one dataset equals
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `reconciliations` | `tuple[Reconciliation, ...]` | `[]` |  |
+| `group` | `GroupPlan \| None` | `None` | For a check relating many datasets: which member each reconciliation is about. |
 
 #### `Reconciliation`
 
@@ -306,6 +354,52 @@ One side of a reconciliation: a dataset's value summed (or counted) per key.
 | `dataset` | `str` | **required** |  |
 | `value` | `str \| None` | `None` | Column to sum; omit to count rows instead. |
 | `keys` | `tuple[str, ...]` | `[]` | Columns to total by; the reconciliation's ``on`` when omitted. Listed in the same order as ``on`` (they may have other names on this side). |
+
+#### `GroupPlan`
+
+How one check relates its members: pairs, consensus and whole-group levels.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | **required** | The check item's name. |
+| `check` | `str` | **required** | The check's name (``compare``, ``totals_match``, ...). |
+| `strategy` | `Literal['reference', 'sequential', 'all_pairs', 'consensus']` | **required** | How the members are paired. |
+| `members` | `tuple[str, ...]` | **required** | Every member, in the check's order. |
+| `reference` | `str \| None` | `None` | The reference member (``reference`` and ``consensus`` strategies). |
+| `pairs` | `tuple[PairRole, ...]` | `[]` | The pairs, in the order of the rule's list entries. |
+| `consensus` | `ConsensusSettings \| None` | `None` | How the consensus is built (strategy ``consensus``). |
+| `consensus_dataset` | `str \| None` | `None` | The derived dataset holding the consensus and, per key, why none was found. |
+| `keys` | `tuple[str, ...]` | `[]` | Columns identifying a record on every member (whole-group levels, consensus). |
+| `coverage` | `str \| None` | `None` | Name of the whole-group ``coverage`` level (``compare`` with more than two members). |
+| `coverage_severity` | `Severity \| None` | `None` | Severity of the whole-group ``coverage`` level's failures. |
+| `structure` | `str \| None` | `None` | Name of the whole-group ``structure`` level. |
+| `structure_severity` | `Severity \| None` | `None` | Severity of the whole-group ``structure`` level's failures. |
+| `where` | `str \| None` | `None` | Condition selecting the rows whole-group levels assess. |
+| `ignore_columns` | `tuple[str, ...]` | `[]` | Columns whole-group structure ignores. |
+
+#### `PairRole`
+
+One pair of a group: its label in findings and the members it concerns.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `label` | `str` | **required** | The pair's name, the label (prefix) of its findings. |
+| `reference` | `str` | **required** | The reference side, as reports show it (a member, ``consensus`` or ``pooled``). |
+| `other` | `str` | **required** | The other side, as reports show it. |
+| `members` | `tuple[str, ...]` | **required** | The members whose results these are (both, for ``all_pairs``). |
+| `level` | `str \| None` | `None` | For a whole-group level run as pairs (``distribution`` against the pooled members): that level's name. |
+
+#### `ConsensusSettings`
+
+How the consensus of the members is built, key by key (``consensus:``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `numeric` | `Literal['median', 'mean', 'trimmed_mean']` | `median` | Consensus of a number: the median, the mean or the trimmed mean of the members. |
+| `trim` | `float` | `0.1` | Fraction trimmed from each end for ``trimmed_mean``. |
+| `categorical` | `Literal['majority', 'plurality']` | `majority` | Consensus of any other value: held by more than half of the members (``majority``), or by more members than any other value (``plurality``). |
+| `min_agreement` | `float` | `0.5` | Share of the members holding a key that must agree for a consensus value; for numbers, the share that reports one. |
+| `ties` | `Literal['report', 'reference']` | `report` | A tie leaves the key without a consensus value (``report``: not assessed for that key), or takes the reference member's value (``reference``). |
 
 *When it fails:* A total that does not reconcile means rows were lost, duplicated or re-attributed between the two datasets. Start with the keys missing on one side, then the largest differences.
 
@@ -377,6 +471,7 @@ Each configured pair of datasets has identical sets of (non-null) keys: every ke
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `pairs` | `tuple[KeySetPair, ...]` | `[]` |  |
+| `group` | `GroupPlan \| None` | `None` | For a check relating many datasets: which member each pair is about. |
 
 #### `KeySetPair`
 
@@ -396,6 +491,52 @@ Two datasets whose key sets must be identical.
 |---|---|---|---|
 | `dataset` | `str` | **required** |  |
 | `columns` | `tuple[str, ...]` | **required** |  |
+
+#### `GroupPlan`
+
+How one check relates its members: pairs, consensus and whole-group levels.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | **required** | The check item's name. |
+| `check` | `str` | **required** | The check's name (``compare``, ``totals_match``, ...). |
+| `strategy` | `Literal['reference', 'sequential', 'all_pairs', 'consensus']` | **required** | How the members are paired. |
+| `members` | `tuple[str, ...]` | **required** | Every member, in the check's order. |
+| `reference` | `str \| None` | `None` | The reference member (``reference`` and ``consensus`` strategies). |
+| `pairs` | `tuple[PairRole, ...]` | `[]` | The pairs, in the order of the rule's list entries. |
+| `consensus` | `ConsensusSettings \| None` | `None` | How the consensus is built (strategy ``consensus``). |
+| `consensus_dataset` | `str \| None` | `None` | The derived dataset holding the consensus and, per key, why none was found. |
+| `keys` | `tuple[str, ...]` | `[]` | Columns identifying a record on every member (whole-group levels, consensus). |
+| `coverage` | `str \| None` | `None` | Name of the whole-group ``coverage`` level (``compare`` with more than two members). |
+| `coverage_severity` | `Severity \| None` | `None` | Severity of the whole-group ``coverage`` level's failures. |
+| `structure` | `str \| None` | `None` | Name of the whole-group ``structure`` level. |
+| `structure_severity` | `Severity \| None` | `None` | Severity of the whole-group ``structure`` level's failures. |
+| `where` | `str \| None` | `None` | Condition selecting the rows whole-group levels assess. |
+| `ignore_columns` | `tuple[str, ...]` | `[]` | Columns whole-group structure ignores. |
+
+#### `PairRole`
+
+One pair of a group: its label in findings and the members it concerns.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `label` | `str` | **required** | The pair's name, the label (prefix) of its findings. |
+| `reference` | `str` | **required** | The reference side, as reports show it (a member, ``consensus`` or ``pooled``). |
+| `other` | `str` | **required** | The other side, as reports show it. |
+| `members` | `tuple[str, ...]` | **required** | The members whose results these are (both, for ``all_pairs``). |
+| `level` | `str \| None` | `None` | For a whole-group level run as pairs (``distribution`` against the pooled members): that level's name. |
+
+#### `ConsensusSettings`
+
+How the consensus of the members is built, key by key (``consensus:``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `numeric` | `Literal['median', 'mean', 'trimmed_mean']` | `median` | Consensus of a number: the median, the mean or the trimmed mean of the members. |
+| `trim` | `float` | `0.1` | Fraction trimmed from each end for ``trimmed_mean``. |
+| `categorical` | `Literal['majority', 'plurality']` | `majority` | Consensus of any other value: held by more than half of the members (``majority``), or by more members than any other value (``plurality``). |
+| `min_agreement` | `float` | `0.5` | Share of the members holding a key that must agree for a consensus value; for numbers, the share that reports one. |
+| `ties` | `Literal['report', 'reference']` | `report` | A tie leaves the key without a consensus value (``report``: not assessed for that key), or takes the reference member's value (``reference``). |
 
 *When it fails:* Keys on one side only mean rows were dropped or invented between the two datasets; a one-directional foreign key would not notice the other direction.
 
@@ -700,6 +841,7 @@ Each configured column's distribution stays close to a reference dataset's, by p
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `comparisons` | `tuple[DriftComparison, ...]` | `[]` |  |
+| `group` | `GroupPlan \| None` | `None` | For a check relating many datasets: which member each comparison is about. |
 | `correction` | `Literal['none', 'bonferroni', 'holm', 'bh', 'by']` | `bonferroni` | Multiple-testing correction across the KS comparisons (``holm``, ``bh``, ``by``, ``none``); a comparison drifts when its adjusted p-value is below its ``alpha``. |
 
 #### `DriftComparison`
@@ -718,6 +860,52 @@ A column whose distribution must stay close to that of a reference dataset.
 | `alpha` | `float` | `0.01` | KS significance level before the multiple-testing correction. |
 | `min_effect` | `float` | `0.1` | KS statistic below which a significant difference is still immaterial (large samples make tiny differences significant). |
 | `min_samples` | `int` | `50` | Fewest usable values on each side for a comparison to be judged. |
+
+#### `GroupPlan`
+
+How one check relates its members: pairs, consensus and whole-group levels.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `name` | `str` | **required** | The check item's name. |
+| `check` | `str` | **required** | The check's name (``compare``, ``totals_match``, ...). |
+| `strategy` | `Literal['reference', 'sequential', 'all_pairs', 'consensus']` | **required** | How the members are paired. |
+| `members` | `tuple[str, ...]` | **required** | Every member, in the check's order. |
+| `reference` | `str \| None` | `None` | The reference member (``reference`` and ``consensus`` strategies). |
+| `pairs` | `tuple[PairRole, ...]` | `[]` | The pairs, in the order of the rule's list entries. |
+| `consensus` | `ConsensusSettings \| None` | `None` | How the consensus is built (strategy ``consensus``). |
+| `consensus_dataset` | `str \| None` | `None` | The derived dataset holding the consensus and, per key, why none was found. |
+| `keys` | `tuple[str, ...]` | `[]` | Columns identifying a record on every member (whole-group levels, consensus). |
+| `coverage` | `str \| None` | `None` | Name of the whole-group ``coverage`` level (``compare`` with more than two members). |
+| `coverage_severity` | `Severity \| None` | `None` | Severity of the whole-group ``coverage`` level's failures. |
+| `structure` | `str \| None` | `None` | Name of the whole-group ``structure`` level. |
+| `structure_severity` | `Severity \| None` | `None` | Severity of the whole-group ``structure`` level's failures. |
+| `where` | `str \| None` | `None` | Condition selecting the rows whole-group levels assess. |
+| `ignore_columns` | `tuple[str, ...]` | `[]` | Columns whole-group structure ignores. |
+
+#### `PairRole`
+
+One pair of a group: its label in findings and the members it concerns.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `label` | `str` | **required** | The pair's name, the label (prefix) of its findings. |
+| `reference` | `str` | **required** | The reference side, as reports show it (a member, ``consensus`` or ``pooled``). |
+| `other` | `str` | **required** | The other side, as reports show it. |
+| `members` | `tuple[str, ...]` | **required** | The members whose results these are (both, for ``all_pairs``). |
+| `level` | `str \| None` | `None` | For a whole-group level run as pairs (``distribution`` against the pooled members): that level's name. |
+
+#### `ConsensusSettings`
+
+How the consensus of the members is built, key by key (``consensus:``).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `numeric` | `Literal['median', 'mean', 'trimmed_mean']` | `median` | Consensus of a number: the median, the mean or the trimmed mean of the members. |
+| `trim` | `float` | `0.1` | Fraction trimmed from each end for ``trimmed_mean``. |
+| `categorical` | `Literal['majority', 'plurality']` | `majority` | Consensus of any other value: held by more than half of the members (``majority``), or by more members than any other value (``plurality``). |
+| `min_agreement` | `float` | `0.5` | Share of the members holding a key that must agree for a consensus value; for numbers, the share that reports one. |
+| `ties` | `Literal['report', 'reference']` | `report` | A tie leaves the key without a consensus value (``report``: not assessed for that key), or takes the reference member's value (``reference``). |
 
 *When it fails:* Drift is not an error by itself: the population may really have changed. Check what changed upstream (inputs, coverage, units) before accepting the new run.
 

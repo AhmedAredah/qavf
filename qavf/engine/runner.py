@@ -985,6 +985,7 @@ class QARunner:
             check_name=rule.check_name,
             item_name=rule.item_name(finding),
             tags=self._tags(rule, finding),
+            group=finding.group if finding is not None and finding.group else rule.group_role(),
             check_id=finding.check_id if finding and finding.check_id else rule.rule_id,
             columns=list(finding.columns if finding else ()),
             parameters=redact(

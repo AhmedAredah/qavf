@@ -211,6 +211,99 @@ def _fails_under(result: RuleResult, limit: Severity, policies: Mapping[str, str
     return meets_threshold(result.severity, min(thresholds))
 
 
+class GroupRole(SnapshotModel):
+    """Which member of a check relating many datasets a result is about.
+
+    Set on the results of a check with more than two datasets, or a strategy other
+    than ``reference`` (two datasets with the default strategy report exactly as a
+    single comparison does, without a role). Reports roll these up per member
+    (:attr:`QAReport.groups`).
+    """
+
+    group: str
+    """The check item's name."""
+    check: str
+    """The check's name (``compare``, ``totals_match``, ``key_sets_match``, ``drift``)."""
+    strategy: str
+    """How the members are paired (``reference``, ``sequential``, ``all_pairs``,
+    ``consensus``)."""
+    members: list[str] = Field(default_factory=list)
+    """The members the result is about (both members of an ``all_pairs`` pair; none
+    for a result about the whole group, such as keys without a consensus)."""
+    group_members: list[str] = Field(default_factory=list)
+    """Every member of the check, in its order."""
+    pair: list[str] = Field(default_factory=list)
+    """The pair compared, reference first, as reports show it (a member,
+    ``consensus`` or ``pooled``); empty for a whole-group level."""
+    level: str | None = None
+    """The comparison level the result belongs to (``compare``); ``None`` for the
+    check as a whole."""
+    whole_group: bool = False
+    """True for a level assessed over all members at once rather than pair by pair."""
+
+
+class MemberRow(SnapshotModel):
+    """One member's row of the matrix."""
+
+    member: str
+    cells: dict[str, Status] = Field(default_factory=dict)
+    """The worst status of the member's results at each level (levels without results
+    are absent)."""
+
+
+class PairSummary(SnapshotModel):
+    """One pair of members compared (or a member against the consensus or pool)."""
+
+    reference: str
+    other: str
+    comparison: str
+    """The pair's label: its findings' prefix and its comparison's name."""
+    status: Status
+    """The worst status of the pair's results."""
+    results: int
+    failed: int
+    not_assessed: int
+    whole_group_level: str | None = None
+    """For a whole-group level run as pairs (``distribution`` against the pool)."""
+
+
+class MemberRank(SnapshotModel):
+    """One member's place in the ranking."""
+
+    member: str
+    rank: int
+    """1 for the member with the most problems."""
+    status: Status
+    """The worst status of the member's results."""
+    failed: int
+    """Failed results about this member."""
+    not_assessed: int
+    """Results about this member that could not be assessed."""
+    changed_records: int
+    """Records, rows or keys counted by the member's failed results."""
+
+
+class GroupReport(SnapshotModel):
+    """The roll-up of one check relating many datasets."""
+
+    name: str
+    """The check item's name."""
+    check: str
+    rule_id: str
+    strategy: str
+    members: list[str]
+    levels: list[str]
+    """The matrix columns, in the order results report them."""
+    whole_group_levels: list[str] = Field(default_factory=list)
+    """Levels assessed over every member at once."""
+    matrix: list[MemberRow] = Field(default_factory=list)
+    pairs: list[PairSummary] = Field(default_factory=list)
+    ranking: list[MemberRank] = Field(default_factory=list)
+    group_results: list[str] = Field(default_factory=list)
+    """Checks about the group as a whole (such as keys without a consensus), with
+    their status: ``<check>: <status>``."""
+
+
 class RuleResult(SnapshotModel):
     """Outcome of one rule execution."""
 
@@ -232,6 +325,9 @@ class RuleResult(SnapshotModel):
     configuration gives none); ``None`` for schema contracts."""
     tags: list[str] = Field(default_factory=list)
     """The check item's own tags (its family is :attr:`category`)."""
+    group: GroupRole | None = None
+    """For a check relating many datasets: which member the result is about (``None``
+    otherwise, and in reports written before QAVF 0.7)."""
     columns: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     checks: list[CheckIdentity] = Field(default_factory=list)
@@ -582,6 +678,17 @@ class QAReport(SnapshotModel):
         """Verdict and exit code under the run's own policy (``fail_on``,
         ``fail_on_incomplete``), recorded so the JSON is self-describing."""
         return self.analyze().acceptance
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def groups(self) -> list[GroupReport]:
+        """Each check relating many datasets rolled up per member: a matrix of members
+        by levels, the pairs compared and a ranking of the members
+        (:class:`~qavf.reports.groups.GroupReport`). Derived from the results, so
+        reports written before QAVF 0.7 have none."""
+        from qavf.reports.groups import group_reports
+
+        return group_reports(self.results)
 
     def analyze(self, threshold: Severity | None = None) -> ReportAnalysis:
         """Derive one immutable view under this operation's acceptance policy."""

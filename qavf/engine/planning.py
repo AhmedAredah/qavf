@@ -106,6 +106,18 @@ class ExecutionPlan:
         ]
 
 
+def _ancestors(datasets: Iterable[str], parents: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
+    """Every dataset ``datasets`` are read from, directly or through other derived ones."""
+    found: set[str] = set()
+    pending = [parent for name in datasets for parent in parents.get(name, ())]
+    while pending:
+        name = pending.pop()
+        if name not in found:
+            found.add(name)
+            pending.extend(parents.get(name, ()))
+    return frozenset(found)
+
+
 def build_plan(
     rules: Sequence[Rule], settings: QAVFSettings, dataset_names: Iterable[str]
 ) -> ExecutionPlan:
@@ -117,7 +129,7 @@ def build_plan(
     alone is an availability condition, not a complete dependency declaration.
     """
     universe = frozenset(dataset_names)
-    parents = {name: parent for name, (parent, _) in settings.views().items()}
+    parents = settings.dataset_parents()
     dependencies = []
     for rule in rules:
         explicit = rule.data_requirements(settings)
@@ -131,9 +143,10 @@ def build_plan(
         else:
             requirements = DataRequirements(universe | frozenset(rule.requires))
             mode = "opaque"
-        viewed = frozenset(parents[name] for name in requirements.datasets if name in parents)
+        viewed = _ancestors(requirements.datasets, parents)
         if viewed:
-            # A view is read from its parent, which must stay loaded while the view is used.
+            # A view (or a derived dataset) is read from its parents, which must stay
+            # loaded while it is used.
             requirements = DataRequirements(requirements.datasets | viewed, requirements.columns)
         dependencies.append(_RuleDependencies(rule.key, rule.rule_id, requirements, mode))
     return ExecutionPlan(dependencies)

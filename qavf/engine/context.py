@@ -407,11 +407,16 @@ class DataContext:
             raise
 
     def _attach_views(self, settings: QAVFSettings) -> None:
-        """Give every dataset view a source that slices its parent as this run loads it."""
+        """Give every dataset view a source that slices its parent as this run loads it,
+        and every derived dataset (consensus, pooled members) one that builds it."""
+        from qavf.engine.derived import DerivedSource
         from qavf.engine.views import ViewSource
 
         for name, (parent, spec) in settings.views().items():
             self._catalog.sources[name] = ViewSource.of(parent, spec, self.env, self)
+            self._catalog.views.add(name)
+        for name, params in settings.derived_datasets().items():
+            self._catalog.sources[name] = DerivedSource.of(params, self.env, self)
             self._catalog.views.add(name)
 
     @property

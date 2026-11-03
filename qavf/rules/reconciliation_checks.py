@@ -16,6 +16,7 @@ import polars as pl
 from pydantic import Field, model_validator
 
 from qavf.aggregation import exact_sum_expr
+from qavf.compare.pairing import GroupPlan
 from qavf.engine.context import DataContext
 from qavf.engine.observation import Observation
 from qavf.engine.planning import DataRequirements
@@ -42,6 +43,7 @@ from qavf.rules._grouped import (
     scoped_relation,
     supports_grouped,
 )
+from qavf.rules._groups import GroupedFindings
 from qavf.rules._key_summary import KeySelection
 from qavf.rules._temporal import temporal_evidence
 from qavf.rules.helpers import (
@@ -111,6 +113,8 @@ class ReconciliationParams(RuleParams):
     """Parameters for :class:`TotalsReconcileRule`."""
 
     reconciliations: tuple[Reconciliation, ...] = ()
+    group: GroupPlan | None = None
+    """For a check relating many datasets: which member each reconciliation is about."""
 
 
 def _declared_unit(ctx: DataContext, dataset: str, column: str | None) -> str | None:
@@ -305,15 +309,12 @@ class TotalsReconcileRule(Rule):
     Params: ClassVar[type[RuleParams]] = ReconciliationParams
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements:
-        return DataRequirements(
-            frozenset(
-                {
-                    side.dataset
-                    for rec in self.params.reconciliations
-                    for side in (rec.left, rec.right)
-                }
-            )
-        )
+        datasets = {
+            side.dataset for rec in self.params.reconciliations for side in (rec.left, rec.right)
+        }
+        if self.params.group is not None:
+            datasets |= GroupedFindings(self.params.group).requirements()
+        return DataRequirements(frozenset(datasets))
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         failures: list[Finding] = []
@@ -327,12 +328,15 @@ class TotalsReconcileRule(Rule):
                 passed.append(rec.label())
             else:
                 failures.append(finding)
-        return outcome(
+        findings = outcome(
             failures,
             passed,
             f"{plural(len(passed), 'reconciliation')} balance.",
             "No reconciliations are configured.",
         )
+        if self.params.group is not None:
+            return GroupedFindings(self.params.group).finish(ctx, findings)
+        return findings
 
     def _reconcile(self, ctx: DataContext, rec: Reconciliation) -> Finding | None:
         label, on = rec.label(), list(rec.on)
@@ -772,6 +776,8 @@ class KeySetParams(RuleParams):
     """Parameters for :class:`KeySetsMatchRule`."""
 
     pairs: tuple[KeySetPair, ...] = ()
+    group: GroupPlan | None = None
+    """For a check relating many datasets: which member each pair is about."""
 
 
 class KeySetsMatchRule(Rule):
@@ -793,11 +799,10 @@ class KeySetsMatchRule(Rule):
     Params: ClassVar[type[RuleParams]] = KeySetParams
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements:
-        return DataRequirements(
-            frozenset(
-                {side.dataset for pair in self.params.pairs for side in (pair.left, pair.right)}
-            )
-        )
+        datasets = {side.dataset for pair in self.params.pairs for side in (pair.left, pair.right)}
+        if self.params.group is not None:
+            datasets |= GroupedFindings(self.params.group).requirements()
+        return DataRequirements(frozenset(datasets))
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         failures: list[Finding] = []
@@ -811,12 +816,15 @@ class KeySetsMatchRule(Rule):
                 passed.append(pair.label())
             else:
                 failures.append(finding)
-        return outcome(
+        findings = outcome(
             failures,
             passed,
             f"{plural(len(passed), 'key set pair')} match.",
             "No key set pairs are configured.",
         )
+        if self.params.group is not None:
+            return GroupedFindings(self.params.group).finish(ctx, findings)
+        return findings
 
     @staticmethod
     def _pair(ctx: DataContext, pair: KeySetPair) -> Finding | None:

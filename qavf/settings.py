@@ -47,6 +47,7 @@ from qavf.value_policy import TextNormalization
 
 if TYPE_CHECKING:
     from qavf.checks.selection import AppliedSelection
+    from qavf.engine.derived import DerivedParams
     from qavf.sources.base import SourceEnvironment
 
 logger = logging.getLogger(__name__)
@@ -1418,9 +1419,27 @@ class QAVFSettings(_Strict):
             for view, spec in dataset.views.items()
         }
 
+    def derived_datasets(self) -> dict[str, DerivedParams]:
+        """Every dataset a check relating many datasets derives from its members
+        (consensus, pooled data), by name (see :func:`qavf.checks.catalog.derived_datasets`)."""
+        from qavf.checks.catalog import derived_datasets
+
+        return derived_datasets(self)
+
+    def dataset_parents(self) -> dict[str, tuple[str, ...]]:
+        """The datasets each view or derived dataset is read from (kept loaded with it)."""
+        parents: dict[str, tuple[str, ...]] = {
+            name: (parent,) for name, (parent, _) in self.views().items()
+        }
+        parents |= {name: spec.parents() for name, spec in self.derived_datasets().items()}
+        return parents
+
     def knows_dataset(self, name: str) -> bool:
-        """Whether ``name`` is a dataset or a view (``counts.recent``) of one."""
-        return name in self.datasets or name in self.views()
+        """Whether ``name`` is a dataset, a view (``counts.recent``) of one, or a dataset
+        derived by a check (a consensus, the pooled members)."""
+        if name in self.datasets or name in self.views():
+            return True
+        return "~" in name and name in self.derived_datasets()
 
     @property
     def base_dir(self) -> Path:

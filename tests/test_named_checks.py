@@ -155,10 +155,9 @@ def test_dataset_requirements_cover_every_check_on_the_dataset() -> None:
         (
             {
                 "datasets": {"a": {}, "b": {}, "c": {}},
-                "checks": [{"check": "compare", "datasets": ["a", "b", "c"], "keys": ["k"]}],
+                "checks": [{"check": "compare", "datasets": ["a", "b", "c"], "strategy": "best"}],
             },
-            "checks[0].datasets: relating more than two datasets in one check arrives in a "
-            "later version of QAVF",
+            "checks[0].strategy: unknown strategy 'best'",
         ),
         (
             {
@@ -175,11 +174,12 @@ def test_dataset_requirements_cover_every_check_on_the_dataset() -> None:
                         "check": "drift",
                         "datasets": ["a", "b"],
                         "column": "x",
-                        "strategy": "all_pairs",
+                        "strategy": "consensus",
+                        "consensus": {"numeric": "mean"},
                     }
                 ],
             },
-            "checks[0].strategy: strategy 'all_pairs' arrives in a later version",
+            "checks[0].consensus: drift compares each member with the pooled data",
         ),
     ],
 )

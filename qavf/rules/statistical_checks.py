@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 import polars as pl
 from pydantic import Field
 
+from qavf.compare.pairing import GroupPlan
 from qavf.engine.context import DataContext
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
@@ -17,6 +18,7 @@ from qavf.inference._support import scipy_stats
 from qavf.inference.multiple import adjust
 from qavf.inference.results import Correction
 from qavf.rules._contracts import isolate_contract
+from qavf.rules._groups import GroupedFindings
 from qavf.rules.helpers import (
     MetricSpec,
     annotate,
@@ -266,6 +268,8 @@ class DriftParams(RuleParams):
     """Parameters for :class:`DistributionDriftRule`."""
 
     comparisons: tuple[DriftComparison, ...] = ()
+    group: GroupPlan | None = None
+    """For a check relating many datasets: which member each comparison is about."""
     correction: Correction = "bonferroni"
     """Multiple-testing correction across the KS comparisons (``holm``, ``bh``,
     ``by``, ``none``); a comparison drifts when its adjusted p-value is below its
@@ -354,7 +358,11 @@ class DistributionDriftRule(Rule):
         adjusted = adjust(pending, self.params.correction, family_size=tests)
         for i, q in zip(measured, adjusted, strict=True):
             findings[i] = self._ks_finding(measured[i], float(q), tests)
-        return findings or [Finding.skip("No drift comparisons are configured.")]
+        if not findings:
+            return [Finding.skip("No drift comparisons are configured.")]
+        if self.params.group is not None:
+            return GroupedFindings(self.params.group).finish(ctx, findings)
+        return findings
 
     def _ks_finding(self, measured: _PendingKS, adjusted: float, tests: int) -> Finding:
         """Judge one KS comparison once the family is corrected."""
