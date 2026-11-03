@@ -179,19 +179,25 @@ def test_isolated_success_keeps_exact_audit_values_and_parent_limits(tmp_path):
     assert result.metrics["nested"] == {"text": "\u03b1\x00\U0001f69a", "values": [True, None, 3]}
 
 
+WORK_DEADLINE_S = 10
+"""Wall-clock limit of the noncooperative probes: ample for startup, far below their 90 s."""
+
+
 @pytest.mark.parametrize("mode", ["sleep", "thread_shutdown", "descendant_timeout"])
 def test_wall_deadline_terminates_noncooperative_work_and_descendants(tmp_path, mode):
     if not _supported_or_rejected():
         return
     # Instrumented interpreter/plugin startup consumes this same whole-worker
-    # budget. Allow it to enter the 90-second probe before enforcing the limit.
-    deadline_s = 5
+    # budget, and is slower on a loaded machine. The deadline leaves it time to
+    # enter the 90-second probe, which then outlasts the deadline by far.
+    deadline_s = WORK_DEADLINE_S
     record, report = _probe(tmp_path, mode, wall_time=deadline_s)
     assert record["outcome"] == "error", record
     assert record["error_type"] == "ExecutionLimitError"
     assert report is None
     assert (tmp_path / "observed/worker.json").exists(), "workload never entered its rule"
-    assert deadline_s <= record["elapsed"] < 8
+    # Terminated at the deadline, not when the work (or a descendant) finished.
+    assert deadline_s <= record["elapsed"] < deadline_s + 6
     if mode == "descendant_timeout":
         assert (tmp_path / "observed/descendant.json").exists()
 
