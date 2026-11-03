@@ -40,7 +40,7 @@ def test_compact_checks_share_source_counts_and_raw_evidence(evidence, monkeypat
     second = first.with_columns(pl.lit(0).alias("x"), pl.lit("A").alias("s"))
     calls = []
     columns = {
-        "x": {"missing_values": [-999], "checks": [{"name": "positive", "ge": 0}]},
+        "x": {"missing_values": [-999], "conditions": [{"name": "positive", "ge": 0}]},
         "s": {"regex": "[A-Z]"},
     }
     with context(
@@ -76,7 +76,7 @@ def test_snapshot_fallback_still_observes_volatile_source_once(unsupported, monk
         checks = [{"name": f"check {index}", "ge": 0} for index in range(65)]
     calls, observations = [], []
     with context(
-        changing(first, second, calls), {"x": {"nullable": True, "checks": checks}}
+        changing(first, second, calls), {"x": {"nullable": True, "conditions": checks}}
     ) as ctx:
         observe = ctx.observe
 
@@ -106,7 +106,7 @@ def test_independent_preflight_errors_and_empty_scope_policy(size):
         "missing": {},
         "x": {
             "nullable": True,
-            "checks": [
+            "conditions": [
                 {"name": "lower", "ge": 2},
                 {"name": "bad type", "regex": "a"},
                 {"name": "scope", "where": "FALSE", "le": 0, "min_applicable_rows": 1},
@@ -114,7 +114,9 @@ def test_independent_preflight_errors_and_empty_scope_policy(size):
         },
         "s": {
             "nullable": True,
-            "checks": [{"name": "missing dependency", "where": "absent IS NULL", "regex": "[A-Z]"}],
+            "conditions": [
+                {"name": "missing dependency", "where": "absent IS NULL", "regex": "[A-Z]"}
+            ],
         },
     }
     with context(frame.lazy(), columns) as ctx:
@@ -181,7 +183,7 @@ def test_multi_batch_counts_and_first_rows_match_snapshot(tmp_path, limit):
     frame = pl.DataFrame({"id": range(size), "x": [(-1 if i % 3 else 2) for i in range(size)]})
     path = tmp_path / "rows.parquet"
     frame.write_parquet(path, row_group_size=2000)
-    columns = {"x": {"nullable": True, "checks": [{"name": "positive", "ge": 0}]}}
+    columns = {"x": {"nullable": True, "conditions": [{"name": "positive", "ge": 0}]}}
     with context(pl.scan_parquet(path), columns, evidence=limit, primary_key=["id"]) as ctx:
         found = ColumnCheckRule().evaluate(ctx)
     assert len(found) == 1 and found[0].assessed
@@ -202,7 +204,7 @@ def test_row_scope_units_and_null_fraction_reuse_canonical_policy():
             "missing_values": [-99],
             "unit": "kg",
             "unit_column": "u",
-            "checks": [
+            "conditions": [
                 {"name": "missing", "where": "scope = 1", "max_null_fraction": 0.5},
                 {"name": "forbidden", "notin": [float("nan")]},
             ],
@@ -229,7 +231,7 @@ def test_exact_compact_width_threshold(checks_count, observations, monkeypatch):
     columns = {
         "x": {
             "nullable": True,
-            "checks": [{"name": f"limit {i}", "ge": 0} for i in range(checks_count)],
+            "conditions": [{"name": f"limit {i}", "ge": 0} for i in range(checks_count)],
         }
     }
     with context(changing(frame, pl.DataFrame({"x": [1]}), calls), columns, evidence=0) as ctx:
@@ -330,7 +332,7 @@ def test_primary_key_policy_only_applies_when_semantically_required(semantic_dep
     if semantic_dependency:
         check["where"] = "id = 1"
     columns = {
-        "good": {"nullable": True, "checks": [check]},
+        "good": {"nullable": True, "conditions": [check]},
         "id": {"missing_values": ["oops"]},
     }
     with context(frame.lazy(), columns, primary_key=["id"]) as ctx:

@@ -22,7 +22,7 @@ from qavf.text_policies import datetime_text, register_sql_functions, requires_s
         ({"dtype": "bool", "true_values": ["i\u0307"]}, True),
         ({"dtype": "str", "normalize": ["trim"]}, False),
         ({"dtype": "str", "normalize": ["NFC"]}, True),
-        ({"dtype": "str", "checks": [{"normalize": ["casefold"]}]}, True),
+        ({"dtype": "str", "conditions": [{"normalize": ["casefold"]}]}, True),
     ],
 )
 def test_native_functions_are_requested_only_by_relevant_policies(spec, required):

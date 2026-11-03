@@ -107,11 +107,11 @@ def test_quoted_decimal_bounds_and_aggregates_are_exact():
         {
             "dtype": "decimal",
             "ge": raw,
-            "sum": {"ge": raw},
-            "checks": [{"le": raw, "min": {"le": raw}}],
+            "stats": {"sum": {"ge": raw}},
+            "conditions": [{"le": raw, "stats": {"min": {"le": raw}}}],
         }
     )
     assert column.ge == Decimal(raw) and isinstance(column.ge, Decimal)
-    assert column.sum.ge == Decimal(raw)
-    assert column.checks[0].le == Decimal(raw)
-    assert column.checks[0].min.le == Decimal(raw)
+    assert column.stats.sum.ge == Decimal(raw)
+    assert column.conditions[0].le == Decimal(raw)
+    assert column.conditions[0].stats.min.le == Decimal(raw)

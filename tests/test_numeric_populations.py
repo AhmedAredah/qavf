@@ -25,7 +25,7 @@ def test_missing_fraction_uses_exact_ratio_for_decision(backend, forced_eager):
         pa.table({"x": [None, 1, 2]}),
         backend=backend,
         config=CONFIG,
-        schema={"columns": {"x": {"nullable": True, "checks": [check]}}},
+        schema={"columns": {"x": {"nullable": True, "conditions": [check]}}},
     )
     failures = [r for r in column_results(report) if r.status.value == "FAIL"]
     assert failures and any("fraction" in (r.name + r.message) for r in failures)
@@ -47,7 +47,7 @@ def test_all_missing_numeric_statistic_is_unassessed(tmp_path, backend, source, 
         backend=backend,
         config=CONFIG,
         schema={
-            "columns": {"x": {"dtype": "float", "nullable": True, statistic: {"ge": 0}}},
+            "columns": {"x": {"dtype": "float", "nullable": True, "stats": {statistic: {"ge": 0}}}},
         },
     )
     results = column_results(report)
@@ -70,7 +70,7 @@ def test_empty_missing_fraction_and_distinct_count_remain_defined(backend):
                     "na_values": ["N/A"],
                     "nullable": True,
                     "max_null_fraction": 0,
-                    "distinct_count": {"ge": 0, "le": 0},
+                    "stats": {"distinct_count": {"ge": 0, "le": 0}},
                 }
             },
         },

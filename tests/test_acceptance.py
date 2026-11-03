@@ -274,8 +274,8 @@ def test_foreign_keys_across_int_and_float(registry) -> None:
         ({"nullable": True, "isin": [BIG]}, True),
         ({"nullable": True, "gt": BIG}, False),
         ({"nullable": True, "le": BIG}, True),
-        ({"nullable": True, "sum": {"le": BIG}}, True),
-        ({"nullable": True, "max": {"ge": BIG + 1, "le": BIG + 1}}, False),
+        ({"nullable": True, "stats": {"sum": {"le": BIG}}}, True),
+        ({"nullable": True, "stats": {"max": {"ge": BIG + 1, "le": BIG + 1}}}, False),
     ],
 )
 def test_integer_limits_are_exact(spec, expect_fail, registry) -> None:

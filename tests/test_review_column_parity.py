@@ -28,7 +28,7 @@ def test_normalized_column_outcomes_preserve_backend_semantics(tmp_path, kind):
     contract = {
         "nullable": True,
         "allow_infinite": True,
-        "checks": [{**check, "name": "edge", "where": "row > 0", "min_applicable_rows": 1}],
+        "conditions": [{**check, "name": "edge", "where": "row > 0", "min_applicable_rows": 1}],
     }
     path = tmp_path / "data.parquet"
     frame.write_parquet(path)

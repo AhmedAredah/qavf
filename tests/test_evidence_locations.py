@@ -48,7 +48,7 @@ def _failed(source: object, rule: str, **contract: object) -> list:
 @pytest.mark.parametrize("kind", ["csv", "frame", "lazy"])
 def test_a_conditionally_required_field_lists_its_missing_rows(tmp_path, kind) -> None:
     check = {"name": "closed needs a date", "where": "status = 'closed'", "not_null": True}
-    column = {"nullable": True, "checks": [check]}
+    column = {"nullable": True, "conditions": [check]}
     schema = {"primary_key": ["id"], "columns": {"closed_on": column}}
     [missing] = _failed(_source(kind, tmp_path), "INP-003", schema=schema)
     assert (missing.affected_count, missing.total_records) == (2, 3)

@@ -130,7 +130,7 @@ def test_all_na_aggregates_cannot_claim_pass(backend, statistic):
                 "x": {
                     "dtype": "int",
                     "na_values": ["N/A"],
-                    statistic: {"ge": 0},
+                    "stats": {statistic: {"ge": 0}},
                 }
             }
         },
@@ -156,7 +156,7 @@ def test_na_scope_requires_enough_applicable_rows(backend):
                 "x": {
                     "dtype": "int",
                     "na_values": ["N/A"],
-                    "checks": [{"ge": 0, "where": "selected = TRUE", "min_applicable_rows": 1}],
+                    "conditions": [{"ge": 0, "where": "selected = TRUE", "min_applicable_rows": 1}],
                 }
             }
         },

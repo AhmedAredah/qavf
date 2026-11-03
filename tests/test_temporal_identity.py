@@ -237,9 +237,9 @@ def test_nanosecond_missing_marker_does_not_remove_nearby_instants():
 
 def test_aggregate_checks_use_stable_shared_reducers():
     for values, bounds in [
-        ([1e16, 1.0, -1e16], {"sum": {"ge": 1, "le": 1}}),
-        ([1e308, 1e-300, -1e308], {"mean": {"ge": 1e-301}}),
-        ([1e16, 1e16 + 2], {"std": {"ge": 1.3, "le": 1.5}}),
+        ([1e16, 1.0, -1e16], {"stats": {"sum": {"ge": 1, "le": 1}}}),
+        ([1e308, 1e-300, -1e308], {"stats": {"mean": {"ge": 1e-301}}}),
+        ([1e16, 1e16 + 2], {"stats": {"std": {"ge": 1.3, "le": 1.5}}}),
     ]:
         found = rule_results(
             "INP-003",

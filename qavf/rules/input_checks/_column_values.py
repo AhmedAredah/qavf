@@ -99,7 +99,7 @@ def _statistic(series: pl.Series, name: str) -> int | float | Decimal | Fraction
 def _within(value: int | float | Decimal | Fraction | None, bounds: Bounds) -> bool:
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
         return False
-    return (bounds.ge is None or value >= bounds.ge) and (bounds.le is None or value <= bounds.le)
+    return bounds.contains(value)
 
 
 def _row_limits(

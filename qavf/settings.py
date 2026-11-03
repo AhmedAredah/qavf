@@ -124,21 +124,136 @@ def _check_range(lower: list[tuple[str, Any, bool]], upper: list[tuple[str, Any,
                 )
 
 
+_SIDES = ("ge", "le", "gt", "lt")
+_NUMBERS = (int, float, Decimal)
+
+
+def expand_between(data: Any) -> Any:
+    """Rewrite ``between: [a, b]`` as ``ge: a, le: b`` (both inclusive).
+
+    ``between`` with ``ge``, ``le``, ``gt`` or ``lt`` on the same field is an error.
+    A ``between`` that is not a pair is left for field validation to report.
+    """
+    if not isinstance(data, Mapping) or data.get("between") is None:
+        return data
+    between = data["between"]
+    clash = [side for side in _SIDES if data.get(side) is not None]
+    if clash:
+        named = ", ".join(f"'{side}'" for side in clash)
+        raise ValueError(f"'between' sets both bounds already; drop {named} or 'between'")
+    if not isinstance(between, list | tuple) or len(between) != 2:
+        return data
+    low, high = between
+    if (
+        isinstance(low, _NUMBERS)
+        and isinstance(high, _NUMBERS)
+        and not isinstance(low, bool)
+        and not isinstance(high, bool)
+        and low > high
+    ):
+        raise ValueError(f"'between: [{low}, {high}]' leaves no allowed value; give [lower, upper]")
+    rest = {key: value for key, value in data.items() if key != "between"}
+    return {**rest, "ge": low, "le": high}
+
+
 class Bounds(_Strict):
-    """Inclusive bounds for an aggregate statistic; either side may be omitted."""
+    """Bounds on a column statistic: ``ge``, ``le``, ``gt``, ``lt``, or
+    ``between: [a, b]`` for ``ge: a, le: b``."""
 
     ge: NumericBound | None = None
     le: NumericBound | None = None
+    gt: NumericBound | None = None
+    lt: NumericBound | None = None
+    between: list[NumericBound] | None = Field(default=None, min_length=2, max_length=2)
+    """Inclusive range ``[lower, upper]``; the same as ``ge`` and ``le``."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _between(cls, data: Any) -> Any:
+        return expand_between(data)
 
     @model_validator(mode="after")
     def _ordered(self) -> Bounds:
-        if self.ge is None and self.le is None:
-            raise ValueError("set 'ge', 'le' or both")
-        _require_finite("ge", self.ge)
-        _require_finite("le", self.le)
-        if self.ge is not None and self.le is not None and self.ge > self.le:
-            raise ValueError("'ge' must not exceed 'le'")
+        bounds = {side: getattr(self, side) for side in _SIDES}
+        bounds = {side: value for side, value in bounds.items() if value is not None}
+        if not bounds:
+            raise ValueError("set 'ge', 'le', 'gt', 'lt' or 'between'")
+        for side, value in bounds.items():
+            _require_finite(side, value)
+        _check_range(
+            [(n, bounds[n], n == "ge") for n in ("ge", "gt") if n in bounds],
+            [(n, bounds[n], n == "le") for n in ("le", "lt") if n in bounds],
+        )
         return self
+
+    def contains(self, value: Any) -> bool:
+        """Whether ``value`` lies inside every bound that is set."""
+        return (
+            (self.ge is None or value >= self.ge)
+            and (self.le is None or value <= self.le)
+            and (self.gt is None or value > self.gt)
+            and (self.lt is None or value < self.lt)
+        )
+
+    def interval(self, show: Any = str) -> str:
+        """The allowed range in interval notation, e.g. ``[0, 10)``; an open side is blank."""
+        low, high = (self.gt, "(") if self.gt is not None else (self.ge, "[")
+        top, close = (self.lt, ")") if self.lt is not None else (self.le, "]")
+        shown_low = "" if low is None else show(low)
+        shown_top = "" if top is None else show(top)
+        return f"{high}{shown_low}, {shown_top}{close}"
+
+    def phrase(self) -> str:
+        """The bounds in words: ``≥ 0 and < 10``."""
+        symbols = {"ge": "≥", "le": "≤", "gt": ">", "lt": "<"}
+        parts = [
+            f"{symbols[side]} {getattr(self, side):g}"
+            for side in _SIDES
+            if getattr(self, side) is not None
+        ]
+        return " and ".join(parts)
+
+
+#: Column statistics that ``stats`` can bound.
+STATISTICS = ("min", "max", "mean", "median", "std", "sum", "distinct_count")
+
+
+class ColumnStats(_Strict):
+    """Bounds on statistics of the whole column, e.g. ``mean: {between: [1000, 100000]}``."""
+
+    min: Bounds | None = None
+    """Bounds on the column's smallest value."""
+    max: Bounds | None = None
+    """Bounds on the column's largest value."""
+    mean: Bounds | None = None
+    """Bounds on the column mean."""
+    median: Bounds | None = None
+    """Bounds on the column median."""
+    std: Bounds | None = None
+    """Bounds on the sample standard deviation."""
+    sum: Bounds | None = None
+    """Bounds on the column total."""
+    distinct_count: Bounds | None = None
+    """Bounds on the number of distinct present values."""
+
+    @model_validator(mode="after")
+    def _meaningful(self) -> ColumnStats:
+        if not self.bounds():
+            raise ValueError(f"'stats' must bound at least one of {', '.join(STATISTICS)}")
+        for name in ("std", "distinct_count"):
+            limit = getattr(self, name)
+            if limit is None:
+                continue
+            upper = [(side, getattr(limit, side)) for side in ("le", "lt")]
+            for side, value in upper:
+                if value is not None and (value < 0 or (side == "lt" and value <= 0)):
+                    raise ValueError(f"'{name}' can never be negative, but '{side}' is {value}")
+        return self
+
+    def bounds(self) -> dict[str, Bounds]:
+        """The bounded statistics, by name."""
+        values = {name: getattr(self, name) for name in STATISTICS}
+        return {name: value for name, value in values.items() if value is not None}
 
 
 #: Row-level constraint fields shared by :class:`ColumnConstraints` subclasses.
@@ -156,18 +271,26 @@ ROW_CONSTRAINTS = (
     "max_decimals",
 )
 #: Column-level (aggregate) constraint fields.
-COLUMN_CONSTRAINTS = (
-    "max_null_fraction",
-    "not_null",
-    "unique",
-    "min",
-    "max",
-    "mean",
-    "median",
-    "std",
-    "sum",
-    "distinct_count",
-)
+COLUMN_FLAGS = ("max_null_fraction", "not_null", "unique")
+#: Column-level (aggregate) constraint names: the flags, then the ``stats`` bounds.
+COLUMN_CONSTRAINTS = (*COLUMN_FLAGS, *STATISTICS)
+
+
+def _reject_legacy_column_keys(data: Any, *, conditions: bool) -> None:
+    """Point QAVF 0.6 column keys (``mean:``, column ``checks:``) to ``qavf migrate``."""
+    if not isinstance(data, Mapping):
+        return
+    hint = "Convert the configuration with 'qavf migrate <config> -o <new config>'."
+    for name in STATISTICS:
+        if name in data:
+            raise ValueError(
+                f"'{name}' is a QAVF 0.6 column setting: column statistics now go under "
+                f"'stats' ('stats: {{{name}: ...}}'). {hint}"
+            )
+    if conditions and "checks" in data:
+        raise ValueError(
+            "a column's 'checks' are now 'conditions' ('checks' always means check items). " + hint
+        )
 
 
 class ColumnConstraints(_Strict):
@@ -182,6 +305,8 @@ class ColumnConstraints(_Strict):
     le: Bound | None = None
     gt: Bound | None = None
     lt: Bound | None = None
+    between: list[Bound] | None = Field(default=None, min_length=2, max_length=2)
+    """Inclusive range ``[lower, upper]`` for every value; the same as ``ge`` and ``le``."""
     isin: list[Any] | None = None
     """Allowed values."""
     notin: list[Any] | None = None
@@ -214,15 +339,15 @@ class ColumnConstraints(_Strict):
     """Compare text in ``isin``, ``notin`` and ``unique`` after normalizing it:
     ``case`` ignores letter case (``Valid`` is ``valid``), ``trim`` ignores
     surrounding whitespace. Applies to the limits set alongside it."""
-    min: Bounds | None = None
-    """Bounds on the column minimum."""
-    max: Bounds | None = None
-    """Bounds on the column maximum."""
-    mean: Bounds | None = None
-    median: Bounds | None = None
-    std: Bounds | None = None
-    sum: Bounds | None = None
-    distinct_count: Bounds | None = None
+    stats: ColumnStats | None = None
+    """Bounds on statistics of the whole column: ``min``, ``max``, ``mean``,
+    ``median``, ``std``, ``sum`` and ``distinct_count``."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _between(cls, data: Any) -> Any:
+        _reject_legacy_column_keys(data, conditions=False)
+        return expand_between(data)
 
     @field_validator("isin", "notin", "missing_values", mode="before", check_fields=False)
     @classmethod
@@ -231,8 +356,9 @@ class ColumnConstraints(_Strict):
 
     def constraints(self) -> dict[str, Any]:
         """The limits that are set, by field name."""
-        names = (*ROW_CONSTRAINTS, *COLUMN_CONSTRAINTS)
-        values = {name: getattr(self, name) for name in names}
+        names = (*ROW_CONSTRAINTS, *COLUMN_FLAGS)
+        values: dict[str, Any] = {name: getattr(self, name) for name in names}
+        values.update(self.stats.bounds() if self.stats is not None else {})
         return {k: v for k, v in values.items() if v is not None and v is not False}
 
     @model_validator(mode="after")
@@ -284,10 +410,6 @@ class ColumnConstraints(_Strict):
             raise ValueError("choose either case or casefold normalization")
         if self.regex is not None:
             _check_regex(self.regex)
-        for name in ("std", "distinct_count"):
-            limit = getattr(self, name)
-            if limit is not None and limit.le is not None and limit.le < 0:
-                raise ValueError(f"'{name}' can never be negative, but 'le' is {limit.le}")
         return self
 
 
@@ -405,7 +527,15 @@ class ColumnSpec(ColumnConstraints):
     any other unit are violations."""
     allowed_units: list[str] | None = None
     description: str | None = None
-    checks: list[ColumnCheck] = Field(default_factory=list)
+    conditions: list[ColumnCheck] = Field(default_factory=list)
+    """Further groups of limits with their own ``name``, ``severity`` and ``where``,
+    e.g. ``{le: 200000, severity: WARNING, name: implausibly high}``."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_conditions(cls, data: Any) -> Any:
+        _reject_legacy_column_keys(data, conditions=True)
+        return data
 
     def text_type(self) -> TextType | None:
         """How this column's declared type is written as text; ``None`` when its type
@@ -430,15 +560,19 @@ class ColumnSpec(ColumnConstraints):
         )
 
     def all_checks(self) -> list[ColumnCheck]:
-        """The implicit check (if any limits are set inline) followed by ``checks``."""
-        inline = self.constraints()
+        """The implicit check (if any limits are set inline) followed by ``conditions``."""
+        inline: dict[str, Any] = {
+            name: value
+            for name in (*ROW_CONSTRAINTS, *COLUMN_FLAGS, "stats")
+            if (value := getattr(self, name)) is not None and value is not False
+        }
         if inline and self.normalize:
             inline["normalize"] = list(self.normalize)
         if inline:
             inline["convert_options"] = self.convert_options
             inline["each_allowed_once"] = self.each_allowed_once
         implicit = [ColumnCheck.model_validate(inline)] if inline else []
-        return [self._resolved_check(check) for check in implicit + list(self.checks)]
+        return [self._resolved_check(check) for check in implicit + list(self.conditions)]
 
     def _resolved_check(self, check: ColumnCheck) -> ColumnCheck:
         """Compile optional domain conveniences to the shared primitive contracts."""
@@ -463,12 +597,11 @@ class ColumnSpec(ColumnConstraints):
                     )
         if check.each_allowed_once:
             count = AllowedValueDomain.resolved(raw["isin"], check.normalize).cardinality
-            if check.distinct_count and (
-                (check.distinct_count.ge is not None and check.distinct_count.ge > count)
-                or (check.distinct_count.le is not None and check.distinct_count.le < count)
-            ):
+            distinct = check.stats.distinct_count if check.stats is not None else None
+            if distinct is not None and not distinct.contains(count):
                 raise ValueError("'distinct_count' contradicts 'each_allowed_once' domain size")
-            raw.update(unique=True, distinct_count={"ge": count, "le": count})
+            stats = {name: bounds for name, bounds in (raw["stats"] or {}).items() if bounds}
+            raw.update(unique=True, stats={**stats, "distinct_count": {"ge": count, "le": count}})
             if raw["name"] is None:
                 raw["name"] = "each allowed value exactly once"
         return ColumnCheck.model_validate(raw)

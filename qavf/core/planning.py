@@ -116,7 +116,7 @@ class NativePlan:
                 *(
                     check.where
                     for column in spec.schema_spec.columns.values()
-                    for check in column.checks
+                    for check in column.conditions
                 ),
                 *(key.where for key in spec.schema_spec.alternate_keys),
                 *(group.where for group in spec.schema_spec.grouped_values),

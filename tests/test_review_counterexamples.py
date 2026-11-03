@@ -724,7 +724,7 @@ _EVIDENCE_SCHEMA = {
     "columns": {
         "id": {},
         "x": {"ge": 0},
-        "y": {"checks": [{"name": "short", "where": "scope = 1", "regex": "^[a-z]$"}]},
+        "y": {"conditions": [{"name": "short", "where": "scope = 1", "regex": "^[a-z]$"}]},
         "scope": {"nullable": True},
         "unit": {"nullable": True},
     },

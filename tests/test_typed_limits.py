@@ -77,7 +77,7 @@ def test_limit_incompatible_with_the_data_type_is_unassessed(registry) -> None:
     results = _results(
         registry,
         {"t": frame},
-        {"t": {"schema": {"columns": {"a": {"checks": [{"ge": 0, "severity": "INFO"}]}}}}},
+        {"t": {"schema": {"columns": {"a": {"conditions": [{"ge": 0, "severity": "INFO"}]}}}}},
     )
     [result] = [r for r in results.values() if r.failed]
     assert result.status is Status.ERROR and "Not assessed" in result.message
@@ -95,7 +95,7 @@ def test_aware_bound_on_a_naive_column_is_unassessed(registry) -> None:
                 "schema": {
                     "columns": {
                         "t": {
-                            "checks": [
+                            "conditions": [
                                 {"ge": datetime(2020, 1, 1, tzinfo=UTC), "severity": "WARNING"}
                             ]
                         }
@@ -145,7 +145,7 @@ def test_runtime_failure_of_a_column_statistic_is_isolated(registry, monkeypatch
     results = _results(
         registry,
         {"t": frame},
-        {"t": {"schema": {"columns": {"a": {"ge": 0}, "b": {"mean": {"ge": 0}}}}}},
+        {"t": {"schema": {"columns": {"a": {"ge": 0}, "b": {"stats": {"mean": {"ge": 0}}}}}}},
     )
     assert results["t.a: ge 0"].status is Status.FAIL
     blocked = (

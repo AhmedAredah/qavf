@@ -133,7 +133,7 @@ def test_each_column_check_is_graded_at_its_own_severity(small) -> None:
         small,
         value={
             "ge": 0,
-            "checks": [
+            "conditions": [
                 {"le": 1000, "severity": "WARNING", "name": "plausible"},
                 {"le": 5000, "severity": "CRITICAL", "name": "hard ceiling"},
             ],
@@ -187,7 +187,7 @@ def test_text_limits() -> None:
             "schema": {
                 "columns": {
                     "code": {"nullable": True, "regex": "[A-Z]{2}\\d{2}"},
-                    "kind": {"notin": ["-999"], "checks": [{"min_length": 2, "name": "long"}]},
+                    "kind": {"notin": ["-999"], "conditions": [{"min_length": 2, "name": "long"}]},
                 }
             }
         }
@@ -211,7 +211,7 @@ def test_date_bounds_and_type_mismatches() -> None:
                 "columns": {
                     "d": {"le": date(2030, 12, 31)},
                     "n": {
-                        "checks": [
+                        "conditions": [
                             {"ge": date(2020, 1, 1), "name": "date on number"},
                             {"regex": "x", "name": "regex on number"},
                         ]
@@ -239,17 +239,20 @@ def test_aggregate_limits_and_uniqueness() -> None:
             "schema": {
                 "columns": {
                     "x": {
-                        "checks": [
-                            {"mean": {"ge": 1, "le": 3}, "name": "mean ok"},
-                            {"max": {"le": 2.5}, "name": "max too high"},
-                            {"sum": {"ge": 100}, "name": "sum too low"},
+                        "conditions": [
+                            {"stats": {"mean": {"ge": 1, "le": 3}}, "name": "mean ok"},
+                            {"stats": {"max": {"le": 2.5}}, "name": "max too high"},
+                            {"stats": {"sum": {"ge": 100}}, "name": "sum too low"},
                             {"unique": True, "name": "unique"},
                         ]
                     },
                     "s": {
-                        "checks": [
-                            {"distinct_count": {"ge": 3, "le": 3}, "name": "three kinds"},
-                            {"mean": {"ge": 0}, "name": "bad"},
+                        "conditions": [
+                            {
+                                "stats": {"distinct_count": {"ge": 3, "le": 3}},
+                                "name": "three kinds",
+                            },
+                            {"stats": {"mean": {"ge": 0}}, "name": "bad"},
                         ]
                     },
                 }
@@ -276,7 +279,7 @@ def test_invalid_check_definitions_are_rejected() -> None:
 
     with pytest.raises(ValidationError, match="at least one limit"):
         ColumnCheck(severity="WARNING")
-    with pytest.raises(ValidationError, match="must not exceed"):
+    with pytest.raises(ValidationError, match="leave no allowed value"):
         Bounds(ge=2, le=1)
 
 

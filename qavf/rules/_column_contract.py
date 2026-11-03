@@ -16,7 +16,7 @@ from qavf.input_rules import (
     statistic_undefined,
     too_few_applicable,
 )
-from qavf.settings import COLUMN_CONSTRAINTS, ROW_CONSTRAINTS, ColumnCheck, ColumnSpec, SchemaSpec
+from qavf.settings import COLUMN_FLAGS, ROW_CONSTRAINTS, ColumnCheck, ColumnSpec, SchemaSpec
 from qavf.value_policy import is_text
 
 
@@ -62,14 +62,15 @@ class ColumnPlan:
         defaults = ColumnSpec().model_dump()
         for name in (
             *ROW_CONSTRAINTS,
-            *COLUMN_CONSTRAINTS,
+            *COLUMN_FLAGS,
+            "stats",
             "normalize",
             "convert_options",
             "each_allowed_once",
         ):
             raw[name] = defaults[name]
         raw.update(
-            checks=[],
+            conditions=[],
             nullable=True,
             allow_infinite=True,
             unit_column=None,
@@ -87,7 +88,7 @@ class ColumnPlan:
                 allowed_units=self.spec.allowed_units,
             )
         else:
-            raw["checks"] = [self.check]
+            raw["conditions"] = [self.check]
         return SchemaSpec(columns={self.column: ColumnSpec.model_validate(raw)})
 
 

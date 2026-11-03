@@ -50,7 +50,7 @@ def _within(value, bounds):
     """Whether an observed statistic lies inside its configured range."""
     if value is None or (isinstance(value, float) and not math.isfinite(value)):
         return False
-    return (bounds.ge is None or value >= bounds.ge) and (bounds.le is None or value <= bounds.le)
+    return bounds.contains(value)
 
 
 def _exceeds(limit, missing, applicable):

@@ -95,7 +95,11 @@ def test_na_does_not_become_invalid_or_missing():
 def test_all_na_numeric_statistics_are_undefined():
     datasets = {
         "t": {
-            "schema": {"columns": {"x": {"dtype": "int", "na_values": ["N/A"], "sum": {"ge": 0}}}}
+            "schema": {
+                "columns": {
+                    "x": {"dtype": "int", "na_values": ["N/A"], "stats": {"sum": {"ge": 0}}}
+                }
+            }
         }
     }
     results = rule_results("INP-003", {"t": pl.DataFrame({"x": ["N/A", "N/A"]})}, datasets=datasets)

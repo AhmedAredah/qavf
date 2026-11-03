@@ -35,7 +35,7 @@ def test_missingness_and_bounds_match_python_oracle(backend, rows, use_markers, 
         "number": {
             "nullable": False,
             "missing_values": list(numeric.markers),
-            "checks": [{"name": "nonnegative", "ge": 0}],
+            "conditions": [{"name": "nonnegative", "ge": 0}],
         },
         "text": {
             "nullable": False,

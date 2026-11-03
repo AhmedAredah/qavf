@@ -72,7 +72,11 @@ def native_context(tmp_path, values, check, *, markers=(), row_budget=None):
                     "source": source,
                     "schema": {
                         "columns": {
-                            "x": {"nullable": True, "missing_values": markers, "checks": [check]}
+                            "x": {
+                                "nullable": True,
+                                "missing_values": markers,
+                                "conditions": [check],
+                            }
                         }
                     },
                 }
@@ -84,7 +88,7 @@ def native_context(tmp_path, values, check, *, markers=(), row_budget=None):
 
 def test_native_exact_sum_streams_only_dependency_columns(tmp_path, monkeypatch):
     values = [1e16, *([1.0] * 100_001), -1e16]
-    check = {"name": "exact total", "sum": {"ge": 100_001, "le": 100_001}}
+    check = {"name": "exact total", "stats": {"sum": {"ge": 100_001, "le": 100_001}}}
     with native_context(tmp_path, values, check) as ctx:
         from qavf.engine.sql_read import SqlReadSession
 
@@ -113,8 +117,10 @@ def test_native_sum_mean_missing_scope_and_empty_are_exact(tmp_path, scope, expe
     check = {
         "name": "exact scoped statistics",
         "where": scope,
-        "sum": {"ge": 1, "le": 1},
-        "mean": {"ge": "0.333333333333333333", "le": "0.333333333333333334"},
+        "stats": {
+            "sum": {"ge": 1, "le": 1},
+            "mean": {"ge": "0.333333333333333333", "le": "0.333333333333333334"},
+        },
         "max_null_fraction": 0.5,
     }
     with native_context(
@@ -128,7 +134,7 @@ def test_native_sum_mean_missing_scope_and_empty_are_exact(tmp_path, scope, expe
 
 
 def test_native_scalar_result_does_not_bypass_complete_source_row_budget(tmp_path):
-    check = {"name": "empty subset", "where": "FALSE", "sum": {"ge": 0}}
+    check = {"name": "empty subset", "where": "FALSE", "stats": {"sum": {"ge": 0}}}
     with native_context(tmp_path, [1.0] * 10, check, row_budget=3) as ctx:
         result = ColumnCheckRule().evaluate(ctx)
         assert any(not f.assessed for f in result)
@@ -140,8 +146,10 @@ def test_native_deviation_streams_all_batches_and_preserves_other_statistics(tmp
     deviation = stdev(values[:-2])
     check = {
         "name": "offset-safe streamed statistics",
-        "mean": {"ge": 1e16 + 2, "le": 1e16 + 2},
-        "std": {"ge": deviation - 1e-12, "le": deviation + 1e-12},
+        "stats": {
+            "mean": {"ge": 1e16 + 2, "le": 1e16 + 2},
+            "std": {"ge": deviation - 1e-12, "le": deviation + 1e-12},
+        },
         "max_null_fraction": 0.001,
     }
     with native_context(tmp_path, values, check) as ctx:
@@ -157,8 +165,10 @@ def test_native_scalar_dispatch_survives_concurrent_materialization(tmp_path, mo
     check = {
         "name": "exact scoped fallback",
         "where": "selected = 1",
-        "sum": {"ge": 1, "le": 1},
-        "mean": {"ge": "0.333333333333333333", "le": "0.333333333333333334"},
+        "stats": {
+            "sum": {"ge": 1, "le": 1},
+            "mean": {"ge": "0.333333333333333333", "le": "0.333333333333333334"},
+        },
         "max_null_fraction": 0.5,
     }
     with native_context(tmp_path, [1e16, 1.0, -1e16, None, -999.0], check, markers=[-999]) as ctx:

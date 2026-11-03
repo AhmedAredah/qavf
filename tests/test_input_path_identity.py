@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from qavf import Dataset, File, Status, validate
 from qavf.sources import FileParams, FileSource, SourceEnvironment
 
-SCHEMA = {"columns": {"x": {"checks": [{"name": "nonnegative", "ge": 0}]}}}
+SCHEMA = {"columns": {"x": {"conditions": [{"name": "nonnegative", "ge": 0}]}}}
 CONFIG = {"plugins": {"entry_points": False}, "engine": {"parallel": False}}
 
 

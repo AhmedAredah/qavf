@@ -46,7 +46,7 @@ def requires_sql_functions(settings) -> bool:
         for column in _field(schema, "columns", {}).values():
             if text_type_requires_sql_functions(column):
                 return True
-            for check in (column, *_field(column, "checks", [])):
+            for check in (column, *_field(column, "conditions", [])):
                 if any(method != "trim" for method in _field(check, "normalize", [])):
                     return True
         source = _field(dataset, "source")

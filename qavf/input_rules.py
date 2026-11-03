@@ -172,11 +172,7 @@ def check_label(check: Any) -> str:
     parts = []
     for name, value in check.constraints().items():
         if isinstance(value, Bounds):
-            sides = [
-                f"≥ {value.ge:g}" if value.ge is not None else "",
-                f"≤ {value.le:g}" if value.le is not None else "",
-            ]
-            parts.append(f"{name} {' and '.join(s for s in sides if s)}")
+            parts.append(f"{name} {value.phrase()}")
         elif value is True:
             parts.append(name)
         else:
@@ -203,7 +199,7 @@ def show_bound(value: int | float | Decimal | Fraction | None) -> str:
 
 def outside_bounds(name: str, value: Any, bounds: Any) -> str:
     """A column-level problem: a statistic outside its configured range."""
-    return f"{name} {show_value(value)} outside [{show_bound(bounds.ge)}, {show_bound(bounds.le)}]"
+    return f"{name} {show_value(value)} outside {bounds.interval(show_bound)}"
 
 
 def missing_fraction_problem(missing: int, rows: int, limit: float) -> str:

@@ -140,7 +140,7 @@ def test_each_allowed_once_is_a_builtin_contract(values, passed):
 def test_case_collisions_and_normalized_domain_cardinality():
     spec = ColumnSpec(dtype="str", isin=["A", "a", "B"], normalize=["case"], each_allowed_once=True)
     check = spec.all_checks()[0]
-    assert check.unique and check.distinct_count.ge == check.distinct_count.le == 2
+    assert check.unique and check.stats.distinct_count.ge == check.stats.distinct_count.le == 2
     report = validate(
         {"t": Dataset(pl.DataFrame({"v": ["a", "A", "B"]}), schema={"columns": {"v": spec}})}
     )
@@ -159,7 +159,7 @@ def test_domain_trim_preserves_existing_unicode_white_space_contract():
         normalize=["trim"],
         each_allowed_once=True,
     )
-    assert spec.all_checks()[0].distinct_count.ge == 2
+    assert spec.all_checks()[0].stats.distinct_count.ge == 2
 
 
 @pytest.mark.parametrize("backend", ["polars", "duckdb"])
@@ -206,7 +206,12 @@ def test_domain_configuration_rejects_missing_and_inconsistent_cardinality():
     with pytest.raises(ValidationError, match="missing values"):
         ColumnSpec(dtype="int", isin=[1, None], each_allowed_once=True)
     with pytest.raises(ValidationError, match="contradicts"):
-        ColumnSpec(dtype="int", isin=[1, 2], each_allowed_once=True, distinct_count={"le": 1})
+        ColumnSpec(
+            dtype="int",
+            isin=[1, 2],
+            each_allowed_once=True,
+            stats={"distinct_count": {"le": 1}},
+        )
 
 
 def test_configuration_literals_do_not_pass_through_float():

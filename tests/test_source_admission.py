@@ -31,7 +31,9 @@ def test_user_rowid_never_controls_evidence_or_condition_scope():
     scoped = validate(
         pa.table({"rowid": [0, 0], "x": [1, -1], "state": ["active", "inactive"]}),
         schema={
-            "columns": {"x": {"dtype": "int", "checks": [{"where": "state = 'active'", "ge": 0}]}}
+            "columns": {
+                "x": {"dtype": "int", "conditions": [{"where": "state = 'active'", "ge": 0}]}
+            }
         },
         backend="duckdb",
     )

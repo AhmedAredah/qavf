@@ -68,7 +68,7 @@ def test_compound_contract_uses_one_owned_observation(contract, cache_bytes, tmp
                         "columns": {
                             "x": {
                                 "nullable": True,
-                                "checks": [
+                                "conditions": [
                                     {"name": "positive", "ge": 0},
                                     {"name": "negative", "where": "abs(x) >= 0", "le": 0},
                                 ],

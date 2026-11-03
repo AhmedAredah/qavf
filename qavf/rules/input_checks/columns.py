@@ -335,7 +335,7 @@ class ColumnCheckRule(_SelectsDatasets):
                     update={
                         "columns": {
                             **{
-                                c: schema.columns[c].model_copy(update={"checks": []})
+                                c: schema.columns[c].model_copy(update={"conditions": []})
                                 for c in dependencies
                                 if c in schema.columns and c != item.column
                             },

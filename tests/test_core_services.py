@@ -17,7 +17,7 @@ def test_native_regex_declines_non_equivalent_unicode_and_runs_next_check():
         schema={
             "columns": {
                 "x": {
-                    "checks": [
+                    "conditions": [
                         {"regex": r"\w+", "name": "Unicode"},
                         {"min_length": 1, "name": "length"},
                     ]
@@ -49,7 +49,7 @@ def test_where_admission_does_not_depend_on_optional_package(monkeypatch):
             schema={
                 "columns": {
                     "x": {
-                        "checks": [
+                        "conditions": [
                             {"where": "isfinite(x)", "ge": 0},
                         ]
                     }
@@ -239,7 +239,9 @@ def test_projection_retains_case_insensitive_and_nested_condition_dependencies()
     report = validate(
         pa.table({"x": [1], "Status": ["ready"], "payload": [{"flag": True}]}),
         schema={
-            "columns": {"x": {"checks": [{"where": "STATUS = 'ready' AND payload.flag", "ge": 2}]}}
+            "columns": {
+                "x": {"conditions": [{"where": "STATUS = 'ready' AND payload.flag", "ge": 2}]}
+            }
         },
         backend="duckdb",
     )
@@ -258,7 +260,7 @@ def test_subquery_condition_conservatively_retains_other_sources():
                     "schema": {
                         "columns": {
                             "x": {
-                                "checks": [
+                                "conditions": [
                                     {"where": "x < (SELECT max(threshold) FROM limits)", "ge": 2}
                                 ]
                             }

@@ -14,7 +14,10 @@
 * ``engine.fail_on``, ``fail_on_incomplete`` and ``require`` move to ``run``;
   ``require`` entries become check or dataset names;
 * ``engine.run_unconfigured_rules``, ``include_categories`` and
-  ``exclude_categories`` are removed (only configured checks run now).
+  ``exclude_categories`` are removed (only configured checks run now);
+* column statistic bounds (``min``, ``max``, ``mean``, ``median``, ``std``,
+  ``sum``, ``distinct_count``) move under the column's ``stats``, and a column's
+  ``checks`` (conditional limits) become ``conditions``.
 
 PyYAML does not keep comments, so the file is rewritten cleanly; the comment
 block at the top of the original file is kept.
@@ -32,7 +35,7 @@ from typing import Any
 import yaml
 
 from qavf.checks.catalog import BY_RULE, CONTRACT_RULES, Decompiled, PluginDefinition
-from qavf.checks.legacy import LEGACY_ENGINE_KEYS, first_legacy_key
+from qavf.checks.legacy import COLUMN_STATISTICS, LEGACY_ENGINE_KEYS, first_legacy_key
 from qavf.configuration import parse_config_text
 from qavf.engine.registry import Rule, RuleRegistry, default_registry
 
@@ -130,6 +133,7 @@ class Migrator:
         registry = self.registry if self.registry is not None else plugin_registry(config)
         top: list[dict[str, Any]] = list(config.get("checks") or [])
         generated: dict[str, list[str]] = {}
+        ColumnMigration().apply(config, migration)
         self._expressions(config, migration)
         self._assertions(config, top, migration)
         self._rules(config, top, generated, registry, migration)
@@ -358,6 +362,59 @@ class Migrator:
                     if isinstance(spec, Mapping) and (spec.get("schema") or spec.get("checks"))
                 )
         return list(dict.fromkeys(names))
+
+
+class ColumnMigration:
+    """Moves QAVF 0.6 column statistic bounds under ``stats`` and renames a column's
+    ``checks`` to ``conditions``, keeping every other key where it was."""
+
+    def apply(self, config: Mapping[str, Any], migration: Migration) -> None:
+        for dataset, spec in (config.get("datasets") or {}).items():
+            schema = spec.get("schema") if isinstance(spec, dict) else None
+            columns = schema.get("columns") if isinstance(schema, dict) else None
+            if not isinstance(columns, dict):
+                continue
+            for name, column in columns.items():
+                if not isinstance(column, dict):
+                    continue
+                converted = self.column(column)
+                if converted != column:
+                    columns[name] = converted
+                    migration.notes.append(
+                        f"datasets.{dataset}.schema.columns.{name}: statistics under 'stats', "
+                        "conditional limits as 'conditions'"
+                    )
+
+    def column(self, column: Mapping[str, Any]) -> dict[str, Any]:
+        """One column in the 0.7 form."""
+        result = self.limits(column)
+        if "checks" not in result:
+            return result
+        conditions = [
+            self.limits(check) if isinstance(check, Mapping) else check
+            for check in result["checks"] or []
+        ]
+        return {
+            ("conditions" if key == "checks" else key): (conditions if key == "checks" else value)
+            for key, value in result.items()
+        }
+
+    @staticmethod
+    def limits(limits: Mapping[str, Any]) -> dict[str, Any]:
+        """``limits`` with its statistic bounds grouped under ``stats``, placed where
+        the first of them was."""
+        moved = {key: limits[key] for key in COLUMN_STATISTICS if key in limits}
+        if not moved:
+            return dict(limits)
+        existing = limits.get("stats")
+        stats = {**(dict(existing) if isinstance(existing, Mapping) else {}), **moved}
+        result: dict[str, Any] = {}
+        for key, value in limits.items():
+            if key in moved or key == "stats":
+                result.setdefault("stats", stats)
+            else:
+                result[key] = value
+        return result
 
 
 class NamedBlock:

@@ -59,21 +59,23 @@ def test_missing_regex_where_membership_and_aggregate_semantics(kind, tmp_path):
             "x": {
                 "nullable": True,
                 "missing_values": [-999],
-                "checks": [
-                    {"name": "sum", "sum": {"ge": 7, "le": 7}},
+                "conditions": [
+                    {"name": "sum", "stats": {"sum": {"ge": 7, "le": 7}}},
                     {
                         "name": "mean",
-                        "mean": {"ge": "2.333333333333333333", "le": "2.333333333333333334"},
+                        "stats": {
+                            "mean": {"ge": "2.333333333333333333", "le": "2.333333333333333334"}
+                        },
                     },
                     {"name": "allowed", "isin": [1, 3]},
-                    {"name": "distinct", "distinct_count": {"ge": 2, "le": 2}},
+                    {"name": "distinct", "stats": {"distinct_count": {"ge": 2, "le": 2}}},
                     {"name": "unique", "unique": True},
                 ],
             },
             "text": {
                 "nullable": True,
                 "blank_as_missing": True,
-                "checks": [
+                "conditions": [
                     {
                         "name": "letters",
                         "regex": "[A-Z]",
@@ -105,7 +107,9 @@ def test_explicit_nan_forbidden_remains_visible_after_normalizing_missing(kind, 
 def test_exact_float_statistics_do_not_change_sibling_projection(kind, tmp_path, monkeypatch):
     frame = pl.DataFrame({"x": [1e16, 1.0, -1e16], "y": [1, 2, 3], "payload": ["q" * 100000] * 3})
     frames, datasets = adapt(frame, kind, tmp_path)
-    datasets["d"]["schema"] = {"columns": {"x": {"sum": {"ge": 1, "le": 1}}, "y": {"ge": 0}}}
+    datasets["d"]["schema"] = {
+        "columns": {"x": {"stats": {"sum": {"ge": 1, "le": 1}}}, "y": {"ge": 0}}
+    }
     settings = QAVFSettings.model_validate({"datasets": datasets})
     with DataContext.from_settings(settings, frames=frames) as ctx:
         monkeypatch.setattr(ctx, "get", lambda *a: pytest.fail("full dataset fallback"))

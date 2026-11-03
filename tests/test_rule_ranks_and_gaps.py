@@ -110,7 +110,7 @@ def test_canonical_regex_stream_projects_dependencies_and_keeps_one_observation(
                             "s": {
                                 "nullable": True,
                                 "missing_values": ["none"],
-                                "checks": [{"regex": r"\w+", "where": "scope = 1"}],
+                                "conditions": [{"regex": r"\w+", "where": "scope = 1"}],
                             }
                         }
                     },

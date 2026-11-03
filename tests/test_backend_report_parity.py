@@ -107,21 +107,29 @@ def _statistics_scenario(directory: Path) -> dict[str, Any]:
                             "gt": 0,
                             "lt": 50,
                             "max_decimals": 1,
-                            "min": {"ge": 0},
-                            "max": {"le": 10},
-                            "mean": {"ge": 0, "le": 5},
-                            "median": {"ge": 1},
-                            "std": {"le": 1},
-                            "sum": {"le": 50},
+                            "stats": {
+                                "min": {"ge": 0},
+                                "max": {"le": 10},
+                                "mean": {"between": [0, 5]},
+                                "median": {"gt": 1},
+                                "std": {"lt": 1},
+                                "sum": {"le": 50},
+                            },
                         },
                         "y": {
                             "dtype": "int",
                             "unique": True,
-                            "distinct_count": {"ge": 5},
+                            "between": [15, 35],
+                            "stats": {"distinct_count": {"ge": 5}},
                             "notin": [40],
-                            "checks": [
+                            "conditions": [
                                 {"name": "big_when_q", "where": "g = 'q'", "ge": 100},
                                 {"where": "g = 'p'", "le": 15},
+                                {
+                                    "name": "q total",
+                                    "where": "g = 'q'",
+                                    "stats": {"sum": {"gt": 60}},
+                                },
                             ],
                         },
                         "s": {
@@ -237,7 +245,7 @@ def _passing_scenario(directory: Path) -> dict[str, Any]:
                 "schema": {
                     "columns": {
                         "id": {"dtype": "int"},
-                        "v": {"dtype": "int", "ge": 0, "mean": {"le": 5}},
+                        "v": {"dtype": "int", "ge": 0, "stats": {"mean": {"le": 5}}},
                         "w": {"dtype": "str", "isin": ["a", "b"]},
                     },
                     "primary_key": ["id"],
@@ -266,12 +274,12 @@ def _applicability_scenario(directory: Path) -> dict[str, Any]:
                             "dtype": "float",
                             "na_values": ["NA"],
                             "ge": 0,
-                            "mean": {"le": 5},
+                            "stats": {"mean": {"le": 5}},
                         },
                         "kind": {
                             "dtype": "str",
                             "nullable": True,
-                            "checks": [
+                            "conditions": [
                                 {"where": "id > 3", "isin": ["a"], "min_applicable_rows": 3}
                             ],
                         },
@@ -279,7 +287,7 @@ def _applicability_scenario(directory: Path) -> dict[str, Any]:
                             "dtype": "int",
                             "na_values": ["NA"],
                             "nullable": True,
-                            "max": {"le": 40},
+                            "stats": {"max": {"le": 40}},
                             "unique": True,
                         },
                         "note": {"dtype": "str", "regex": "^[a-z]$", "max_null_fraction": 0.5},
@@ -305,7 +313,10 @@ def _references_scenario(directory: Path) -> dict[str, Any]:
                     "columns": {
                         "a": {"dtype": "int", "nullable": True},
                         "b": {"dtype": "str", "nullable": True},
-                        "v": {"dtype": "int", "sum": {"le": 0}, "std": {"le": 0.1}},
+                        "v": {
+                            "dtype": "int",
+                            "stats": {"sum": {"le": 0}, "std": {"le": 0.1}},
+                        },
                     }
                 },
                 "foreign_keys": [
@@ -353,10 +364,12 @@ def _undefined_scenario(directory: Path) -> dict[str, Any]:
                         "x": {
                             "dtype": "float",
                             "nullable": True,
-                            "mean": {"ge": 0},
-                            "min": {"ge": 0},
+                            "stats": {"mean": {"ge": 0}, "min": {"ge": 0}},
                         },
-                        "y": {"dtype": "int", "median": {"ge": 2}, "distinct_count": {"le": 1}},
+                        "y": {
+                            "dtype": "int",
+                            "stats": {"median": {"ge": 2}, "distinct_count": {"le": 1}},
+                        },
                         "u": {"dtype": "int", "unit_column": "units", "unit": "kg"},
                         "unit": {"dtype": "str", "isin": ["kg"]},
                     },
@@ -521,15 +534,15 @@ _FRAME_SCHEMA = {
         "x": {
             "dtype": "float",
             "nullable": True,
-            "median": {"ge": 0},
-            "checks": [
+            "stats": {"median": {"ge": 0}},
+            "conditions": [
                 {"where": "g = 'b'", "ge": 0, "min_applicable_rows": 2, "name": "few"},
-                {"where": "g = 'zz'", "mean": {"le": 1}},
+                {"where": "g = 'zz'", "stats": {"mean": {"le": 1}}},
             ],
         },
         "g": {"dtype": "str", "nullable": True, "na_values": ["b"], "isin": ["a"]},
         "u": {"dtype": "int", "unit_column": "unit", "allowed_units": ["kg"]},
-        "k": {"dtype": "int", "na_values": ["NA"], "unique": True, "sum": {"le": 1}},
+        "k": {"dtype": "int", "na_values": ["NA"], "unique": True, "stats": {"sum": {"le": 1}}},
     },
     "primary_key": ["id"],
     "unique_keys": [["g"]],
@@ -549,7 +562,7 @@ def _query_input() -> Dataset:
     return Dataset(
         Query("SELECT * FROM (VALUES (1, -1.5), (2, NULL), (2, 3.0)) t(id, x)"),
         schema={
-            "columns": {"x": {"dtype": "float", "ge": 0, "median": {"ge": 0}}},
+            "columns": {"x": {"dtype": "float", "ge": 0, "stats": {"median": {"ge": 0}}}},
             "primary_key": ["id"],
         },
     )

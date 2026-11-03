@@ -106,7 +106,7 @@ def test_core_constraints_and_exactly_once():
                     "convert_options": True,
                     "each_allowed_once": True,
                     "ge": 0,
-                    "sum": {"ge": 15, "le": 15},
+                    "stats": {"sum": {"ge": 15, "le": 15}},
                 }
             }
         },
@@ -140,7 +140,7 @@ def test_core_na_group_and_where_severity():
                 "a": {
                     "dtype": "int",
                     "na_values": ["N/A"],
-                    "checks": [{"where": "b = 2", "ge": 5, "severity": "WARNING"}],
+                    "conditions": [{"where": "b = 2", "ge": 5, "severity": "WARNING"}],
                 },
                 "b": {"dtype": "int", "na_values": ["N/A"]},
             },

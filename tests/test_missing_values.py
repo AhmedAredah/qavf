@@ -49,7 +49,11 @@ def test_sentinels_count_as_missing_and_are_excluded_from_limits() -> None:
             "t": {
                 "schema": {
                     "columns": {
-                        "v": {"missing_values": [-999], "ge": 0, "mean": {"ge": 15, "le": 15}}
+                        "v": {
+                            "missing_values": [-999],
+                            "ge": 0,
+                            "stats": {"mean": {"ge": 15, "le": 15}},
+                        }
                     }
                 }
             }
@@ -123,7 +127,7 @@ def test_where_limits_a_check_to_matching_rows() -> None:
 
 def test_where_applies_to_column_level_limits() -> None:
     frame = pl.DataFrame({"k": ["a", "a", "b"], "v": [1.0, 1.0, 100.0]})
-    check = {"max": {"le": 10}, "where": "k = 'a'", "name": "a only"}
+    check = {"stats": {"max": {"le": 10}}, "where": "k = 'a'", "name": "a only"}
     report = _run({"t": frame}, {"t": {"schema": {"columns": {"v": {"checks": [check]}}}}})
     [summary] = [r for r in report.results_for("INP-003") if r.status is Status.PASS]
     assert "t.v: a only" in summary.metrics["passed_checks"]
@@ -149,7 +153,8 @@ def test_where_conditions_are_validated() -> None:
 def test_column_level_failure_still_reports_offending_rows() -> None:
     frame = pl.DataFrame({"v": [1.0, -5.0, 2.0]})
     report = _run(
-        {"t": frame}, {"t": {"schema": {"columns": {"v": {"ge": 0, "mean": {"ge": 10}}}}}}
+        {"t": frame},
+        {"t": {"schema": {"columns": {"v": {"ge": 0, "stats": {"mean": {"ge": 10}}}}}}},
     )
     [result] = [r for r in report.results_for("INP-003") if r.failed]
     assert result.unit == "rows" and result.affected_count == 1

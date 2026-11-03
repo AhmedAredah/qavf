@@ -102,7 +102,9 @@ def test_inferred_floating_values_still_enforce_finite_policy():
     ],
 )
 def test_exact_statistics_drive_decisions(values, dtype, stat, bound, expected):
-    report = run(pa.table({"x": values}), {"columns": {"x": {"dtype": dtype, stat: bound}}})
+    report = run(
+        pa.table({"x": values}), {"columns": {"x": {"dtype": dtype, "stats": {stat: bound}}}}
+    )
     result = constraint(report)
     assert result.status.value == expected, result.message
 
@@ -122,7 +124,7 @@ def test_null_fraction_compares_exact_ratio():
 def test_bad_condition_does_not_suppress_later_constraints_or_columns():
     report = run(
         pa.table({"x": [1], "y": [-1]}),
-        {"columns": {"x": {"checks": [{"where": "unknown > 0", "ge": 0}]}, "y": {"ge": 0}}},
+        {"columns": {"x": {"conditions": [{"where": "unknown > 0", "ge": 0}]}, "y": {"ge": 0}}},
     )
     results = checks(report, "INP-003")
     assert any(r.status.value == "ERROR" and r.columns == ["x"] for r in results)
@@ -180,7 +182,7 @@ def test_nullable_measurement_does_not_require_unit():
 def test_evidence_retains_condition_dependencies():
     report = run(
         pa.table({"x": [-1, 1], "state": ["active", "inactive"]}),
-        {"columns": {"x": {"checks": [{"where": "state='active'", "ge": 0}]}}},
+        {"columns": {"x": {"conditions": [{"where": "state='active'", "ge": 0}]}}},
     )
     result = next(r for r in checks(report, "INP-003") if r.status.value == "FAIL")
     assert result.affected_records[0]["state"] == "active"
@@ -228,13 +230,13 @@ def test_native_fixed_width_sum_overflow_uses_bounded_exact_fallback():
     value = Decimal("9" * 38)
     report = run(
         pa.table({"x": pa.array([value, value], type=pa.decimal128(38, 0))}),
-        {"columns": {"x": {"dtype": "decimal", "sum": {"ge": 2 * (10**38 - 1)}}}},
+        {"columns": {"x": {"dtype": "decimal", "stats": {"sum": {"ge": 2 * (10**38 - 1)}}}}},
     )
     finding = constraint(report)
     assert finding.status.value == "PASS", finding.message
     report = run(
         pa.table({"x": pa.array([value, value], type=pa.decimal128(38, 0))}),
-        {"columns": {"x": {"dtype": "decimal", "sum": {"le": 2 * (10**38 - 1) - 1}}}},
+        {"columns": {"x": {"dtype": "decimal", "stats": {"sum": {"le": 2 * (10**38 - 1) - 1}}}}},
     )
     finding = constraint(report)
     assert finding.status.value == "FAIL", finding.message

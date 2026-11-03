@@ -68,7 +68,7 @@ def test_anchors_are_stable_between_renders(registry) -> None:
             "a": {
                 "schema": {
                     "columns": {
-                        "x": {"checks": [{"name": "ge 0", "ge": 0}, {"name": "ge -0", "ge": 0}]}
+                        "x": {"conditions": [{"name": "ge 0", "ge": 0}, {"name": "ge -0", "ge": 0}]}
                     }
                 }
             }
@@ -95,7 +95,9 @@ def test_duplicate_keys_count_keys_and_report_rows_involved(registry) -> None:
 
 
 def test_column_level_problems_have_no_row_denominator(registry) -> None:
-    limits = {"min": {"ge": 10}, "max": {"le": 0}, "mean": {"ge": 10}, "sum": {"ge": 10}}
+    limits = {
+        "stats": {"min": {"ge": 10}, "max": {"le": 0}, "mean": {"ge": 10}, "sum": {"ge": 10}},
+    }
     report = _run(
         registry,
         {"g": pl.DataFrame({"v": [5]})},

@@ -14,7 +14,7 @@ from qavf.engine.runner import QARunner
 from qavf.settings import QAVFSettings, SchemaSpec, SourcePolicy
 from qavf.sources import FileParams, FileSource, SourceEnvironment
 
-SCHEMA = {"columns": {"x": {"checks": [{"name": "nonnegative", "ge": 0}]}}}
+SCHEMA = {"columns": {"x": {"conditions": [{"name": "nonnegative", "ge": 0}]}}}
 CONFIG = {"plugins": {"entry_points": False}, "engine": {"parallel": False}}
 
 
@@ -29,7 +29,7 @@ def test_named_contracts_keep_each_schema_reference_and_expression():
             ),
             "parent": Dataset(
                 pl.DataFrame({"id": [1]}),
-                schema={"columns": {"id": {"checks": [{"name": "minimum id", "ge": 2}]}}},
+                schema={"columns": {"id": {"conditions": [{"name": "minimum id", "ge": 2}]}}},
             ),
         },
         config=CONFIG,

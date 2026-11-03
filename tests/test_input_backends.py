@@ -40,7 +40,7 @@ def test_int128_overflow_guard_does_not_depend_on_decimal_context(precision):
         context.prec = precision
         with pytest.raises(ValueError, match="accumulator"):
             exact_sum_expr(series)
-    found = input_result(series.to_frame(), {"sum": {"le": 0}})
+    found = input_result(series.to_frame(), {"stats": {"sum": {"le": 0}}})
     assert any(r.status is Status.ERROR for r in found)
 
 
@@ -69,7 +69,9 @@ def test_decimal_bound_keeps_fractional_identity(kind, tmp_path):
     assert any(r.status is Status.FAIL for r in input_result(frame, {"le": 90.0}, kind, tmp_path))
 
 
-@pytest.mark.parametrize("limits", [{"mean": {"le": 2**53}}, {"median": {"le": 2**53}}])
+@pytest.mark.parametrize(
+    "limits", [{"stats": {"mean": {"le": 2**53}}}, {"stats": {"median": {"le": 2**53}}}]
+)
 def test_exact_large_integer_location_statistics(limits):
     assert any(
         r.status is Status.FAIL for r in input_result(pl.DataFrame({"x": [2**53 + 1]}), limits)
@@ -79,14 +81,17 @@ def test_exact_large_integer_location_statistics(limits):
 @pytest.mark.parametrize("offset", [0, 2**53, 2**100])
 def test_integer_standard_deviation_is_translation_invariant(offset):
     frame = pl.DataFrame({"x": pl.Series([offset, offset + 1], dtype=pl.Int128)})
-    assert any(r.status is Status.FAIL for r in input_result(frame, {"std": {"le": 0}}))
+    assert any(r.status is Status.FAIL for r in input_result(frame, {"stats": {"std": {"le": 0}}}))
 
 
 def test_finite_extreme_std_is_scaled_before_variance():
     frame = pl.DataFrame({"x": [0.0, 1e308]})
-    assert any(r.status is Status.FAIL for r in input_result(frame, {"std": {"ge": 1.5e308}}))
+    assert any(
+        r.status is Status.FAIL for r in input_result(frame, {"stats": {"std": {"ge": 1.5e308}}})
+    )
     assert all(
-        r.status is Status.PASS for r in input_result(frame, {"std": {"ge": 7e307, "le": 8e307}})
+        r.status is Status.PASS
+        for r in input_result(frame, {"stats": {"std": {"ge": 7e307, "le": 8e307}}})
     )
 
 

@@ -198,7 +198,10 @@ def test_huge_grid_uses_exact_cardinality_and_bounded_evidence(monkeypatch):
 def test_decimal_aggregate_limits_remain_exact():
     d = Decimal("9007199254740993.01")
     frame = pl.DataFrame({"v": pl.Series([d], dtype=pl.Decimal(30, 2))})
-    spec = {"dtype": "decimal", "min": {"ge": d}, "max": {"le": d}, "sum": {"ge": d, "le": d}}
+    spec = {
+        "dtype": "decimal",
+        "stats": {"min": {"ge": d}, "max": {"le": d}, "sum": {"ge": d, "le": d}},
+    }
     found = results("INP-003", {"d": frame}, datasets={"d": {"schema": {"columns": {"v": spec}}}})
     assert all(r.status is Status.PASS for r in found)
 
@@ -290,7 +293,7 @@ def test_column_evaluation_logs_redact_exception_and_check_credentials(monkeypat
         raise ValueError("postgres://user:db-secret@host/database password=other-secret")
 
     monkeypatch.setattr(_column_values, "_statistic", broken_statistic)
-    limits = {"checks": [{"name": "password=label-secret", "mean": {"ge": 0}}]}
+    limits = {"conditions": [{"name": "password=label-secret", "stats": {"mean": {"ge": 0}}}]}
     found = results(
         "INP-003",
         {"d": pl.DataFrame({"v": [1]})},

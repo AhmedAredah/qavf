@@ -107,7 +107,7 @@ def test_compact_null_fraction_matches_eager_empty_and_scoped_population(
     check = {"max_null_fraction": 0.1, "ge": 0, "min_applicable_rows": 0}
     if where is not None:
         check["where"] = where
-    schema = {"columns": {"x": {"nullable": True, "checks": [check]}}}
+    schema = {"columns": {"x": {"nullable": True, "conditions": [check]}}}
     eager = assessed(frame, schema)
     lazy = assessed(frame.lazy(), schema)
     assert lazy.verdict() == eager.verdict()
