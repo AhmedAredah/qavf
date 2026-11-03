@@ -4,88 +4,107 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.0] - Unreleased
 
-### 0.7.0 (in development): named checks
+Checks are configured by name, next to the data they test, and one check can relate
+any number of datasets. Rule codes remain only as stable audit IDs in reports.
 
-These changes break existing configurations. Convert a configuration once with
-`qavf migrate old.yaml -o new.yaml` (`--check` shows what would change).
+### Breaking changes
 
-- **Checks are configured by name, next to the data they test.** A dataset's
-  `checks` list and a top-level `checks` list replace `rules: {TMP-001: ...}`:
-  `{check: change_rate, series: {value: aadt, group_by: [site_id], time_column: year}, max: 0.15}`.
-  Every item takes `name`, `severity`, `where`, `tags`, `enabled` and `description`;
-  two items of the same check keep their own severity and name. `qavf list-checks`
-  (replacing `list-rules`) lists the checks, their rule codes and settings.
-- Row expressions are `check: expression` items and SQL assertions top-level
-  `check: sql` items; the `expressions` and `assertions` sections are removed.
-  Baselines are `matches_baseline` items and comparisons top-level `compare` items.
+Configurations written for QAVF 0.6 are rejected with an error naming their first
+old setting. Convert each configuration once with `qavf migrate old.yaml -o new.yaml`
+(`--check` shows what would change; `--drop-disabled` leaves disabled rules out).
+Reports written by earlier versions still load.
+
+- **Checks are named items.** A dataset's `checks` list (checks of that dataset)
+  and a top-level `checks` list (checks relating datasets) replace
+  `rules: {TMP-001: ...}`: `{check: change_rate, series: aadt_by_site, max: 0.15}`.
+  Every item takes `name`, `severity`, `where`, `tags`, `enabled` and `description`.
+  Some settings are renamed (`max_change_rate` is `max`, `expected_trend` is
+  `expect`, `expected_periods` is `expected`); [docs/rules.md](docs/rules.md) lists
+  each check's settings.
+- Row expressions are `check: expression` items, SQL assertions top-level
+  `check: sql` items, baselines `matches_baseline` items and comparisons top-level
+  `compare` items; the `expressions` and `assertions` sections are removed, and
+  `Dataset(..., expressions=...)` is `Dataset(..., checks=...)`.
 - **Only configured checks run.** Schema contracts (columns, keys, foreign keys)
-  always run; `engine.run_unconfigured_rules`, `include_categories` and
-  `exclude_categories` are removed.
-- `engine.fail_on`, `fail_on_incomplete` and `require` move to a new `run`
-  section; `require` lists check names or dataset names.
-- Reports keep `rule_id` and `check_id` and add `check_name` and `item_name`;
-  labels read `missing_periods · counts · no missing years (TMP-004)`. Reports
-  from earlier versions still load.
-- A configuration written for 0.6 fails with an error naming its first old
-  setting and `qavf migrate`.
-- Plugins declare a `check_name` beside their `rule_id`; a missing or repeated
-  check name is a registration error.
-- `Dataset(..., expressions=...)` is now `Dataset(..., checks=...)`.
-- Each check item is assessed on its own: a rule configured with several series or
-  comparisons becomes one item each, so multiple-testing corrections (trend,
-  drift) now apply within each item.
+  always run. `engine.run_unconfigured_rules`, `include_categories` and
+  `exclude_categories` are removed; use `--tags` and `--skip-tags`.
+- `engine.fail_on`, `fail_on_incomplete` and `require` move to a new `run` section;
+  `require` lists check or dataset names.
+- **Column statistics go under `stats`.** `stats: {mean: {between: [1000, 100000]}}`
+  replaces `mean: {ge: 1000, le: 100000}` beside the column's value limits, for
+  `min`, `max`, `mean`, `median`, `std`, `sum` and `distinct_count`.
+- **A column's conditional limits are `conditions`**, so `checks` always means
+  check items.
+- `qavf list-checks` replaces `list-rules`.
+- Plugins declare a `check_name` beside their `rule_id`; a missing name, or one
+  that clashes with another check, is a registration error.
+- Each check item is assessed on its own. A 0.6 rule configured with several
+  series or comparisons becomes one item each, so multiple-testing corrections
+  (trend, drift) now apply within each item rather than across all of
+  a rule's series; p-values adjusted across a whole rule can differ from 0.6.
+- Result labels read `missing_periods · counts · no missing years (TMP-004)`;
+  results keep `rule_id` and `check_id` and add `check_name` and `item_name`.
+
+### Added
+
+- **Value ranges:** `between: [a, b]` (inclusive) on column value limits and on
+  each statistic in `stats`, which also accept `gt` and `lt`. Setting `between`
+  with `ge`, `le`, `gt` or `lt` on the same field is an error.
 - **Reuse.** A dataset's `series` and `metrics` define a time series or per-entity
-  metric once; temporal checks take `series: <name>` and spatial checks
-  `metric: <name>` (`other_dataset.name` reaches another dataset's). Metrics take
-  their normalizer as `per: counts.aadt`. `views` name a slice of a dataset
-  (`where`, `columns`), usable as `counts.recent` wherever a check names a dataset.
-  Top-level `defaults` give settings per check name, `vars` named values used as
-  `${vars.name}`, and `include` merges shared files first (a dataset or named check
-  defined twice is an error). Relative file paths in an included file (sources,
-  connections, baselines, zone layers, plugin paths) are relative to that file. `expected: 2016..2024` or `{from, to, step}` expands
-  to every value.
-- **Run-time selection.** `qavf run --tags`, `--skip-tags`, `--only "<name>"` and
-  `--dataset`, and `validate(..., only=, tags=, skip_tags=, datasets=)`, narrow a run
-  on both backends; built-in checks carry their family as a tag. Selecting nothing
-  is an error. `run.tags: {<tag>: {fail_on: <severity>|never}}` sets a pass/fail
-  policy per tag; results carry their item's `tags`.
-- **One dataset across many sources.** A dataset's `across` copies it, with its
-  schema, checks, series, metrics and views, once per source: a list of connection
-  names, a mapping of copy names to the source settings that differ (`connection`,
-  `path` or URL, `secret`, `table`), or `{city: [houston, dallas]}` filling `{city}`
-  in the source's path or table. Each copy is a dataset of its own,
-  `counts@houston`; `counts@*` lists every copy in a check's `datasets`,
-  `run.require` and `--dataset`.
-- **Many datasets in one check.** `compare`, `totals_match`, `key_sets_match` and
-  `drift` take any number of `datasets` and a `strategy`: `reference` (default;
-  `reference:` names the member, the first otherwise), `sequential`, `all_pairs`
-  (refused above `max_pairs`, default 28) or `consensus`. The two-sided engine runs
-  once per pair; two datasets with the default strategy report exactly as before.
-  `batch_consistent` and `coverage` accept `counts@*`.
-- **Consensus.** `strategy: consensus` compares each member with a consensus built
-  key by key: `consensus: {numeric: median|mean|trimmed_mean, trim: 0.1,
-  categorical: majority|plurality, min_agreement: 0.5, ties: report|reference}`.
-  A key without a consensus value (a tie, too little agreement, a key repeated
-  within a member) is left out of every pair and reported as not assessed, never
-  guessed. `drift` compares each member with the pooled data of all members.
-- **Whole-group levels.** With more than two members, `compare` assesses `coverage`
-  (a key x member presence matrix), `structure` (column names and types against
-  what most members have) and `distribution` (each member against the pooled data)
-  over all members at once.
-- **Group reports.** Results of such checks carry a `group` role (the member they
-  are about, the pair, the level); `report.groups` (also in the JSON report) rolls
-  them up per check into a matrix of members by levels, the pairs compared and a
-  ranking of the members by failures, results not assessed and changed records.
-  The HTML report shows them in a compact "Datasets checked together" section.
-  Reports from earlier versions load with no groups.
-- `qavf migrate` turns inline series and metrics into named `series`/`metrics`
-  entries, merging identical ones (`<value>_by_<group>`).
-- The demo uses a named series and metric and `vars`.
-- Testing helpers: `qavf.testing.rule_results`/`run_rule` run one rule instance
-  with any parameters; `checks_config` converts rule-code mappings and
-  `with_checks` configures every rule of a test registry.
+  metric once (`series: aadt_by_site`, `metric: crash_rate`; `other.name` reaches
+  another dataset's), with the normalizer as `per: counts.aadt`. `views` name a
+  slice (`where`, `columns`) usable as `counts.recent` wherever a dataset is named.
+  Top-level `defaults` give settings per check name, `vars` named values
+  (`${vars.years}`), and `include` merges shared files first; a dataset or named
+  check defined twice is an error. `2016..2024` or `{from, to, step}` expands to
+  every value.
+- **Run-time selection:** `qavf run --tags`, `--skip-tags`, `--only "<name>"` and
+  `--dataset`, and `validate(..., only=, tags=, skip_tags=, datasets=)`, on both
+  backends. Built-in checks carry their family as a tag.
+  `run.tags: {<tag>: {fail_on: <severity>|never}}` sets a pass/fail policy per tag.
+- **One dataset across many sources:** `across` copies a dataset, with its schema,
+  checks, series, metrics and views, once per source: a list of connection names,
+  a mapping of copy names to the source settings that differ (connection, path or
+  URL, secret, table), or `{city: [houston, dallas]}` filling `{city}` in a path or
+  table. Copies are named `counts@houston`; `counts@*` selects every copy in a
+  check's `datasets` (one string or in a list), `run.require` and `--dataset`.
+- **Many datasets in one check:** `compare`, `totals_match`, `key_sets_match` and
+  `drift` take any number of `datasets` and a `strategy` (`reference`, the default;
+  `sequential`; `all_pairs`, refused above `max_pairs`; `consensus`). Two datasets
+  with the default strategy report exactly as before.
+- **Consensus:** each member against a consensus built key by key, configurable as
+  `consensus: {numeric: median|mean|trimmed_mean, trim, categorical:
+  majority|plurality, min_agreement, ties: report|reference}`. A key without a
+  consensus value is reported as not assessed, never guessed. `drift` compares each
+  member with the pooled data.
+- **Whole-group levels:** with more than two members, `compare` assesses
+  `coverage` (a key × member presence matrix), `structure` and `distribution`
+  (each member against the pooled data) over all members at once.
+- **Group reports:** each result of such a check carries a `group` role
+  (`GroupRole`), and `report.groups` holds one `GroupReport` per check: a matrix of
+  members by levels, the pairs compared and a ranking of the members. The HTML
+  report shows them under "Datasets checked together". Results name the consensus
+  and pooled data by role and members by name.
+- [docs/checks.md](docs/checks.md) explains check items, column limits, reuse,
+  selection and many datasets; [docs/rules.md](docs/rules.md) lists the checks by
+  name with their settings.
+- The configuration JSON Schema hints every 0.7 section and setting for editors
+  (`ui_group`, `ui_title`, `ui_advanced`).
+- `qavf init` writes inferred ranges as `between` and shows the 0.7 forms in its
+  commented example; the demo and `config/qavf.full.yaml` use them, including one
+  dataset across three files compared by consensus.
+- Testing helpers: `qavf.testing.rule_results` and `run_rule` run one rule instance
+  with any parameters; `checks_config` converts rule-code mappings and `with_checks`
+  configures every rule of a test registry.
+
+### Fixed
+
+- `qavf run` prints result labels on a console that is not UTF-8 (e.g. a Windows
+  cp1252 pipe): `·` falls back to `-` instead of showing as `�`.
+
+## [Unreleased]
 
 ### Added
 
@@ -98,11 +117,6 @@ These changes break existing configurations. Convert a configuration once with
   it would become, and `python -m qavf` runs the command line.
 - The configuration JSON Schema (`qavf schema`) labels its fields for editors:
   `ui_group`, `ui_title` and `ui_advanced` on each setting.
-
-### Fixed
-
-- `qavf run` prints result labels on a console that is not UTF-8 (e.g. a Windows
-  cp1252 pipe): `·` falls back to `-` instead of showing as `�`.
 
 ## [0.6.2] - 2026-11-02
 

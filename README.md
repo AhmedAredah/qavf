@@ -70,12 +70,14 @@ datasets:
       primary_key: [site_id, year]
       columns:
         site_id: {dtype: str, regex: 'S\d{2}'}
+        year: {dtype: int, between: [2000, 2030]}   # inclusive; or ge, le, gt, lt
         aadt:
           dtype: int
           ge: 0
-          checks:
+          stats: {mean: {between: [1000, 100000]}}  # min max mean median std sum distinct_count
+          conditions:                               # more limits, each with its own severity
             - {le: 200000, severity: WARNING, name: implausibly high}
-        truck_share: {dtype: float, ge: 0, le: 1}
+        truck_share: {dtype: float, between: [0, 1]}
     foreign_keys:
       - {columns: [site_id], ref_dataset: sites}
   sites:
@@ -130,8 +132,11 @@ without editing the file: `qavf run -c qa.yaml --tags nightly`, `--skip-tags slo
 family (`temporal`, `spatial`, `input`, ...) as a tag. The same selectors exist on
 `validate(..., only=, tags=, skip_tags=, datasets=)`.
 
-`qavf list-checks` lists every check. Configurations written for QAVF 0.6
-(`rules:`, `expressions:`, `assertions:`) convert with `qavf migrate old.yaml -o new.yaml`.
+`qavf list-checks` lists every check, and [configuring checks](docs/checks.md) explains
+items, reuse, selection and checks over many datasets. Configurations written for
+QAVF 0.6 (`rules:`, `expressions:`, `assertions:`, column statistics such as `mean:`
+beside the column's limits, a column's `checks:`) are rejected with a pointer to
+`qavf migrate old.yaml -o new.yaml`, which converts them.
 
 [`config/qavf.full.yaml`](https://github.com/AhmedAredah/qavf/blob/main/config/qavf.full.yaml)
 documents every option. Paths are relative to the configuration file, and any string
@@ -251,7 +256,7 @@ Each check has a name used in configurations; reports also show its rule code.
 | `matches_baseline` | REG-001 | ERROR | Outputs match baselines within tolerance |
 | `compare` | CMP-001 | ERROR | Two datasets compare within tolerance after alignment |
 
-Check names and parameters: [docs/rules.md](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md)
+Check names and settings: [docs/rules.md](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md)
 or `qavf list-checks`.
 
 ## Regression testing
@@ -340,7 +345,7 @@ datasets:
 checks:
   - check: compare
     name: cities agree
-    datasets: ['counts@*']
+    datasets: counts@*               # every copy; one selector or a list
     keys: [site_id]
     strategy: consensus
     consensus: {numeric: median, categorical: majority, min_agreement: 0.5, ties: report}
@@ -353,8 +358,11 @@ assessed, never guessed. With more than two members, `compare` assesses `coverag
 (a key x member presence matrix), `structure` and `distribution` (each member against
 the pooled data) over all members at once. Reports add, per check, a matrix of
 members by levels (each cell the worst status), the pairs compared and a ranking of
-the members by failures and changed records (`report.groups`). Two datasets with the
-default strategy report exactly as a single comparison.
+the members by failures and changed records (`report.groups`, one `GroupReport` per
+check); each result's `group` (a `GroupRole`) names the members it is about. Results
+show the consensus and pooled data by role, never by an internal dataset name. Two
+datasets with the default strategy report exactly as a single comparison. See
+[configuring checks](docs/checks.md#many-datasets).
 
 ## CLI
 
@@ -390,7 +398,8 @@ resource error.
   and [statistical inference](https://github.com/AhmedAredah/qavf/blob/main/docs/inference.md)
 - [Spatial data](https://github.com/AhmedAredah/qavf/blob/main/docs/spatial.md): zone
   layers, CRS, assignment policies, grids, crosswalks, weights and the spatial levels
-- [Rules reference](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md) and
+- [Configuring checks](https://github.com/AhmedAredah/qavf/blob/main/docs/checks.md),
+  the [check reference](https://github.com/AhmedAredah/qavf/blob/main/docs/rules.md) and
   [writing plugins](https://github.com/AhmedAredah/qavf/blob/main/docs/plugins.md)
 - [Cloud storage](https://github.com/AhmedAredah/qavf/blob/main/docs/cloud_storage.md)
 - [Resource limits](https://github.com/AhmedAredah/qavf/blob/main/docs/resources.md) and
