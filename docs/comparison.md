@@ -558,7 +558,12 @@ qavf compare-datasets v1/counts.parquet v2/counts.parquet -c spec.yaml --html ou
 ```
 
 The spec holds the options of `compare_datasets` (`keys`, `columns`, `levels`, `decision`,
-...; paths relative to the working directory). The exit code is 0 when every check was
+...). Relative file paths in the spec (crosswalks, zone layers, `resources.temp_dir`)
+resolve against the spec file's folder, as in a configuration; the two data files on the
+command line resolve against the working directory. `resources` takes the fields of
+`ResourceLimits` with readable sizes, for example
+`resources: {target_memory: 2GiB, max_spill: 4GiB}`; an unknown field or invalid value is a
+usage error naming the field. The exit code is 0 when every check was
 assessed and passed, 1 when one failed or was not assessed, and 2 for a usage or
 configuration error.
 

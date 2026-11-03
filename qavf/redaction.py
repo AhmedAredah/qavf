@@ -193,12 +193,13 @@ def redact(value: Any) -> Any:
     return visit(normalize_evidence(value))
 
 
-def exception_details(exc: BaseException) -> str:
+def exception_details(exc: BaseException, *, location: bool = True) -> str:
     """Actionable diagnostics without raw traceback code or credential-bearing inputs.
 
     Validation errors retain field paths, error types and messages but omit input
     values and arbitrary validator contexts. Only a traceback's final filename and
-    line number are included; traceback source code and locals are never rendered.
+    line number are included (none with ``location=False``, for user-facing usage
+    and configuration errors); traceback source code and locals are never rendered.
     """
     from pydantic import ValidationError
 
@@ -210,7 +211,7 @@ def exception_details(exc: BaseException) -> str:
         )
     else:
         details = str(exc)
-    trace = exc.__traceback__
+    trace = exc.__traceback__ if location else None
     while trace is not None and trace.tb_next is not None:
         trace = trace.tb_next
     location = ""

@@ -744,9 +744,19 @@ def _cmd_compare(args: argparse.Namespace) -> int:
 
 
 def _comparison_spec(path: Path | None) -> dict[str, Any]:
-    """The comparison options of a YAML or JSON spec file (empty without one)."""
+    """The comparison options of a YAML or JSON spec file (empty without one).
+
+    Relative file paths in the spec (crosswalks, zone layers, ``resources.temp_dir``)
+    resolve against the spec file's folder, as in a configuration; they are
+    returned relative to the working directory, where the command resolves them.
+    ``resources`` becomes :class:`~qavf.ResourceLimits`.
+    """
     if path is None:
         return {}
+    from qavf.compare.spec import ComparisonSpec
+    from qavf.composition import IncludedPaths
+    from qavf.inputs.resources import ResourceLimits
+
     _use("read_config_mapping")
     loaded, _ = read_config_mapping(path)
     if clash := sorted({"baseline", "candidate"} & set(loaded)):
@@ -755,7 +765,15 @@ def _comparison_spec(path: Path | None) -> dict[str, Any]:
         )
     if "entry_points" in loaded:
         raise ValueError(f"{path} sets entry_points; use the --no-plugins command option instead")
-    return loaded
+    folder = path.resolve().parent
+    options = IncludedPaths(folder, Path.cwd().resolve()).rebase(
+        {key: value for key, value in loaded.items() if key != "resources"}, ComparisonSpec
+    )
+    if "resources" in loaded:
+        options["resources"] = ResourceLimits.from_mapping(
+            loaded["resources"], field=f"{path}: resources", base_dir=folder
+        )
+    return options
 
 
 def _cmd_compare_datasets(args: argparse.Namespace) -> int:
@@ -926,8 +944,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         OSError,
     ) as exc:
         _use("exception_details")
-        message = exception_details(exc)
-        logger.debug("Command failed: %s", message)
+        # A usage, configuration or validation error names what to fix; the
+        # library file and line where it was raised are shown only with -v.
+        message = exception_details(exc, location=args.verbose > 0)
+        logger.debug("Command failed: %s", exception_details(exc))
         print(f"error: {message}", file=sys.stderr)
         return EXIT_USAGE
 

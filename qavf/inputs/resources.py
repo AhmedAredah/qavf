@@ -71,6 +71,40 @@ class ResourceLimits:
     def __post_init__(self) -> None:
         self.engine_overrides()
 
+    @classmethod
+    def from_mapping(
+        cls, raw: Any, *, field: str = "resources", base_dir: Path | None = None
+    ) -> ResourceLimits:
+        """Limits from a configuration mapping such as ``{target_memory: 64MiB}``.
+
+        ``field`` names the setting in error messages. A relative ``temp_dir``
+        resolves against ``base_dir`` (the configuration file's folder) when given.
+
+        Raises:
+            ValueError: naming the field path, for a non-mapping, an unknown
+                field or an invalid value.
+        """
+        if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
+            raise ValueError(
+                f"{field}: must be a mapping of resource limits such as "
+                "{target_memory: 2GiB, max_spill: 4GiB}"
+            )
+        known = set(cls.__dataclass_fields__)
+        if unknown := sorted(set(raw) - known):
+            raise ValueError(
+                f"{field}.{unknown[0]}: unknown resource limit; expected one of "
+                f"{', '.join(sorted(known))}"
+            )
+        values = dict(raw)
+        temp_dir = values.get("temp_dir")
+        if base_dir is not None and isinstance(temp_dir, str) and temp_dir.strip():
+            if not Path(temp_dir).is_absolute():
+                values["temp_dir"] = base_dir / temp_dir
+        try:
+            return cls(**values)
+        except ValueError as exc:
+            raise ValueError(f"{field}: {exc}") from None
+
     def engine_overrides(self) -> dict[str, Any]:
         """Validated overrides in the engine's configuration vocabulary."""
         result: dict[str, Any] = {}

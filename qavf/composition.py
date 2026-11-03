@@ -21,10 +21,13 @@ import os
 import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from qavf.config_paths import ConfigPaths, PathRole
 from qavf.configuration import ConfigurationGraph
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
 
 INCLUDE_KEY = "include"
 VARS_KEY = "vars"
@@ -111,13 +114,20 @@ class IncludedPaths:
         self.directory = directory
         self.root = root
 
-    def rebase(self, raw: dict[str, Any]) -> dict[str, Any]:
-        """``raw`` (an included file's content) with its relative paths rebased."""
+    def rebase(
+        self, raw: dict[str, Any], model: type[BaseModel] | None = None
+    ) -> dict[str, Any]:
+        """``raw`` (an included file's content) with its relative paths rebased.
+
+        ``model`` describes ``raw`` (a QAVF configuration by default).
+        """
         if self.directory == self.root:
             return raw
-        from qavf.settings import QAVFSettings
+        if model is None:
+            from qavf.settings import QAVFSettings
 
-        rebased: dict[str, Any] = ConfigPaths(self.visit).model(raw, QAVFSettings)
+            model = QAVFSettings
+        rebased: dict[str, Any] = ConfigPaths(self.visit).model(raw, model)
         return rebased
 
     def visit(self, value: str, role: PathRole) -> str:
