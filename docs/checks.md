@@ -37,7 +37,12 @@ metrics. With `min_applicable_rows: N`, fewer than `N` matching rows leave it no
 assessed (an incomplete run) instead of passing vacuously:
 
 ```yaml
-- {check: expression, name: valid speeds, expr: speed < 120, where: "status = 'valid'", min_applicable_rows: 1}
+datasets:
+  speeds:
+    path: data/speeds.csv
+    checks:
+      - {check: expression, name: valid speeds, expr: speed < 120,
+         where: "status = 'valid'", min_applicable_rows: 1}
 ```
 
 A result keeps its `rule_id` and `check_id` and adds the check name and the item's

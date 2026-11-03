@@ -74,6 +74,9 @@ class CompiledCheck:
             datasets=self.datasets,
             tags=tuple(self.item.tags),
             description=self.item.description,
+            placed_on=self.placed.scope.dataset
+            if isinstance(self.definition, PluginDefinition)
+            else None,
         )
 
     def rule(self) -> Rule:

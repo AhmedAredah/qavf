@@ -917,15 +917,14 @@ class QARunner:
 
     @staticmethod
     def _datasets(rule: Rule, finding: Finding | None) -> tuple[str, ...]:
-        """The datasets a result is about: the finding's, the rule's, or the one its
+        """The datasets a result is about: the finding's, the rule's, or the one a plugin
         check item is placed on (plugin findings need not name it)."""
         if finding is not None and finding.datasets:
             return tuple(finding.datasets)
         if rule.requires:
             return tuple(rule.requires)
-        binding = rule.binding
-        if binding is not None and binding.key.startswith("datasets."):
-            return tuple(binding.datasets)
+        if rule.binding is not None and rule.binding.placed_on is not None:
+            return (rule.binding.placed_on,)
         return ()
 
     def _tags(self, rule: Rule, finding: Finding | None) -> list[str]:

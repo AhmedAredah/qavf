@@ -264,8 +264,12 @@ HINTS: dict[str, dict[str, Hint]] = {
         **_CHECK,
         "expr": ("Settings", "Expression", False),
         "null_as": ("Settings", "A null result counts as", True),
+        "min_applicable_rows": ("Settings", "Minimum applicable rows", True),
     },
-    "SqlItem": {**_CHECK, "sql": ("Settings", "Query returning offending rows", False)},
+    "SqlItem": {
+        **{key: hint for key, hint in _CHECK.items() if key != "where"},
+        "sql": ("Settings", "Query returning offending rows", False),
+    },
     "CheckItem": _CHECK,
     "RunSettings": {
         "fail_on": ("Pass / fail", "Fail on severity", False),

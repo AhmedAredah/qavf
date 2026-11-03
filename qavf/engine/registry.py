@@ -200,6 +200,9 @@ class CheckBinding:
     """The dataset the item is placed on, or the datasets a top-level item relates."""
     tags: tuple[str, ...] = ()
     description: str | None = None
+    placed_on: str | None = None
+    """The dataset a plugin check is placed on, named by results whose findings do not
+    name a dataset (built-in rules name theirs)."""
 
 
 class Rule[P: RuleParams](ABC):
