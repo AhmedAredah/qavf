@@ -113,13 +113,16 @@ class AcrossExpansion:
         if isinstance(across, list):
             if not across or not all(isinstance(entry, str) for entry in across):
                 raise ValueError(f"{where}: list the connection names to copy the dataset across")
+            _distinct(across, where, "connection")
             overrides: dict[str, dict[str, Any]] = {name: {"connection": name} for name in across}
         elif isinstance(across, Mapping) and _is_template(across):
             ((key, values),) = across.items()
             if not values or not all(isinstance(value, str | int) for value in values):
                 raise ValueError(f"{where}.{key}: list the values that fill {{{key}}}")
+            _distinct(values, f"{where}.{key}", "value")
             overrides = {str(value): {_TEMPLATE: {key: str(value)}} for value in values}
         elif isinstance(across, Mapping) and across:
+            _distinct(across, where, "copy name")
             overrides = {}
             for copy, override in across.items():
                 if override is None:
@@ -205,6 +208,21 @@ class AcrossExpansion:
 
 _TEMPLATE = "\x00template"
 """Marks a copy's template values among its overrides (never a source field)."""
+
+
+def _distinct(entries: Any, where: str, what: str) -> None:
+    """Reject an entry repeated in ``across`` (also as text: ``2023`` and ``'2023'``),
+    which would otherwise collapse two copies into one."""
+    seen: dict[str, Any] = {}
+    for entry in entries:
+        text = str(entry)
+        if text in seen:
+            if entry == seen[text]:
+                problem = f"{what} {entry!r} is repeated"
+            else:
+                problem = f"{what}s {seen[text]!r} and {entry!r} both name copy {text!r}"
+            raise ValueError(f"{where}: {problem}; each copy needs its own name")
+        seen[text] = entry
 
 
 def _is_template(across: Mapping[str, Any]) -> bool:

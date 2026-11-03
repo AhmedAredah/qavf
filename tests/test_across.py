@@ -207,6 +207,17 @@ def test_all_copies_are_listed_wherever_datasets_are_listed() -> None:
         ({"path": "x.csv", "across": []}, {}, "list the connection names"),
         ({"path": "x.csv", "across": {"a b": {"path": "y.csv"}}}, {}, "copy name 'a b'"),
         ({"across": ["db"]}, {}, "needs a 'path' or 'source'"),
+        (
+            {"source": {"type": "database", "table": "t"}, "across": ["db", "db"]},
+            {},
+            "connection 'db' is repeated",
+        ),
+        ({"path": "x_{y}.csv", "across": {"y": [2023, 2023]}}, {}, "value 2023 is repeated"),
+        (
+            {"path": "x_{y}.csv", "across": {"y": [2023, "2023"]}},
+            {},
+            "values 2023 and '2023' both name copy '2023'",
+        ),
     ],
 )
 def test_across_errors(dataset: dict[str, Any], extra: dict[str, Any], message: str) -> None:
