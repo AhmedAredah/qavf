@@ -413,11 +413,16 @@ class DataContext:
         from qavf.engine.views import ViewSource
 
         for name, (parent, spec) in settings.views().items():
-            self._catalog.sources[name] = ViewSource.of(parent, spec, self.env, self)
-            self._catalog.views.add(name)
+            self._attach_view(name, ViewSource.of(parent, spec, self.env, self))
         for name, params in settings.derived_datasets().items():
-            self._catalog.sources[name] = DerivedSource.of(params, self.env, self)
-            self._catalog.views.add(name)
+            self._attach_view(name, DerivedSource.of(params, self.env, self))
+
+    def _attach_view(self, name: str, source: DataSource) -> None:
+        """Register a view or derived dataset; it never replaces another source."""
+        if name in self._catalog.sources:
+            raise ValueError(f"view {name!r} would replace the dataset of that name")
+        self._catalog.sources[name] = source
+        self._catalog.views.add(name)
 
     @property
     def observation_storage(self) -> ObservationStorage:

@@ -138,3 +138,48 @@ def test_required_unnamed_expression_is_assessed(
     report = validate({"d": pl.DataFrame({"x": values})}, config=config, backend=backend)
     assert not _required(report)
     assert report.verdict() == verdict
+
+
+def _view_collision(physical: str) -> dict[str, Any]:
+    return {
+        "datasets": {
+            "roads": {"path": "roads.csv", "views": {"active": {"where": "id = 1"}}},
+            physical: {"path": "active.csv"},
+        }
+    }
+
+
+@pytest.mark.parametrize("physical", ["roads.active", "ROADS.Active"])
+def test_a_view_and_a_dataset_of_one_name_are_rejected(physical: str) -> None:
+    with pytest.raises(ValidationError) as caught:
+        QAVFSettings.model_validate(_view_collision(physical))
+    message = str(caught.value)
+    assert "datasets.roads.views.active" in message
+    assert f"datasets.{physical}" in message
+
+
+def test_two_datasets_differing_only_in_case_are_rejected() -> None:
+    config = {"datasets": {"Roads": {"path": "a.csv"}, "roads": {"path": "b.csv"}}}
+    with pytest.raises(ValidationError, match="Roads"):
+        QAVFSettings.model_validate(config)
+
+
+def test_an_across_copy_colliding_with_a_dataset_is_rejected() -> None:
+    config = {
+        "datasets": {
+            "counts": {"path": "{site}.csv", "across": {"site": ["a"]}},
+            "COUNTS@A": {"path": "other.csv"},
+        }
+    }
+    with pytest.raises(ValidationError, match="counts@a"):
+        QAVFSettings.model_validate(config)
+
+
+def test_dotted_dataset_names_stay_usable_when_unambiguous() -> None:
+    config = {
+        "datasets": {
+            "roads": {"path": "roads.csv", "views": {"active": {"where": "id = 1"}}},
+            "roads.archive": {"path": "archive.csv"},
+        }
+    }
+    QAVFSettings.model_validate(config)

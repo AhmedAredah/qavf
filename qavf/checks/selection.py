@@ -129,7 +129,8 @@ class Selection:
             datasets = placed.datasets
             if not datasets:
                 return False  # a SQL check may read any dataset
-            return all(name.partition(".")[0] in self.datasets for name in datasets)
+            blocks = placed.scope.blocks
+            return all((blocks.view_parent(name) or name) in self.datasets for name in datasets)
         return True
 
     @property

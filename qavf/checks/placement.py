@@ -43,6 +43,8 @@ class NamedBlocks:
     views: Mapping[str, Any] = field(default_factory=dict)
     """Qualified view name (``counts.recent``) -> its definition."""
     datasets: frozenset[str] = frozenset()
+    view_parents: Mapping[str, str] = field(default_factory=dict)
+    """Qualified view name -> the dataset declaring it (dataset names may hold dots)."""
 
     @classmethod
     def of(cls, settings: QAVFSettings) -> NamedBlocks:
@@ -50,8 +52,10 @@ class NamedBlocks:
             "series": {name: spec.series for name, spec in settings.datasets.items()},
             "metrics": {name: spec.metrics for name, spec in settings.datasets.items()},
         }
-        views = {name: spec for name, (_, spec) in settings.views().items()}
-        return cls(blocks, views, frozenset(settings.datasets))
+        declared = settings.views()
+        views = {name: spec for name, (_, spec) in declared.items()}
+        parents = {name: parent for name, (parent, _) in declared.items()}
+        return cls(blocks, views, frozenset(settings.datasets), parents)
 
     def resolve(self, setting: str, reference: str, dataset: str | None) -> dict[str, Any]:
         """The definition ``reference`` names, looked up on ``dataset`` first.
@@ -82,7 +86,7 @@ class NamedBlocks:
 
     def view_parent(self, name: str) -> str | None:
         """The dataset a qualified view name belongs to; ``None`` if it names no view."""
-        return name.partition(".")[0] if name in self.views else None
+        return self.view_parents.get(name)
 
     def known_dataset(self, name: str) -> bool:
         """Whether ``name`` is a dataset or a view (``counts.recent``)."""

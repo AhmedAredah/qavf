@@ -35,6 +35,7 @@ from pydantic import (
 
 from qavf.checks.items import CheckItem, RunSettings, dataset_item_id, top_level_item_id
 from qavf.checks.legacy import reject_legacy
+from qavf.checks.relations import RelationNamespace
 from qavf.configuration import ConfigurationGraph
 from qavf.configuration import expand_env as expand_env
 from qavf.configuration import read_config_mapping as _read_config_mapping
@@ -1551,6 +1552,7 @@ class QAVFSettings(_Strict):
             problems = _check_errors(self)
             if problems:
                 raise ValueError("invalid checks: " + "; ".join(problems))
+        RelationNamespace.of(self)
         return self
 
     @property
