@@ -4,6 +4,10 @@
   merge first, in order; the including file wins on conflicting values. A
   dataset defined twice, or an explicitly named top-level check repeated across
   files, is an error rather than a silent override. Include cycles are errors.
+  Relative file paths written in an included file (a source's ``path``, a
+  connection's database file, a baseline or zone-layer file, plugin ``paths``)
+  are relative to that file, like its own ``include`` entries
+  (:class:`IncludedPaths`).
 * ``vars`` holds named values; ``${vars.name}`` in any string value refers to
   one. A value that is exactly a reference takes the variable's value (a list
   stays a list); inside a longer string it is spelled out. An unknown variable
@@ -13,6 +17,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import re
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -40,7 +45,8 @@ class IncludeResolver:
 
     def resolve(self, raw: dict[str, Any], source: Path) -> dict[str, Any]:
         """``raw`` (the content of ``source``) with its included files merged in."""
-        return self._resolve(raw, source, (source.resolve(),))
+        root = source.resolve()
+        return self._resolve(raw, root, (root,))
 
     def _resolve(
         self, raw: dict[str, Any], source: Path, chain: tuple[Path, ...]
@@ -63,9 +69,74 @@ class IncludeResolver:
                 text = target.read_text(encoding="utf-8")
             except OSError as exc:
                 raise ValueError(f"{source}: cannot include {entry!r}: {exc.strerror}") from None
-            included = self._resolve(self._parse(text, target), target, (*chain, target))
+            parsed = IncludedPaths(target.parent, chain[0].parent).rebase(self._parse(text, target))
+            included = self._resolve(parsed, target, (*chain, target))
             merged = ConfigMerge(str(target)).merge(merged, included)
         return ConfigMerge(str(source)).merge(merged, raw)
+
+
+class IncludedPaths:
+    """Rewrites the relative file paths of an included file for the root configuration.
+
+    Paths resolve against the root configuration's directory once files merge, so a
+    relative ``path`` written in an included file is rewritten to the same file
+    relative to the root (absolute when no relative form exists, e.g. on another
+    drive). Absolute paths, URLs and paths starting with a ``${...}`` reference are
+    kept as written. SQL text is not rewritten: file paths inside queries stay
+    relative to the root configuration.
+    """
+
+    SECTIONS = ("datasets", "connections", "checks", "plugins")
+    """Top-level sections whose ``path`` values (and plugin ``paths``) are file paths."""
+
+    def __init__(self, directory: Path, root: Path) -> None:
+        self.directory = directory
+        self.root = root
+        self._memo: dict[int, Any] = {}
+
+    def rebase(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """``raw`` (an included file's content) with its relative paths rebased."""
+        if self.directory == self.root:
+            return raw
+        return {
+            key: self._walk(value) if key in self.SECTIONS else value for key, value in raw.items()
+        }
+
+    def _walk(self, value: Any) -> Any:
+        if not isinstance(value, dict | list):
+            return value
+        identity = id(value)
+        if identity in self._memo:
+            return self._memo[identity]
+        result: Any
+        if isinstance(value, list):
+            result = [self._walk(item) for item in value]
+        else:
+            result = {
+                key: self._paths(child) if key in ("path", "paths") else self._walk(child)
+                for key, child in value.items()
+            }
+        self._memo[identity] = result
+        return result
+
+    def _paths(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self.path(value)
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            return [self.path(item) for item in value]
+        return self._walk(value)
+
+    def path(self, value: str) -> str:
+        """``value`` relative to the root directory, when it is a relative file path."""
+        if not value or "://" in value or value.startswith(("${", "~")):
+            return value
+        if Path(value).is_absolute() or value.startswith(("/", "\\")):
+            return value
+        target = os.path.normpath(self.directory / value)
+        try:
+            return Path(os.path.relpath(target, self.root)).as_posix()
+        except ValueError:  # another drive (Windows): no relative form
+            return Path(target).as_posix()
 
 
 class ConfigMerge:
@@ -252,4 +323,11 @@ def _mentions_vars(value: Any) -> bool:
     return False
 
 
-__all__ = ["INCLUDE_KEY", "VARS_KEY", "ConfigMerge", "IncludeResolver", "VariableSubstitution"]
+__all__ = [
+    "INCLUDE_KEY",
+    "VARS_KEY",
+    "ConfigMerge",
+    "IncludeResolver",
+    "IncludedPaths",
+    "VariableSubstitution",
+]

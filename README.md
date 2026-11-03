@@ -123,7 +123,8 @@ run:
     nightly: {fail_on: never}       # report, but never fail the run
 ```
 
-`include: [shared.yaml]` merges shared files first (this file wins). Narrow a run
+`include: [shared.yaml]` merges shared files first (this file wins); relative file
+paths in an included file are relative to that file. Narrow a run
 without editing the file: `qavf run -c qa.yaml --tags nightly`, `--skip-tags slow`,
 `--only "no missing years"` or `--dataset counts`; built-in checks carry their
 family (`temporal`, `spatial`, `input`, ...) as a tag. The same selectors exist on

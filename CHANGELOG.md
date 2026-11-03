@@ -43,7 +43,8 @@ These changes break existing configurations. Convert a configuration once with
   (`where`, `columns`), usable as `counts.recent` wherever a check names a dataset.
   Top-level `defaults` give settings per check name, `vars` named values used as
   `${vars.name}`, and `include` merges shared files first (a dataset or named check
-  defined twice is an error). `expected: 2016..2024` or `{from, to, step}` expands
+  defined twice is an error). Relative file paths in an included file (sources,
+  connections, baselines, zone layers, plugin paths) are relative to that file. `expected: 2016..2024` or `{from, to, step}` expands
   to every value.
 - **Run-time selection.** `qavf run --tags`, `--skip-tags`, `--only "<name>"` and
   `--dataset`, and `validate(..., only=, tags=, skip_tags=, datasets=)`, narrow a run
