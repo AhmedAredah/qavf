@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -25,6 +25,10 @@ def validate(
     backend: str = "auto",
     on_event: Callable[[RunEvent], None] | None = None,
     cancel: CancellationToken | None = None,
+    only: str | Iterable[str] | None = None,
+    tags: str | Iterable[str] | None = None,
+    skip_tags: str | Iterable[str] | None = None,
+    datasets: str | Iterable[str] | None = None,
 ) -> QAReport:
     """Validate explicit contracts and return a report without writing files.
 
@@ -46,8 +50,17 @@ def validate(
     stops the run from any thread. A cancelled run still returns its report, with
     the steps it did not finish reported as not assessed. Both need
     ``engine.execution_mode: in_process``.
+
+    ``only`` (check item names), ``tags``, ``skip_tags`` and ``datasets`` narrow the
+    run without editing the configuration, like ``qavf run --only/--tags/--skip-tags/
+    --dataset``. Built-in checks carry their family (``temporal``, ``input``, …) as
+    an implicit tag; schema contracts carry ``input``. Selecting nothing is an error
+    (:class:`~qavf.checks.selection.SelectionError`).
     """
+    from qavf.checks.selection import Selection, narrow
     from qavf.optional import has_polars
+
+    selection = Selection.of(only=only, tags=tags, skip_tags=skip_tags, datasets=datasets)
 
     if backend not in ("auto", "duckdb", "polars"):
         raise ValueError("backend must be 'auto', 'duckdb', or 'polars'")
@@ -66,6 +79,7 @@ def validate(
             profile=profile,
             on_event=on_event,
             cancel=cancel,
+            selection=selection,
         )
     from qavf.engine.runner import QARunner
     from qavf.inputs.normalize import prepare
@@ -82,6 +96,7 @@ def validate(
         )
         settings = apply_profile(settings, profile)
         frames = _adapt(inputs, settings)
+    settings = narrow(settings, selection)
     control = control_for(on_event, cancel, settings.engine.execution_mode)
     if control is None:
         # Runners overridden without the hooks keep working when none is requested.

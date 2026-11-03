@@ -95,6 +95,16 @@ class SqlItem(CheckItem):
     """Query returning offending rows; every dataset is a table under its name."""
 
 
+class TagPolicy(BaseModel):
+    """Pass/fail policy for the checks carrying one tag."""
+
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
+
+    fail_on: Severity | Literal["never"]
+    """Lowest severity of a failure of these checks that fails the run; ``never``
+    keeps them from failing it (failures are still reported)."""
+
+
 class RunSettings(BaseModel):
     """Pass/fail policy of a run."""
 
@@ -108,6 +118,22 @@ class RunSettings(BaseModel):
     """Checks that must actually be assessed: check names, or a dataset name for every
     check on that dataset. A required check that is disabled, skipped or not assessed
     makes the run incomplete. An entry that matches nothing is a configuration error."""
+    tags: dict[str, TagPolicy] = Field(default_factory=dict)
+    """Pass/fail policy per tag, e.g. ``exploratory: {fail_on: never}``. Built-in checks
+    also carry their family as a tag (``temporal``, ``input``, …). When several tags of a
+    check have a policy, the strictest applies."""
+
+    @field_validator("tags")
+    @classmethod
+    def _tag_words(cls, tags: dict[str, TagPolicy]) -> dict[str, TagPolicy]:
+        for tag in tags:
+            if not tag or any(ch.isspace() for ch in tag):
+                raise ValueError(f"tag {tag!r} must be a single nonempty word")
+        return tags
+
+    def tag_fail_on(self) -> dict[str, str]:
+        """Each tag's ``fail_on`` as text (a severity, or ``never``), for reports."""
+        return {tag: str(policy.fail_on) for tag, policy in self.tags.items()}
 
 
 def checks_union(models: Sequence[type[BaseModel]]) -> Any:
@@ -126,5 +152,6 @@ __all__ = [
     "ExpressionItem",
     "RunSettings",
     "SqlItem",
+    "TagPolicy",
     "checks_union",
 ]

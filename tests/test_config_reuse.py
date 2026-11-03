@@ -214,7 +214,7 @@ def test_defaults_for_an_unknown_check_fail_when_the_run_is_planned() -> None:
     from qavf.checks.compiler import CheckCompilationError
 
     settings = _settings({"defaults": {"no_such_check": {"x": 1}}})
-    with pytest.raises(CheckCompilationError, match="defaults.no_such_check: unknown check"):
+    with pytest.raises(CheckCompilationError, match=r"defaults\.no_such_check: unknown check"):
         compile_checks(settings, discovered_rules())
 
 
@@ -388,7 +388,7 @@ def test_an_include_cycle_is_an_error(tmp_path: Path) -> None:
 
 def test_a_missing_include_is_an_error(tmp_path: Path) -> None:
     config = _write(tmp_path / "qa.yaml", "include: [nope.yaml]\n")
-    with pytest.raises(ValueError, match="cannot include 'nope.yaml'"):
+    with pytest.raises(ValueError, match=r"cannot include 'nope\.yaml'"):
         load_settings(config)
 
 

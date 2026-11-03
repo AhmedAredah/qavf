@@ -8,8 +8,7 @@ from typing import Any, ClassVar
 import polars as pl
 
 from qavf.engine.context import DataContext
-from qavf.engine.planning import DataRequirements
-from qavf.engine.registry import Finding, Rule, RuleParams
+from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
 from qavf.input_rules import (
     INPUT_RULES,
@@ -28,7 +27,6 @@ from qavf.rules.helpers import (
 )
 from qavf.settings import (
     DType,
-    QAVFSettings,
 )
 from qavf.sources.base import SourceNotFoundError
 
@@ -60,7 +58,7 @@ def _matches(dtype: pl.DataType, expected: DType) -> bool:
             return is_temporal(dtype)
 
 
-class RequiredDatasetsRule(Rule):
+class RequiredDatasetsRule(_SelectsDatasets):
     """Required datasets are accessible; optional datasets may be absent.
 
     Native sources are bound and their schemas inspected without a full scan.
@@ -74,16 +72,17 @@ class RequiredDatasetsRule(Rule):
     category: ClassVar[str] = CATEGORY
     default_severity: ClassVar[Severity] = INPUT_RULES["INP-001"].default_severity
     recommendation: ClassVar[str] = INPUT_RULES["INP-001"].recommendation
-
-    def data_requirements(self, settings: QAVFSettings) -> DataRequirements | None:
-        return DataRequirements(frozenset(settings.datasets))
+    Params: ClassVar[type[RuleParams]] = DatasetSelection
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
         failures: list[Finding] = []
         loaded: list[str] = []
+        selection = self.params.datasets
         # Every declared dataset, including one with no source whose in-memory frame
         # the caller forgot to pass: that must fail, not vanish from the check.
         for name in ctx.specs:
+            if selection is not None and name not in selection:
+                continue
             if ctx.has(name):
                 loaded.append(name)
                 continue

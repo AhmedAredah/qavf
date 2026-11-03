@@ -25,6 +25,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     ValidatorFunctionWrapHandler,
     WrapValidator,
     field_serializer,
@@ -45,6 +46,7 @@ from qavf.text_types import TEXT_DTYPES, TextType, Word
 from qavf.value_policy import TextNormalization
 
 if TYPE_CHECKING:
+    from qavf.checks.selection import AppliedSelection
     from qavf.sources.base import SourceEnvironment
 
 logger = logging.getLogger(__name__)
@@ -1303,6 +1305,8 @@ class QAVFSettings(_Strict):
     source_path: Path | None = Field(default=None, exclude=True)
     """File this configuration was loaded from; set by :func:`load_settings`."""
 
+    _selection: AppliedSelection | None = PrivateAttr(default=None)
+
     @model_validator(mode="before")
     @classmethod
     def _string_mapping_keys(cls, data: Any) -> Any:
@@ -1379,6 +1383,16 @@ class QAVFSettings(_Strict):
             if problems:
                 raise ValueError("invalid checks: " + "; ".join(problems))
         return self
+
+    @property
+    def selection(self) -> AppliedSelection | None:
+        """The run-time selection this configuration was narrowed by, if any
+        (see :func:`qavf.checks.selection.narrow`)."""
+        return self._selection
+
+    def apply_selection(self, selection: AppliedSelection | None) -> None:
+        """Record the run-time selection this configuration was narrowed by."""
+        self._selection = selection
 
     def views(self) -> dict[str, tuple[str, ViewSpec]]:
         """Every dataset view as ``<dataset>.<view>`` -> (dataset, definition)."""

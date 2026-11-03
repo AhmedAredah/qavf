@@ -156,7 +156,9 @@ A comparison level: ``records`` or ``{level: groups, group_by: [...], ...}``.
 
 Required datasets are accessible and their schemas can be inspected; optional datasets may be absent. Native sources are not fully scanned by this availability check, so it does not certify that every source record can be parsed.
 
-*No parameters.*
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `datasets` | `tuple[str, ...] \| None` | `None` | Datasets to examine; every configured dataset when omitted. |
 
 *When it fails:* Check the dataset's source settings (paths, queries, connection details) and confirm the upstream step that produces it completed. Mark a dataset 'required: false' if it is genuinely optional.
 

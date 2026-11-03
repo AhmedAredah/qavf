@@ -13,7 +13,7 @@ from qavf.optional import unsupported
 from qavf.settings import DatasetSpec, QAVFSettings, SchemaSpec, _read_config_mapping
 
 
-def prepare(data, schema, config, resources, profile):
+def prepare(data, schema, config, resources, profile, selection=None):
     """Validate a complete configuration before opening caller inputs."""
     source_path = None
     if isinstance(config, QAVFSettings):
@@ -79,6 +79,10 @@ def prepare(data, schema, config, resources, profile):
         from qavf.profiles import apply_profile
 
         settings = apply_profile(settings, profile)
+    if selection is not None:
+        from qavf.checks.selection import narrow
+
+        settings = narrow(settings, selection)
     _capabilities(settings)
     if not settings.datasets:
         raise ValueError("validation requires at least one dataset")

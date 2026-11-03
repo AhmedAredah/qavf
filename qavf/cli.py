@@ -8,6 +8,7 @@ or resource-budget error.
 from __future__ import annotations
 
 import argparse
+import codecs
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ import threading
 from collections.abc import Sequence
 from importlib import import_module
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TextIO
 
 from qavf._version import __version__
 from qavf.engine.severity import Severity
@@ -159,6 +160,27 @@ def _parser() -> argparse.ArgumentParser:
         "--progress",
         action="store_true",
         help="write one JSON progress event per line to stderr",
+    )
+    run.add_argument(
+        "--tags",
+        action="append",
+        default=[],
+        metavar="TAG",
+        help="run only checks with this tag; built-in checks carry their family "
+        "(temporal, input, ...) (repeatable)",
+    )
+    run.add_argument(
+        "--skip-tags", action="append", default=[], metavar="TAG", help="skip checks with this tag"
+    )
+    run.add_argument(
+        "--only", action="append", default=[], metavar="NAME", help="run only this check item"
+    )
+    run.add_argument(
+        "--dataset",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="run only this dataset's checks and schema contracts (repeatable)",
     )
 
     init = commands.add_parser("init", help="write a complete starting configuration")
@@ -336,6 +358,7 @@ class _InterruptCancels:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    from qavf.checks.selection import Selection, narrow
     from qavf.reports.presentation import HtmlLimits
 
     _use("load_settings", "ProtectedInputs")
@@ -358,6 +381,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     token = CancellationToken()
     on_event = _ProgressLines() if args.progress else None
     in_process = settings.engine.execution_mode == "in_process"
+    selection = Selection.of(
+        only=args.only, tags=args.tags, skip_tags=args.skip_tags, datasets=args.dataset
+    )
     with _InterruptCancels(token):
         if _native(args):
             from qavf.api import validate
@@ -367,11 +393,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 backend="duckdb",
                 on_event=on_event if in_process else None,
                 cancel=token if in_process else None,
+                only=selection.only,
+                tags=selection.tags,
+                skip_tags=selection.skip_tags,
+                datasets=selection.datasets,
             )
         else:
             _use("QARunner")
             control = RunControl(on_event, token) if in_process else None
-            report = QARunner(settings).run(control=control)
+            report = QARunner(narrow(settings, selection)).run(control=control)
     fail_on = settings.run.fail_on
     with protected.publication():
         written = []
@@ -394,12 +424,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
             written.append(report.write_json(json_path))
 
     summary = report.summary
+    console = ConsoleText(sys.stdout)
     print(
         f"{summary.total} results: {summary.passed} passed, {summary.failed} failed, "
         f"{summary.errored} could not run, {summary.skipped} skipped"
     )
     for result in report.failures():
-        print(f"  [{result.severity.value:<8}] {result.label} {result.name}: {result.message}")
+        line = f"  [{result.severity.value:<8}] {result.label} {result.name}: {result.message}"
+        print(console(line))
     for path in written:
         print(f"Report: {path}")
     verdict = report.verdict(fail_on)
@@ -758,8 +790,44 @@ _COMMANDS = {
 }
 
 
+_ASCII_FALLBACK = str.maketrans({"·": "-", "…": "...", "→": "->", "≤": "<=", "≥": ">="})
+"""ASCII spellings of the symbols QAVF prints (``·`` separates result labels)."""
+
+
+class ConsoleText:
+    """Text written to a console stream that may not be UTF-8.
+
+    A Windows console or pipe often uses a legacy code page (cp1252) while the
+    terminal shows UTF-8, so ``·`` arrives as ``�``. On a stream that is not
+    UTF-8, the symbols QAVF prints fall back to ASCII and anything else that the
+    encoding cannot hold is replaced instead of failing the command.
+    """
+
+    def __init__(self, stream: TextIO) -> None:
+        self.stream = stream
+
+    @property
+    def unicode(self) -> bool:
+        """Whether the stream encodes UTF-8."""
+        try:
+            return codecs.lookup(getattr(self.stream, "encoding", None) or "ascii").name == "utf-8"
+        except LookupError:
+            return False
+
+    def prepare(self) -> None:
+        """Replace unencodable characters on a stream that is not UTF-8."""
+        reconfigure = getattr(self.stream, "reconfigure", None)
+        if not self.unicode and reconfigure is not None:
+            reconfigure(errors="replace")
+
+    def __call__(self, text: str) -> str:
+        return text if self.unicode else text.translate(_ASCII_FALLBACK)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for the ``qavf`` console script."""
+    for stream in (sys.stdout, sys.stderr):
+        ConsoleText(stream).prepare()
     args = _parser().parse_args(argv)
     _configure_logging(args.verbose)
     if args.command == "capabilities":

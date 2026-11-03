@@ -33,6 +33,25 @@ def bounded_bytes(chunks: Iterable[bytes], limit: int) -> bytes:
         return output.getvalue()
 
 
+def selection_payload(settings: QAVFSettings) -> dict[str, Any] | None:
+    """The run-time selection of ``settings`` in transportable form."""
+    applied = settings.selection
+    if applied is None:
+        return None
+    return {**applied.selection.as_dict(), "not_selected": sorted(applied.not_selected)}
+
+
+def restore_selection(settings: QAVFSettings, payload: Any) -> None:
+    """Reattach a selection sent by :func:`selection_payload`."""
+    if not isinstance(payload, dict):
+        return
+    from qavf.checks.selection import AppliedSelection, Selection
+
+    values = dict(payload)
+    not_selected = frozenset(values.pop("not_selected", ()))
+    settings.apply_selection(AppliedSelection(Selection.of(**values), not_selected))
+
+
 def request_bytes(
     settings: QAVFSettings, inputs: Mapping[str, object], options: Mapping[str, Any] | None = None
 ) -> bytes:
@@ -52,6 +71,7 @@ def request_bytes(
         "engine_fields_set": sorted(settings.engine.model_fields_set),
         "queries": queries,
         "options": dict(options or {}),
+        "selection": selection_payload(settings),
     }
     try:
         return bounded_bytes(iter_audit_json(payload, max_bytes=REQUEST_LIMIT), REQUEST_LIMIT)
@@ -73,6 +93,7 @@ def read_request(path: Path) -> tuple[QAVFSettings, dict[str, object], dict[str,
     settings.source_path = payload["source_path"]
     if "engine_fields_set" in payload:
         settings.engine.__pydantic_fields_set__ = set(payload["engine_fields_set"])
+    restore_selection(settings, payload.get("selection"))
     queries: dict[str, object] = {
         name: Query(**value) for name, value in payload["queries"].items()
     }

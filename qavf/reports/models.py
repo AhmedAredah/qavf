@@ -199,6 +199,18 @@ def exact_count(status: Status, count: int, declared: bool = True) -> bool:
     return declared and assessed and not (status == Status.FAIL and not count)
 
 
+def _fails_under(result: RuleResult, limit: Severity, policies: Mapping[str, str]) -> bool:
+    """Whether a failed result fails the run: the strictest policy of its tags (its
+    own and its family) applies, else ``limit``."""
+    applicable = [policies[tag] for tag in {*result.tags, result.category} if tag in policies]
+    if not applicable:
+        return meets_threshold(result.severity, limit)
+    thresholds = [Severity(value) for value in applicable if value != "never"]
+    if not thresholds:
+        return False
+    return meets_threshold(result.severity, min(thresholds))
+
+
 class RuleResult(SnapshotModel):
     """Outcome of one rule execution."""
 
@@ -218,6 +230,8 @@ class RuleResult(SnapshotModel):
     item_name: str | None = None
     """The configured check item's name (its default ``<check> on <dataset>`` when the
     configuration gives none); ``None`` for schema contracts."""
+    tags: list[str] = Field(default_factory=list)
+    """The check item's own tags (its family is :attr:`category`)."""
     columns: list[str] = Field(default_factory=list)
     parameters: dict[str, Any] = Field(default_factory=dict)
     checks: list[CheckIdentity] = Field(default_factory=list)
@@ -391,6 +405,8 @@ class RunMetadata(SnapshotModel):
     """Lowest failure severity that fails the run."""
     fail_on_incomplete: bool = True
     """Whether an incomplete run (unassessed checks, or nothing assessed) fails."""
+    tag_fail_on: dict[str, str] = Field(default_factory=dict)
+    """Per-tag ``fail_on`` (a severity, or ``never``) from ``run.tags``."""
     cancelled: bool = False
     """Whether the caller cancelled the run; steps it did not finish are not assessed."""
     plugins: dict[str, str] = Field(default_factory=dict)
@@ -636,9 +652,11 @@ class QAReport(SnapshotModel):
     def should_fail(self, threshold: Severity | None = None) -> bool:
         """Whether any failure is at least as severe as ``threshold`` (default: ``fail_on``)."""
         limit = threshold or self.metadata.fail_on
-        return meets_threshold(
-            highest_severity(r.severity for r in self.results if r.status is Status.FAIL), limit
-        )
+        failed = [r for r in self.results if r.status is Status.FAIL]
+        policies = self.metadata.tag_fail_on
+        if not policies:
+            return meets_threshold(highest_severity(r.severity for r in failed), limit)
+        return any(_fails_under(result, limit, policies) for result in failed)
 
     @property
     def incomplete(self) -> bool:

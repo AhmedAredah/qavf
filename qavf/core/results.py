@@ -18,6 +18,7 @@ from qavf.audit_codec import (
     evidence_json_size,
     normalize_evidence,
 )
+from qavf.checks.selection import item_tags, row_item_key
 from qavf.engine.severity import Severity, Status
 from qavf.input_rules import INPUT_RULES
 from qavf.redaction import redact, redact_text
@@ -73,6 +74,7 @@ class ResultCollector:
         self._elapsed = {}
         self._sequence = itertools.count()
         self._positions = {name: index for index, name in enumerate(settings.datasets)}
+        self._tag_index = None
 
     def enabled(self, rule_id, dataset=None):
         """Whether ``rule_id`` reports: schema contracts always run, and the
@@ -86,7 +88,12 @@ class ResultCollector:
             return any(spec.expressions for spec in specs)
         if rule_id == "INP-007":
             return bool(self.settings.assertions)
-        return rule_id != "INP-008"  # freshness checks are not native
+        if rule_id == "INP-008":
+            return False  # freshness checks are not native
+        applied = self.settings.selection
+        # Schema contracts run unless a run-time selection leaves them (or this
+        # dataset) out.
+        return applied is None or applied.contract_runs(dataset)
 
     def records(self, query):
         from qavf.core.evidence import SqlEvidenceReader
@@ -117,6 +124,24 @@ class ResultCollector:
         if check_id == "sql.assertion":
             return check
         return None
+
+    def rule_parameters(self, rule_id):
+        """The parameters the full backend gives a schema contract rule: the datasets a
+        run-time selection restricts it to."""
+        applied = self.settings.selection
+        datasets = applied.contract_datasets() if applied is not None else None
+        if datasets is None or rule_id in ("INP-006", "INP-007"):
+            return {}
+        return {"datasets": datasets}
+
+    def tags(self, check_id, item_name, datasets):
+        """The explicit tags of the ``expression``/``sql`` item a result reports on."""
+        key = row_item_key(check_id or "", item_name, datasets)
+        if key is None:
+            return []
+        if self._tag_index is None:
+            self._tag_index = item_tags(self.settings)
+        return list(self._tag_index.get(key, ()))
 
     def report(
         self,
@@ -178,9 +203,10 @@ class ResultCollector:
                 check=check,
                 check_id=check_id or rule_id,
                 check_name=rule.check_name,
-                item_name=self.item_name(check_id, check, datasets, parameters),
+                item_name=(item := self.item_name(check_id, check, datasets, parameters)),
+                tags=self.tags(check_id, item, datasets),
                 columns=list(columns),
-                parameters=redact(parameters or {}),
+                parameters=redact(parameters or self.rule_parameters(rule_id)),
                 checks=[check_identity(rule_id, **redact(dict(item))) for item in checks],
                 status=status,
                 severity=severity,

@@ -559,6 +559,7 @@ class NativeRunner:
                 config_path=str(settings.source_path) if settings.source_path else None,
                 fail_on=settings.run.fail_on,
                 fail_on_incomplete=settings.run.fail_on_incomplete,
+                tag_fail_on=settings.run.tag_fail_on(),
                 cancelled=self.control is not None and self.control.cancelled,
                 config=config,
                 config_digest=canonical_digest(config),
@@ -599,8 +600,9 @@ def validate_core(
     profile=None,
     on_event=None,
     cancel=None,
+    selection=None,
 ):
-    settings, inputs = prepare(data, schema, config, resources, profile)
+    settings, inputs = prepare(data, schema, config, resources, profile, selection)
     control = control_for(on_event, cancel, settings.engine.execution_mode)
     if settings.engine.execution_mode == "isolated":
         from qavf.core.execution import validate_isolated

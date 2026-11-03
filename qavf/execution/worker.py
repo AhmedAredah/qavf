@@ -34,6 +34,7 @@ def _local_settings(settings: QAVFSettings, directory: Path) -> QAVFSettings:
     raw["engine"].update(execution_mode="in_process", temp_directory=directory)
     local = QAVFSettings.model_validate(raw)
     local.source_path = settings.source_path
+    local.apply_selection(settings.selection)
     local.engine.__pydantic_fields_set__ = settings.engine.model_fields_set | {
         "execution_mode",
         "temp_directory",
@@ -75,7 +76,12 @@ def run(request_path: Path | str, result_path: Path | str, control: dict[str, An
             if native:
                 from qavf.core.runner import _fit_report, validate_core
 
-                report = validate_core(queries, config=local)
+                applied = local.selection
+                report = validate_core(
+                    queries,
+                    config=local,
+                    selection=applied.selection if applied is not None else None,
+                )
             else:
                 runner = QARunner(local)
                 report = runner.run(frames=frames)

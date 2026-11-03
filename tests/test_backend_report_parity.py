@@ -588,3 +588,71 @@ def test_backends_report_identical_results_for_supplied_inputs(kind):
         _normalized(native_report), _normalized(validate(INPUTS[kind](), backend="polars"))
     )
     assert not problems, "\n".join(problems)
+
+
+def _tagged_scenario(directory: Path) -> dict[str, Any]:
+    """Named checks with tags, for run-time selection."""
+    config = _named_checks_scenario(directory)
+    items = config["datasets"]["rows"]["checks"]
+    items[0]["tags"] = ["nightly"]
+    items[2]["tags"] = ["nightly", "slow"]
+    config["checks"][0]["tags"] = ["nightly"]
+    config["run"] = {"require": ["a within b"], "tags": {"slow": {"fail_on": "never"}}}
+    return config
+
+
+SELECTIONS: dict[str, dict[str, Any]] = {
+    "tags": {"tags": ["nightly"]},
+    "skip_tags": {"skip_tags": ["slow"]},
+    "only": {"only": ["a within b", "big a"]},
+    "dataset": {"datasets": ["rows"]},
+    "family": {"tags": "input", "skip_tags": "nightly"},
+}
+
+
+@pytest.mark.parametrize("selection", sorted(SELECTIONS))
+def test_backends_select_the_same_checks(tmp_path, selection):
+    config = _tagged_scenario(tmp_path)
+    options = SELECTIONS[selection]
+    native_report = validate(config=config, backend="duckdb", **options)
+    full_report = validate(config=config, backend="polars", **options)
+    problems = _differences(_normalized(native_report), _normalized(full_report))
+    assert not problems, "\n".join(problems)
+    assert native_report.metadata.tag_fail_on == full_report.metadata.tag_fail_on
+    assert native_report.verdict() == full_report.verdict()
+
+
+def test_backends_reject_an_empty_selection(tmp_path):
+    from qavf.checks.selection import SelectionError
+
+    config = _tagged_scenario(tmp_path)
+    for backend in ("duckdb", "polars"):
+        with pytest.raises(SelectionError, match="matches no check"):
+            validate(config=config, backend=backend, tags=["nope"])
+
+
+def test_backends_agree_on_included_files_and_vars(tmp_path):
+    rows = _write(tmp_path, "rows.csv", "id,a,b\n1,1,2\n2,5,3\n")
+    _write(
+        tmp_path,
+        "shared.yaml",
+        "vars: {limit: 4}\n"
+        "datasets:\n"
+        f"  rows:\n    path: '{rows}'\n"
+        "    schema: {columns: {id: {dtype: int}, a: {dtype: int, le: '${vars.limit}'}}}\n",
+    )
+    config = _write(
+        tmp_path,
+        "qa.yaml",
+        "include: [shared.yaml]\n"
+        "vars: {limit: 3}\n"
+        "checks:\n"
+        "  - check: sql\n"
+        "    name: 'a over ${vars.limit}'\n"
+        "    sql: 'SELECT * FROM rows WHERE a > ${vars.limit}'\n",
+    )
+    native_report = validate(config=config, backend="duckdb")
+    full_report = validate(config=config, backend="polars")
+    problems = _differences(_normalized(native_report), _normalized(full_report))
+    assert not problems, "\n".join(problems)
+    assert {r.item_name for r in native_report.results_for("INP-007")} == {"a over 3"}

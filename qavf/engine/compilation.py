@@ -13,6 +13,7 @@ from types import MappingProxyType
 
 from pydantic import ValidationError
 
+from qavf.checks.selection import NOT_SELECTED
 from qavf.engine.registry import Rule, RuleRegistry, default_registry
 from qavf.plugins.registry import entry_point_scope
 from qavf.redaction import exception_details, redact_text
@@ -100,12 +101,19 @@ def _compile_rules(
 
     planned: list[Rule] = []
     excluded: dict[str, str] = {}
-    # Schema contracts always run; they come from each dataset's schema.
-    planned.extend(registry.get(rule_id)() for rule_id in CONTRACT_RULES if rule_id in registry)
+    applied = settings.selection
+    not_selected = applied.not_selected if applied is not None else frozenset()
+    # Schema contracts always run (for the selected datasets); they come from each
+    # dataset's schema.
+    planned.extend(_contracts(settings, registry, CONTRACT_RULES, excluded))
     list_driven: set[str] = set()
     for check in compiled:
         if not check.enabled:
-            excluded[check.name] = "disabled in the configuration"
+            excluded[check.name] = (
+                NOT_SELECTED
+                if check.placed.path in not_selected
+                else "disabled in the configuration"
+            )
         if check.definition.list_driven:
             if check.enabled:
                 list_driven.add(check.rule_id)
@@ -133,6 +141,25 @@ def _compile_rules(
     if problems:
         raise ConfigurationError("; ".join(problems))
     return RulePlan(tuple(planned), excluded)
+
+
+def _contracts(
+    settings: QAVFSettings,
+    registry: RuleRegistry,
+    rule_ids: tuple[str, ...],
+    excluded: dict[str, str],
+) -> list[Rule]:
+    """The schema contract rules, restricted by the run's selection."""
+    applied = settings.selection
+    available = [rule_id for rule_id in rule_ids if rule_id in registry]
+    if applied is None:
+        return [registry.get(rule_id)() for rule_id in available]
+    if not applied.contract_runs(None):
+        excluded.update(dict.fromkeys(available, NOT_SELECTED))
+        return []
+    datasets = applied.contract_datasets()
+    params = {} if datasets is None else {"datasets": datasets}
+    return [registry.get(rule_id)(params=params) for rule_id in available]
 
 
 def check_config_keys(settings: QAVFSettings) -> None:
