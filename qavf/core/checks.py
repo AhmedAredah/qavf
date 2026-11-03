@@ -205,51 +205,75 @@ class DatasetChecks:
         if not self.out.enabled("INP-006", name):
             return
         for check in self.spec.expressions_of(name):
-            label = check.name or check.expr
-            item_ids = (check.item_id,)
-            identity = {
-                "check_id": "row.expression",
-                "datasets": (name,),
-                "parameters": check.model_dump(mode="python"),
-            }
-            bad = (
-                f"({check.expr}) IS NOT TRUE"
-                if check.null_as == "fail"
-                else f"({check.expr}) IS FALSE"
+            self._expression(check)
+
+    def _expression(self, check):
+        name = self.data.name
+        label = check.label
+        item_ids = (check.item_id,)
+        identity = {
+            "check_id": "row.expression",
+            "datasets": (name,),
+            "parameters": check.model_dump(mode="python"),
+        }
+        unassessed = {
+            "check": f"{name}: {label}",
+            "severity": check.severity,
+            "item_ids": item_ids,
+            **identity,
+        }
+        try:
+            applicable = self._applicable(check.scope_condition())
+            scope = (
+                {} if check.where is None else wording.expression_scope(self.data.rows, applicable)
             )
-            try:
-                count, records = self._violations(bad)
-            except Exception as exc:
+            if applicable < check.min_applicable_rows:
                 self.out.report(
                     "INP-006",
                     name,
                     Status.ERROR,
-                    wording.expression_not_evaluated(label, name, str(exc)),
-                    check=f"{name}: {label}",
-                    severity=check.severity,
-                    item_ids=item_ids,
-                    **identity,
+                    wording.expression_too_few_applicable(
+                        label, name, applicable, check.where, check.min_applicable_rows
+                    ),
+                    metrics=scope,
+                    **unassessed,
                 )
-                continue
-            if not count:
-                self.out.passed(
-                    "INP-006", name, f"{name}: {label}", identity, item_id=check.item_id
-                )
-                continue
+                return
+            count, records = self._violations(check.violation_condition())
+        except Exception as exc:
             self.out.report(
                 "INP-006",
                 name,
-                Status.FAIL,
-                wording.expression_violations(count, self.data.rows, name, check.expr),
-                check=f"{name}: {label}",
-                severity=check.severity,
-                records=records,
-                count=count,
-                total=self.data.rows,
-                unit="rows",
-                item_ids=item_ids,
-                **identity,
+                Status.ERROR,
+                wording.expression_not_evaluated(label, name, str(exc)),
+                **unassessed,
             )
+            return
+        if not count:
+            self.out.passed("INP-006", name, f"{name}: {label}", identity, item_id=check.item_id)
+            return
+        self.out.report(
+            "INP-006",
+            name,
+            Status.FAIL,
+            wording.expression_violations(count, applicable, name, check.expr, check.where),
+            check=f"{name}: {label}",
+            severity=check.severity,
+            records=records,
+            count=count,
+            total=applicable,
+            unit="rows",
+            metrics=scope,
+            item_ids=item_ids,
+            **identity,
+        )
+
+    def _applicable(self, scope):
+        """The rows ``scope`` selects (every row without one)."""
+        if scope is None:
+            return self.data.rows
+        table = qi(self.expression_table)
+        return self.con.execute(f"SELECT count(*) FROM {table} WHERE {scope}").fetchone()[0]
 
     def _violations(self, bad):
         table, row = qi(self.expression_table), qi(self.data.row_column)

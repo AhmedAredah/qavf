@@ -94,6 +94,8 @@ class ExpressionItem(CheckItem):
     datasets by name in subqueries."""
     null_as: Literal["pass", "fail"] = "pass"
     """How a row whose expression evaluates to NULL counts (SQL CHECK semantics: pass)."""
+    min_applicable_rows: int = Field(default=0, ge=0, strict=True)
+    """With ``where``: fewer matching rows than this makes the check not assessed."""
 
 
 class SqlItem(CheckItem):

@@ -1142,6 +1142,8 @@ class ExpressionDefinition(CheckDefinition):
         item |= {key: value for key, value in params.items() if value is not None}
         if item.get("null_as") == "pass":
             item.pop("null_as")
+        if not item.get("min_applicable_rows"):
+            item.pop("min_applicable_rows", None)
         return [Decompiled(None, item)]
 
     def item_fields(self) -> dict[str, FieldSpec]:

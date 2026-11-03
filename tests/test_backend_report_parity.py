@@ -581,7 +581,35 @@ def _views_scenario(directory: Path) -> dict[str, Any]:
     }
 
 
+def _scoped_expression_scenario(directory: Path) -> dict[str, Any]:
+    """A filtered expression counts the rows its ``where`` selects (R4, R5, R8)."""
+    rows = "x\n5\n20\n" + "-1\n" * 99
+    d = _write(directory, "d.csv", rows)
+    return {
+        "datasets": {
+            "d": {
+                "path": d,
+                "checks": [
+                    {"check": "expression", "name": "lt10", "expr": "x < 10", "where": "x > 0"},
+                    {
+                        "check": "expression",
+                        "name": "none applicable",
+                        "expr": "x < 10",
+                        "where": "x > 100",
+                        "min_applicable_rows": 1,
+                    },
+                    {"check": "expression", "expr": "x > -5", "where": "x IS NULL"},
+                    {"check": "expression", "enabled": False},
+                ],
+            },
+        },
+        "checks": [{"check": "sql", "enabled": False}],
+        "run": {"require": ["lt10", "none applicable"]},
+    }
+
+
 SCENARIOS = {
+    "scoped_expression": _scoped_expression_scenario,
     "across": _across_scenario,
     "views": _views_scenario,
     "item_identity": _item_identity_scenario,

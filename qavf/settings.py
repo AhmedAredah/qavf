@@ -875,8 +875,37 @@ class ExpressionCheck(_Strict):
     description: str | None = None
     null_as: Literal["pass", "fail"] = "pass"
     """How a row whose expression evaluates to NULL counts (SQL CHECK semantics: pass)."""
+    where: str | None = None
+    """SQL condition selecting the rows the expression applies to (all rows when
+    omitted); rows where it is false or NULL are excluded, not counted as passing."""
+    min_applicable_rows: int = Field(default=0, ge=0, strict=True)
+    """With ``where``: fewer matching rows than this makes the check not assessed."""
     item_id: str | None = Field(default=None, exclude=True)
     """The check item's instance id (``datasets.<d>.checks[<i>]``); not a parameter."""
+
+    @model_validator(mode="after")
+    def _scoped(self) -> ExpressionCheck:
+        if self.where is None and self.min_applicable_rows:
+            raise ValueError("'min_applicable_rows' goes with 'where'")
+        return self
+
+    @property
+    def label(self) -> str:
+        """The check's name, or its condition as written (with its ``where``)."""
+        if self.name:
+            return self.name
+        return self.expr if self.where is None else f"{self.expr} where {self.where}"
+
+    def scope_condition(self) -> str | None:
+        """The SQL condition selecting the applicable rows (``None``: every row)."""
+        return None if self.where is None else f"coalesce(({self.where}), false)"
+
+    def violation_condition(self) -> str:
+        """The SQL condition selecting the applicable rows that violate ``expr``."""
+        fallback = "true" if self.null_as == "pass" else "false"
+        bad = f"NOT coalesce(({self.expr}), {fallback})"
+        scope = self.scope_condition()
+        return bad if scope is None else f"{scope} AND {bad}"
 
 
 class SqlAssertion(_Strict):
@@ -1292,18 +1321,18 @@ def expression_check(item: CheckItem, item_id: str | None = None) -> ExpressionC
     """The row expression of an ``expression`` check item (with ``item_id``, its
     instance id).
 
-    A ``where`` condition limits the rows assessed: rows it does not select pass.
+    A ``where`` condition limits the rows assessed: the rows it does not select are
+    excluded and do not count towards the failure fraction.
     """
     settings = item.settings
-    expr = settings.get("expr")
-    if item.where is not None and isinstance(expr, str):
-        expr = f"CASE WHEN coalesce(({item.where}), false) THEN ({expr}) ELSE true END"
     return ExpressionCheck(
-        expr=expr,
+        expr=settings.get("expr"),
         name=item.name,
         severity=item.severity,
         description=item.description,
         null_as=settings.get("null_as", "pass"),
+        where=item.where,
+        min_applicable_rows=settings.get("min_applicable_rows", 0),
         item_id=item_id,
     )
 

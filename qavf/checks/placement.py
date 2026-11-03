@@ -167,7 +167,7 @@ def expression_errors(item: CheckItem, scope: Scope) -> list[str]:
     if scope.dataset is None:
         return [f"{scope.at('check')}: expression goes in a dataset's checks list"]
     settings = item.settings
-    unknown = sorted(set(settings) - {"expr", "null_as"})
+    unknown = sorted(set(settings) - set(ROW_CHECK_SETTINGS["expression"]))
     if unknown:
         return [f"{scope.at(unknown[0])}: unknown setting of the expression check"]
     if not isinstance(settings.get("expr"), str) or not settings["expr"].strip():
@@ -200,7 +200,7 @@ ROW_CHECKS = {"expression": expression_errors, "sql": sql_errors}
 """Checks evaluated by both backends, validated without the rule implementations."""
 
 ROW_CHECK_SETTINGS: dict[str, tuple[str, ...]] = {
-    "expression": ("expr", "null_as"),
+    "expression": ("expr", "null_as", "min_applicable_rows"),
     "sql": ("sql",),
 }
 """The own settings of the ``expression`` and ``sql`` checks."""
@@ -265,7 +265,10 @@ def row_check_errors(settings: QAVFSettings) -> list[str]:
     problems = []
     for placed in placed_items(settings):
         validate = ROW_CHECKS.get(placed.item.check)
-        if validate is not None:
+        # Like every other check, one switched off before any settings were given
+        # is a stub: its required settings may be missing.
+        stub = not placed.item.enabled and not placed.item.settings
+        if validate is not None and not stub:
             problems.extend(validate(placed.item, placed.scope))
     problems.extend(default_problems(settings.defaults, ROW_CHECK_SETTINGS))
     return problems + name_errors(settings)

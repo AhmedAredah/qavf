@@ -446,11 +446,32 @@ def foreign_keys_resolved(count: int) -> str:
 
 
 # ---------------------------------------------------------------- INP-006/007
-def expression_violations(count: int, rows: int, dataset: str, expression: str) -> str:
+def expression_violations(
+    count: int, rows: int, dataset: str, expression: str, where: str | None = None
+) -> str:
+    """``rows`` are the rows the expression applies to: those matching ``where``."""
+    scope = "" if where is None else f" matching 'where: {where}'"
     return (
-        f"{plural(count, 'row')} of {rows:,} in {dataset} "
+        f"{plural(count, 'row')} of {rows:,}{scope} in {dataset} "
         f"{agree(count, 'violates', 'violate')} '{expression}'."
     )
+
+
+def expression_too_few_applicable(
+    label: str, dataset: str, rows: int, where: str, minimum: int
+) -> str:
+    return f"Not assessed: expression '{label}' on {dataset}: " + too_few_applicable(
+        rows, where, minimum
+    )
+
+
+def expression_scope(population: int, applicable: int) -> dict[str, int]:
+    """The metrics of a filtered expression: its rows, those it applies to and the rest."""
+    return {
+        "population_rows": population,
+        "applicable_rows": applicable,
+        "excluded_rows": population - applicable,
+    }
 
 
 def expression_not_evaluated(label: str, dataset: str, reason: str) -> str:

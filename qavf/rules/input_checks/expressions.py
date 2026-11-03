@@ -22,6 +22,8 @@ from qavf.input_rules import (
     assertions_hold,
     expression_input_unavailable,
     expression_not_evaluated,
+    expression_scope,
+    expression_too_few_applicable,
     expression_violations,
     expressions_hold,
 )
@@ -82,10 +84,8 @@ class ExpressionRule(_SelectsDatasets):
                 if _must_assess(ctx, dataset, selection):
                     failures += [
                         Finding.unassessed(
-                            expression_input_unavailable(
-                                expression.name or expression.expr, dataset, reason
-                            ),
-                            check=f"{dataset}: {expression.name or expression.expr}",
+                            expression_input_unavailable(expression.label, dataset, reason),
+                            check=f"{dataset}: {expression.label}",
                             severity=expression.severity,
                             item_ids=_ids(expression),
                             **_expression_identity(dataset, expression),
@@ -102,10 +102,8 @@ class ExpressionRule(_SelectsDatasets):
                         continue
                     failures.extend(
                         Finding.unassessed(
-                            expression_input_unavailable(
-                                expression.name or expression.expr, dataset, _reason(exc)
-                            ),
-                            check=f"{dataset}: {expression.name or expression.expr}",
+                            expression_input_unavailable(expression.label, dataset, _reason(exc)),
+                            check=f"{dataset}: {expression.label}",
                             severity=expression.severity,
                             item_ids=_ids(expression),
                             **_expression_identity(dataset, expression),
@@ -139,51 +137,98 @@ class ExpressionRule(_SelectsDatasets):
         passed: list[str] = []
         identities: list[dict[str, Any]] = []
         passed_ids: list[str] = []
-        table = quote_identifier(dataset)
         located = ViolatingRows(ctx, dataset, observed)
         for expression in ctx.specs[dataset].expressions_of(dataset):
             identity = _expression_identity(dataset, expression)
-            label = expression.name or expression.expr
-            fallback = "true" if expression.null_as == "pass" else "false"
-            condition = f"NOT coalesce(({expression.expr}), {fallback})"
-            query = f"SELECT * FROM {table} WHERE {condition}"
-            try:
-                bad, count = sample_observed(
-                    ctx, query, {dataset: observed}, ctx.evidence_limit, normalize_missing=True
-                )
-            except Exception as exc:
-                # Each expression stands alone: one that cannot run never hides the
-                # results of the others.
-                failures.append(
-                    Finding.unassessed(
-                        expression_not_evaluated(label, dataset, _reason(exc)),
-                        check=f"{dataset}: {label}",
-                        severity=expression.severity,
-                        item_ids=_ids(expression),
-                        **identity,
-                    )
-                )
+            finding = ScopedExpression(ctx, dataset, rows, observed, expression).finding(located)
+            if finding is not None:
+                failures.append(finding)
                 continue
-            if not count:
-                passed.append(f"{dataset}: {label}")
-                identities.append(identity)
-                passed_ids.extend(_ids(expression))
-                continue
-            bad = located.sample(condition, bad)
-            failures.append(
-                Finding.fail(
-                    expression_violations(count, rows, dataset, expression.expr),
-                    check=f"{dataset}: {label}",
-                    severity=expression.severity,
-                    affected=bad,
-                    affected_count=count,
-                    total_records=rows,
-                    unit="rows",
-                    item_ids=_ids(expression),
-                    **identity,
-                )
-            )
+            passed.append(f"{dataset}: {expression.label}")
+            identities.append(identity)
+            passed_ids.extend(_ids(expression))
         return failures, passed, identities, passed_ids
+
+
+class ScopedExpression:
+    """One row expression on an observed dataset, assessed on the rows its
+    ``where`` selects: those rows are the denominator of its failures."""
+
+    def __init__(
+        self,
+        ctx: DataContext,
+        dataset: str,
+        rows: int,
+        observed: Observation,
+        expression: ExpressionCheck,
+    ) -> None:
+        self.ctx = ctx
+        self.dataset = dataset
+        self.rows = rows
+        self.observed = observed
+        self.expression = expression
+
+    def finding(self, located: ViolatingRows) -> Finding | None:
+        """The failure or not-assessed finding, or ``None`` when the expression holds."""
+        expression, dataset = self.expression, self.dataset
+        identity = _expression_identity(dataset, expression)
+        common: dict[str, Any] = {
+            "check": f"{dataset}: {expression.label}",
+            "severity": expression.severity,
+            "item_ids": _ids(expression),
+            **identity,
+        }
+        condition = expression.violation_condition()
+        try:
+            applicable = self._applicable()
+            scope = {} if expression.where is None else expression_scope(self.rows, applicable)
+            if applicable < expression.min_applicable_rows:
+                return Finding.unassessed(
+                    expression_too_few_applicable(
+                        expression.label,
+                        dataset,
+                        applicable,
+                        expression.where or "",
+                        expression.min_applicable_rows,
+                    ),
+                    metrics=scope,
+                    **common,
+                )
+            table = quote_identifier(dataset)
+            bad, count = self._sample(f"SELECT * FROM {table} WHERE {condition}")
+        except Exception as exc:
+            # Each expression stands alone: one that cannot run never hides the
+            # results of the others.
+            return Finding.unassessed(
+                expression_not_evaluated(expression.label, dataset, _reason(exc)), **common
+            )
+        if not count:
+            return None
+        return Finding.fail(
+            expression_violations(count, applicable, dataset, expression.expr, expression.where),
+            affected=located.sample(condition, bad),
+            affected_count=count,
+            total_records=applicable,
+            unit="rows",
+            metrics=scope,
+            **common,
+        )
+
+    def _applicable(self) -> int:
+        scope = self.expression.scope_condition()
+        if scope is None:
+            return self.rows
+        _, count = self._sample(f"SELECT 1 FROM {quote_identifier(self.dataset)} WHERE {scope}", 0)
+        return count
+
+    def _sample(self, query: str, limit: int | None = None) -> tuple[pl.DataFrame, int]:
+        return sample_observed(
+            self.ctx,
+            query,
+            {self.dataset: self.observed},
+            self.ctx.evidence_limit if limit is None else limit,
+            normalize_missing=True,
+        )
 
 
 def _ids(check: ExpressionCheck | SqlAssertion) -> tuple[str, ...]:
