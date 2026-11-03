@@ -165,6 +165,47 @@ Reports written by earlier versions still load.
   common input reader (as a path crosswalk is), and an `ST_Read` file's size is
   checked before the fetch and the file verified unchanged after it. The path form
   had been read directly, outside admission and source identity.
+- A filtered `expression` is assessed on the rows its `where` selects: its failures
+  read `1 row of 2 matching 'where: x > 0' in d violates 'x < 10'` with those rows
+  as `total_records` and `population_rows`, `applicable_rows` and `excluded_rows`
+  in its metrics, on both backends. It had counted every row of the dataset and
+  shown a compiled `CASE WHEN` expression instead of the configured `expr`.
+- `expression` takes `min_applicable_rows` (with `where`): fewer matching rows leave
+  it not assessed instead of passing vacuously, as for column conditions.
+- `{check: expression, enabled: false}` and `{check: sql, enabled: false}` stubs are
+  accepted like other disabled checks without settings.
+- `where` is documented, advertised in the JSON Schema and accepted only where it is
+  honoured (`expression`, `compare`, and plugin checks whose parameters declare it,
+  which now receive it); other checks reject it and point at views or a filtered
+  dataset.
+- A plugin check placed on dataset `a` that names `dataset: b` is a configuration
+  error; it had run on `b` while reporting on `a`. Plugin results name the dataset
+  they are placed on, and compiling no longer changes the item's settings.
+- Range shorthand (`2016..2024`, `{from, to, step}`) expands only in check settings
+  declared as lists, nested ones included (`key_grid` `dimensions.<c>.values`); a
+  text setting such as an `outliers` `column: 2016..2024` and plugin settings keep
+  the value as written. The JSON Schema offers ranges only on those settings.
+- `across` rejects a repeated connection, copy name or template value (also as text:
+  `2023` and `'2023'`) instead of collapsing the copies into one.
+- Included files sharing YAML anchors merge each pair of shared parts once, and every
+  file is measured before it is merged; a few kilobytes had taken seconds and
+  hundreds of megabytes before the size limit applied.
+- Both editor JSON Schemas (full and DuckDB) accept `${vars.name}` in every setting
+  (column limits, `min_rows`, a check's `enabled` and `severity`, ...), a single
+  `include` string, comparison levels and steps written by name or with their own
+  parameters, a bucket written as text, and a single `datasets` selector list; the
+  documented example configurations validate against them.
+- `$${NAME}` and `$${vars.name}` write a literal `${NAME}` / `${vars.name}` that is
+  never substituted, also when settings are serialized and read back.
+- Booleans are no longer read as counts (`min_rows: true` had meant 1): row counts,
+  budgets and limits reject `true`/`false`. A YAML boolean in a str column's
+  `isin`/`notin` or in `true_values`/`false_values` is rejected with a hint to quote
+  `yes`/`no`/`on`/`off`.
+- File paths in an included file's `defaults` (a `matches_baseline` `path`, ...) are
+  rebased like the same settings on a check item.
+- A records level's `categorical` naming a column neither aligned side has is a
+  configuration error with suggestions, like `tolerances`; it had left the level not
+  assessed during evaluation.
 
 ## [Unreleased]
 
