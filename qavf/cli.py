@@ -359,12 +359,60 @@ class _InterruptCancels:
             signal.signal(number, previous)
 
 
+class RunInterrupted(KeyboardInterrupt):
+    """An interrupt stopped an isolated run; its worker was stopped, no report accepted."""
+
+    def __init__(self, number: int) -> None:
+        super().__init__(number)
+        self.number = number
+
+    @property
+    def signal_name(self) -> str:
+        """The interrupting signal's name, e.g. ``SIGTERM``."""
+        try:
+            return signal.Signals(self.number).name
+        except ValueError:
+            return f"signal {self.number}"
+
+
+class _InterruptStops(_InterruptCancels):
+    """While an isolated run waits, an interrupt stops it: the supervisor stops the worker.
+
+    The isolated worker has no cooperative cancellation, so the first Ctrl-C, SIGTERM
+    or Ctrl-Break (SIGBREAK) raises :class:`RunInterrupted` in the waiting supervisor,
+    whose cleanup terminates the worker (its process group or Windows job) before
+    the command reports the run cancelled. Later interrupts are ignored while that
+    cleanup runs, so it cannot be cut short. Without this handler SIGTERM would end
+    the parent at once and leave the worker, in its own session, running.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(CancellationToken())
+
+    def handle(self, number: int, frame: Any) -> None:
+        if self.token.cancelled:
+            return
+        self.token.cancel()
+        raise RunInterrupted(number)
+
+
+def _interrupts(in_process: bool, token: CancellationToken) -> _InterruptCancels:
+    """The interrupt handling of a run: cooperative cancellation in process, else a stop."""
+    return _InterruptCancels(token) if in_process else _InterruptStops()
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     from qavf.checks.selection import Selection, narrow
     from qavf.reports.presentation import HtmlLimits
 
     _use("load_settings", "ProtectedInputs")
     settings = load_settings(args.config)
+    in_process = settings.engine.execution_mode == "in_process"
+    if args.progress and not in_process:
+        raise ValueError(
+            "--progress needs engine.execution_mode: in_process; an isolated worker "
+            "reports no progress events"
+        )
     if args.no_parallel:
         settings.engine.parallel = False
     if args.fail_on:
@@ -380,30 +428,38 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _check_report_destinations(html_path, json_path)
     protected = ProtectedInputs.of_settings(settings, args.config)
     protected.check(html_path, json_path)
-    token = CancellationToken()
-    on_event = _ProgressLines() if args.progress else None
-    in_process = settings.engine.execution_mode == "in_process"
     selection = Selection.of(
         only=args.only, tags=args.tags, skip_tags=args.skip_tags, datasets=args.dataset
     )
-    with _InterruptCancels(token):
-        if _native(args):
-            from qavf.api import validate
+    # In process, the token and events reach the run; an isolated worker gets neither
+    # (--progress was refused above), so an interrupt stops it instead.
+    token = CancellationToken()
+    on_event = _ProgressLines() if args.progress else None
+    control = RunControl(on_event, token) if in_process else None
+    try:
+        with _interrupts(in_process, token):
+            if _native(args):
+                from qavf.api import validate
 
-            report = validate(
-                config=settings,
-                backend="duckdb",
-                on_event=on_event if in_process else None,
-                cancel=token if in_process else None,
-                only=selection.only,
-                tags=selection.tags,
-                skip_tags=selection.skip_tags,
-                datasets=selection.datasets,
-            )
-        else:
-            _use("QARunner")
-            control = RunControl(on_event, token) if in_process else None
-            report = QARunner(narrow(settings, selection)).run(control=control)
+                report = validate(
+                    config=settings,
+                    backend="duckdb",
+                    on_event=on_event,
+                    cancel=token if in_process else None,
+                    only=selection.only,
+                    tags=selection.tags,
+                    skip_tags=selection.skip_tags,
+                    datasets=selection.datasets,
+                )
+            else:
+                _use("QARunner")
+                report = QARunner(narrow(settings, selection)).run(control=control)
+    except RunInterrupted as interrupted:
+        print(
+            f"QA CANCELLED: {interrupted.signal_name} stopped the isolated worker; "
+            "no report was written"
+        )
+        return EXIT_QA_FAILED
     fail_on = settings.run.fail_on
     with protected.publication():
         written = []

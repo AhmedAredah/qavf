@@ -37,6 +37,9 @@ _PROC_ROOT = Path("/proc")
 _REAP_TIMEOUT_S = 2.0
 _CREATE_NO_WINDOW = 0x08000000
 _CPU_POLL_S = 0.05
+_INTERRUPT_POLL_S = 0.1
+"""Longest single wait for the worker: signal handlers (an interrupt that stops the
+run) only run between waits, and a Windows process wait cannot be interrupted."""
 # macOS <sys/proc_info.h>: PROC_PGRP_ONLY, PROC_PIDTBSDINFO and the 136-byte
 # struct proc_bsdinfo with pbi_status at offset 4 and pbi_pgid at offset 100.
 _PROC_PGRP_ONLY = 2
@@ -222,13 +225,12 @@ def _wait(
     worker before its full allowance would break the wall-time contract.
     """
     polling = job is not None and job.limits_cpu
+    poll = _CPU_POLL_S if polling else _INTERRUPT_POLL_S
     while True:
         remaining = (
             max(0.0, timeout - (time.monotonic() - started)) if timeout is not None else None
         )
-        step = remaining
-        if polling:
-            step = _CPU_POLL_S if remaining is None else min(remaining, _CPU_POLL_S)
+        step = poll if remaining is None else min(remaining, poll)
         try:
             return process.wait(timeout=step)
         except subprocess.TimeoutExpired:
