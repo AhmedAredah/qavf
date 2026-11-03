@@ -823,6 +823,21 @@ class DatasetSpec(_Strict):
     checks: list[CheckItem] = Field(default_factory=list)
     """Checks of this dataset, e.g. ``{check: missing_periods, series: aadt_by_site}``.
     ``qavf list-checks`` lists the checks and their settings."""
+    across: list[str] | dict[str, dict[str, Any] | list[str | int] | None] | None = None
+    """Copy this dataset across several sources: a list of connection names, a mapping
+    of copy names to the source settings that differ (``connection``, ``path``,
+    ``secret``, ``table``, ...), or ``{key: [values]}`` filling ``{key}`` in the
+    source's path or table. Each copy is a dataset of its own, ``<dataset>@<copy>``;
+    ``<dataset>@*`` lists every copy."""
+
+    @model_validator(mode="after")
+    def _expanded(self) -> DatasetSpec:
+        if self.across is not None:
+            raise ValueError(
+                "across is expanded when a configuration is validated as a whole; "
+                "give the copies as datasets of their own here"
+            )
+        return self
 
     @property
     def expressions(self) -> list[ExpressionCheck]:
@@ -1314,6 +1329,7 @@ class QAVFSettings(_Strict):
         reject_legacy(data)
         if not isinstance(data, dict):
             return data
+        from qavf.checks.across import AcrossExpansion
         from qavf.checks.reuse import ItemPreparation
         from qavf.composition import VariableSubstitution
 
@@ -1322,7 +1338,7 @@ class QAVFSettings(_Strict):
                 "include is resolved when a configuration file is read (load_settings, "
                 "settings_from_text or a configuration path); merge mappings yourself"
             )
-        return ItemPreparation.apply(VariableSubstitution.apply(data))
+        return ItemPreparation.apply(AcrossExpansion.apply(VariableSubstitution.apply(data)))
 
     @property
     def assertions(self) -> list[SqlAssertion]:

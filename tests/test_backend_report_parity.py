@@ -463,7 +463,36 @@ def _named_checks_scenario(directory: Path) -> dict[str, Any]:
     }
 
 
+def _across_scenario(directory: Path) -> dict[str, Any]:
+    """One dataset copied across files: each copy runs its own contract and checks."""
+    sites = {"a": ["1,1", "2,2"], "b": ["1,1", "1,-2"], "c": ["1,1", "2,7"]}
+    for site, rows in sites.items():
+        _write(directory, f"sites/{site}.csv", "\n".join(["id,x", *rows, ""]))
+    return {
+        "datasets": {
+            "counts": {
+                "path": (directory / "sites" / "{site}.csv").as_posix(),
+                "across": {"site": ["a", "b", "c"]},
+                "schema": {
+                    "columns": {"id": {"dtype": "int"}, "x": {"dtype": "int", "ge": 0}},
+                    "primary_key": ["id"],
+                },
+                "checks": [{"check": "expression", "name": "small", "expr": "x < 5"}],
+            }
+        },
+        "checks": [
+            {
+                "check": "sql",
+                "name": "copies agree on ids",
+                "sql": 'SELECT id FROM "counts@a" EXCEPT SELECT id FROM "counts@c"',
+            }
+        ],
+        "run": {"require": ["counts@*"]},
+    }
+
+
 SCENARIOS = {
+    "across": _across_scenario,
     "named_checks": _named_checks_scenario,
     "columns": _columns_scenario,
     "statistics": _statistics_scenario,

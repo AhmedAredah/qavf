@@ -12,7 +12,9 @@ import duckdb
 import polars as pl
 from pydantic import BaseModel
 
+from qavf.checks.across import AcrossExpansion
 from qavf.checks.legacy import reject_legacy
+from qavf.composition import VariableSubstitution
 from qavf.configuration import ConfigurationGraph
 from qavf.settings import (
     DatasetSpec,
@@ -288,6 +290,9 @@ def prepare_configuration(
     validate_config_mapping_keys(raw)
     graph = ConfigurationGraph()
     graph.check(raw)
+    # Datasets copied ``across`` sources become their copies before any dataset is
+    # validated or matched with an input (variables first: ``across`` may use them).
+    raw = AcrossExpansion.apply(VariableSubstitution.apply(raw))
     configured = raw.get("datasets", {})
     if not isinstance(configured, Mapping):
         raise TypeError("config.datasets must be a mapping of named dataset specifications")

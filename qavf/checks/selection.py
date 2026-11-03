@@ -12,10 +12,12 @@ native DuckDB backend can apply a selection.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from qavf.checks.across import ALL_COPIES, COPY_SEPARATOR, expand_dataset_names
 from qavf.checks.placement import ROW_CHECKS, PlacedItem, placed_items
 
 if TYPE_CHECKING:
@@ -174,6 +176,12 @@ def narrow(
         return settings
     if families is None:
         families = builtin_families()
+    if any(COPY_SEPARATOR + ALL_COPIES in name for name in selection.datasets):
+        try:
+            copies = expand_dataset_names(selection.datasets, settings.datasets, "--dataset")
+        except ValueError as exc:
+            raise SelectionError(str(exc).removeprefix("--dataset: ")) from None
+        selection = dataclasses.replace(selection, datasets=tuple(copies))
     unknown = [name for name in selection.datasets if name not in settings.datasets]
     if unknown:
         known = ", ".join(settings.datasets) or "none"

@@ -51,6 +51,13 @@ These changes break existing configurations. Convert a configuration once with
   on both backends; built-in checks carry their family as a tag. Selecting nothing
   is an error. `run.tags: {<tag>: {fail_on: <severity>|never}}` sets a pass/fail
   policy per tag; results carry their item's `tags`.
+- **One dataset across many sources.** A dataset's `across` copies it, with its
+  schema, checks, series, metrics and views, once per source: a list of connection
+  names, a mapping of copy names to the source settings that differ (`connection`,
+  `path` or URL, `secret`, `table`), or `{city: [houston, dallas]}` filling `{city}`
+  in the source's path or table. Each copy is a dataset of its own,
+  `counts@houston`; `counts@*` lists every copy in a check's `datasets`,
+  `run.require` and `--dataset`.
 - `qavf migrate` turns inline series and metrics into named `series`/`metrics`
   entries, merging identical ones (`<value>_by_<group>`).
 - The demo uses a named series and metric and `vars`.
