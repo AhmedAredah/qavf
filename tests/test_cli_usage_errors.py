@@ -86,9 +86,7 @@ def test_usage_errors_omit_the_internal_location_unless_verbose(tmp_path: Path, 
     assert ".py:" in capsys.readouterr().err
 
 
-def test_config_validation_error_names_the_field_without_internals(
-    tmp_path: Path, capsys
-) -> None:
+def test_config_validation_error_names_the_field_without_internals(tmp_path: Path, capsys) -> None:
     config = tmp_path / "qavf.yaml"
     config.write_text("project: x\nrun: {fail_on: NOPE}\n", encoding="utf-8")
     assert main(["run", "-c", str(config), "--backend", "duckdb"]) == EXIT_USAGE

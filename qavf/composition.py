@@ -114,9 +114,7 @@ class IncludedPaths:
         self.directory = directory
         self.root = root
 
-    def rebase(
-        self, raw: dict[str, Any], model: type[BaseModel] | None = None
-    ) -> dict[str, Any]:
+    def rebase(self, raw: dict[str, Any], model: type[BaseModel] | None = None) -> dict[str, Any]:
         """``raw`` (an included file's content) with its relative paths rebased.
 
         ``model`` describes ``raw`` (a QAVF configuration by default).

@@ -97,9 +97,11 @@ class ResourceLimits:
             )
         values = dict(raw)
         temp_dir = values.get("temp_dir")
-        if base_dir is not None and isinstance(temp_dir, str) and temp_dir.strip():
-            if not Path(temp_dir).is_absolute():
-                values["temp_dir"] = base_dir / temp_dir
+        relative = (
+            isinstance(temp_dir, str) and temp_dir.strip() and not Path(temp_dir).is_absolute()
+        )
+        if base_dir is not None and relative:
+            values["temp_dir"] = base_dir / str(temp_dir)
         try:
             return cls(**values)
         except ValueError as exc:
