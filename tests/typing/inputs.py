@@ -62,3 +62,10 @@ def contracts() -> None:
     profile_input(FrameLookalike())  # type: ignore[arg-type]
     explain(42, schema={})  # type: ignore[arg-type]
     profile_input(42)  # type: ignore[arg-type]
+
+
+def public_types() -> None:
+    from qavf import CheckIdentity
+
+    CheckIdentity(rule_id="INP-001", check_id="dtype")
+    CheckIdentity(rule_id="INP-001")  # type: ignore[call-arg]

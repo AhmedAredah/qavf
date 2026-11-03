@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     )
     from qavf.regression.models import ComparisonResult
     from qavf.reports.html import render_html, write_html
-    from qavf.reports.models import QAReport, RuleResult
+    from qavf.reports.models import CheckIdentity, QAReport, RuleResult
     from qavf.run_control import CancellationToken, RunEvent
     from qavf.settings import QAVFSettings, load_settings, settings_from_text
     from qavf.sources import DataSource, SourceParams
