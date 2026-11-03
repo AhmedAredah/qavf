@@ -163,9 +163,10 @@ def config_json_schema(registry: RuleRegistry, sources: SourceRegistry) -> dict[
     schema["properties"]["$schema"] = {"type": "string"}
     schema["title"] = "QAVF configuration"
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    from qavf.checks.schema import accept_reuse_values
     from qavf.schema_hints import apply_ui_hints
 
-    return apply_ui_hints(schema)
+    return apply_ui_hints(accept_reuse_values(schema))
 
 
 def write_json_schema(schema: Mapping[str, Any]) -> str:

@@ -9,6 +9,15 @@
 
 project: Reference configuration
 
+# include: [shared/contracts.yaml]   # other files merged first; this file wins on conflicts
+
+vars:                                 # named values, used as ${vars.<name>} in any value
+  max_daily_change: 0.30
+  years: 2020..2024                   # a range: every value from 2020 to 2024
+
+defaults:                             # settings per check name, unless an item sets its own
+  entity_outliers: {method: modified_zscore}
+
 # ---------------------------------------------------------------------------
 # datasets: name -> where the data comes from + what it must look like
 # ---------------------------------------------------------------------------
@@ -107,14 +116,21 @@ datasets:
                avg(value) AS value
         FROM read_parquet('data/readings/*.parquet')
         GROUP BY ALL                  -- temporal checks need a numeric time: day_number
+    series:                           # time series named by temporal checks
+      daily_mean: {value: value, group_by: [station], time_column: day_number,
+                   aggregate: mean}   # sum (default) | mean | count | min | max | first | last
+                                      # (order_by) | weighted_mean (weight) | none
+    metrics:                          # per-entity metrics named by spatial checks
+      station_value: {value: value, entity: station}   # per: <dataset>.<column> normalizes
+    views:                            # named slices, used as daily.<view> like a dataset
+      recent: {where: day_number >= 1500, columns: [station, day_number, value]}
     checks:
       - check: change_rate
-        series: {value: value, group_by: [station], time_column: day_number,
-                 aggregate: mean}     # sum (default) | mean | count | min | max | first | last
-                                      # (order_by) | weighted_mean (weight) | none
-        max: 0.30
+        series: daily_mean            # or an inline mapping; other_dataset.name reaches another's
+        max: ${vars.max_daily_change}
+        tags: [nightly]               # select with qavf run --tags / --skip-tags
       - check: entity_outliers
-        metric: {value: value, entity: station}
+        metric: station_value
         method: modified_zscore       # zscore | modified_zscore | iqr
         threshold: 3.5
       - check: matches_baseline
@@ -320,6 +336,8 @@ run:
   fail_on: ERROR                      # CLI exit code 1 at this severity or above
   fail_on_incomplete: true            # also fail when a configured check was not assessed
   require: [readings, known station]  # must be assessed: check names or datasets
+  tags:                               # pass/fail policy per tag (families count too)
+    nightly: {fail_on: WARNING}       # a severity, or never
 
 engine:
   parallel: true
