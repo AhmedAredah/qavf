@@ -115,6 +115,18 @@ Reports written by earlier versions still load.
   library file and line (shown with `-v`).
 - `mypy` checks the bodies of unannotated functions too (`check_untyped_defs`).
 
+### Performance
+
+- A row expression or `where` condition no longer reads every column of every
+  dataset into one native component. The parser proves the columns it names and the
+  datasets its subqueries read; only those are retained or joined. Unprovable SQL
+  keeps the conservative plan, and `qavf explain` and the report's `resource_usage`
+  say why. The Polars backend releases datasets an expression does not read.
+- A SQL check with evidence counts its failing rows and keeps its first rows by
+  every column in one evaluation that holds only the evidence rows, on both
+  backends, instead of staging every failing row first.
+- `scripts/benchmark_local_performance.py` measures both.
+
 ### Fixed
 
 - `qavf run` prints result labels on a console that is not UTF-8 (e.g. a Windows

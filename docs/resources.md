@@ -167,7 +167,47 @@ common row-budget, retry and normalization policies. Retries require an explicit
 transient error and a retry-safe source. Native scan plans may execute more than
 once across separate checks; volatile or externally changing input should use an
 explicit consistent snapshot. A SQL assertion's count and evidence are derived
-from one materialized evaluation within that assertion.
+from one evaluation within that assertion. That evaluation keeps only the exact
+count and the first `max_affected_records` rows in `ORDER BY ALL` order (a bounded
+top-N over whole rows), not every failing row; a result whose rows DuckDB cannot
+compare as whole rows is staged in temporary storage instead. With
+`max_affected_records: 0` it is only counted.
+
+### Projection and SQL dependencies
+
+The native backend reads only the columns a dataset's checks use and loads
+datasets that share no check as separate components, each released after its
+checks. Row expressions and `where` conditions take part: DuckDB's parser proves
+which columns a predicate names, and which datasets its subqueries read. A
+dataset read by another's subquery joins that dataset's component and keeps every
+column, as does the expression's own dataset (a subquery may bind any of its
+columns). Expression evidence shows whole rows, so a dataset with an expression
+keeps every column unless `max_affected_records` is `0`.
+
+SQL whose reads cannot be proven (SQL assertions, table functions, qualified or
+unknown relations such as views, unparseable text) keeps the conservative plan:
+one component with every column of every dataset. `qavf explain --backend duckdb`
+lists each dataset's planned columns, its component and why it keeps every
+column, and `projection_fallback` names the SQL that forced the conservative plan;
+a native report records the same reasons under `resource_usage`. On the Polars
+backend the same analysis bounds how long an expression keeps other datasets.
+Should a projection ever miss a column, the expression fails to bind and is
+reported not assessed; it never passes.
+
+`scripts/benchmark_local_performance.py` measures both in fresh processes. On one
+Windows workstation (20 Parquet datasets of 200,000 rows and 9 columns, one local
+expression; and one SQL assertion failing all 2,000,000 rows, 20 evidence rows):
+
+| Workload | Before | After |
+|---|---|---|
+| Expression, native: components / retained columns / Parquet bytes | 1 / 180 / 1,213 MB | 20 / 28 / 76 MB |
+| Expression, native: wall time / peak RSS | 12.2 s / 2.56 GB | 5.6 s / 0.42 GB |
+| Assertion, native: wall time / peak RSS | 9.5 s / 2.02 GB | 10.0 s / 1.67 GB |
+| Assertion, Polars: outcome / wall time / peak RSS | not assessed (spill cap reached) / 7.9 s / 0.50 GB | 2,000,000 counted / 9.4 s / 0.47 GB |
+
+The native assertion's peak is mostly its loaded input; the failing rows themselves
+are no longer staged. Before, the Polars backend reached its default spill cap while
+staging the failing rows. Numbers vary by machine; run the script to compare a change.
 
 Scoped batch consumers keep readers, source identities and connection reservations
 alive until complete consumption. A retry creates fresh consumer state; an incomplete
