@@ -90,7 +90,7 @@ def missing_projection(schema: Mapping[str, pl.DataType], columns: Mapping[str, 
 
 
 def sample_statement(query: str, limit: int, *, ordered: bool = False) -> str:
-    """Count and sample one evaluation, with DuckDB enforcing memory/spill limits."""
+    """Count and sample one staged evaluation (the fallback of an ordered sample)."""
     if limit < 0:
         raise ValueError("sample limit must be non-negative")
     body = normalize_single_query(query)
@@ -108,7 +108,7 @@ class BoundedSample:
 
     The result is read once from DuckDB's Arrow stream, batch by batch, so no copy
     of the complete result is staged (a materialized CTE writes all of it to
-    temporary storage). Rows keep the result's order: the same unordered sample.
+    A query whose sample must be ordered uses :class:`~qavf.ordered_sample.OrderedSample`.
     A query whose sample must be ordered keeps :func:`sample_statement`.
     """
 

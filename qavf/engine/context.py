@@ -38,6 +38,7 @@ from qavf.engine.sql import (
     sample_statement,
     sql_table_names,
 )
+from qavf.ordered_sample import OrderedSample
 from qavf.redaction import exception_details, redact_text
 from qavf.reports.models import DatasetInfo
 from qavf.settings import (
@@ -61,7 +62,12 @@ from qavf.sources.errors import redacted_error
 from qavf.sources.execution import SourceOperations
 from qavf.sources.frames import as_polars
 from qavf.sources.native import OwnedConnection
-from qavf.sources.sql import quote_identifier, referenced_connections, resolve_sql_paths
+from qavf.sources.sql import (
+    normalize_single_query,
+    quote_identifier,
+    referenced_connections,
+    resolve_sql_paths,
+)
 from qavf.sources.typed import needs_typed_sql_binding
 
 logger = logging.getLogger(__name__)
@@ -1146,16 +1152,22 @@ class DataContext:
         """Evaluate once; count all rows and collect only a bounded evidence sample.
 
         An unordered sample streams the result once (:class:`BoundedSample`); an
-        ordered one stages it in a materialized CTE owned by DuckDB, subject to its
-        memory/spill budget. Non-query statements are rejected, never executed.
+        ordered one keeps a bounded top-N (:class:`~qavf.ordered_sample.OrderedSample`),
+        or, for rows it cannot order, stages the result in a materialized CTE owned
+        by DuckDB, subject to its memory/spill budget. Non-query statements are
+        rejected, never executed.
         """
         resolved = resolve_sql_paths(query, self.env.base_dir, known_tables=self.declared())
         with self._sql_lease(query, normalize_missing=normalize_missing) as con:
             if not ordered:
                 sample, count = BoundedSample(limit).read(con, resolved, self._check_cancelled)
             else:
-                result = con.sql(sample_statement(resolved, limit, ordered=True))
-                sample, count = sample_result(arrow_table(result))
+                # A bounded top-N over whole rows; rows it cannot order are staged.
+                body = normalize_single_query(resolved)
+                statement = OrderedSample(limit).bound(con, body)
+                if statement is None:
+                    statement = sample_statement(resolved, limit, ordered=True)
+                sample, count = sample_result(arrow_table(con.sql(statement)))
         self._check_cancelled()
         self._check_materialization("SQL evidence sample", sample)
         return sample, count

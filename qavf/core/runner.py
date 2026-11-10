@@ -23,6 +23,7 @@ from qavf.core.sources import InputReader
 from qavf.core.views import NativeViews
 from qavf.engine.severity import Severity, Status
 from qavf.input_rules import INPUT_RULES
+from qavf.ordered_sample import COUNT, OrderedSample
 from qavf.redaction import redact, redact_text
 from qavf.reports.models import DatasetInfo, QAReport, RunMetadata
 from qavf.run_control import CANCELLED_MESSAGE, control_for
@@ -423,16 +424,7 @@ class NativeRunner:
                 ).fetchone()
                 count, records = counted[0], None
             else:
-                # The snapshot keeps the count and the evidence of one evaluation.
-                out.connection.execute(f"CREATE TEMP TABLE {qi(snapshot)} AS {sql}")
-                counted = out.connection.execute(f"SELECT count(*) FROM {qi(snapshot)}").fetchone()
-                count = counted[0]
-                # The kept sample is the first rows by every column: the same on every run.
-                records = (
-                    out.records(f"SELECT * FROM {qi(snapshot)} ORDER BY ALL LIMIT {limit}")
-                    if count
-                    else None
-                )
+                count, records = self._assertion_evidence(out, sql, snapshot, limit)
         except Exception as exc:
             out.report(
                 "INP-007",
@@ -466,6 +458,28 @@ class NativeRunner:
             item_ids=(assertion.item_id,),
             **identity,
         )
+
+    @staticmethod
+    def _assertion_evidence(out, sql, snapshot, limit):
+        """The exact count and first ``limit`` rows (by every column, so the same
+        on every run) of one evaluation of an assertion.
+
+        The snapshot keeps both from that one evaluation. It holds only the count
+        and the bounded sample (:class:`~qavf.ordered_sample.OrderedSample`);
+        a result whose rows cannot be compared as whole rows is staged in full.
+        """
+        sample = OrderedSample(limit)
+        statement = sample.bound(out.connection, sql)
+        if statement is None:
+            out.connection.execute(f"CREATE TEMP TABLE {qi(snapshot)} AS {sql}")
+            counted = out.connection.execute(f"SELECT count(*) FROM {qi(snapshot)}").fetchone()
+            rows = f"SELECT * FROM {qi(snapshot)} ORDER BY ALL LIMIT {limit}"
+        else:
+            out.connection.execute(f"CREATE TEMP TABLE {qi(snapshot)} AS {statement}")
+            counted = out.connection.execute(f"SELECT {COUNT} FROM {qi(snapshot)}").fetchone()
+            rows = sample.rows(snapshot)
+        count = counted[0]
+        return count, out.records(rows) if count else None
 
     def run(self):
         from qavf.audit_codec import canonical_digest
