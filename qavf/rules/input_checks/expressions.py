@@ -35,6 +35,7 @@ from qavf.rules.helpers import (
 )
 from qavf.settings import ExpressionCheck, QAVFSettings, SqlAssertion
 from qavf.sources.sql import quote_identifier
+from qavf.sql_dependencies import PredicateDependencies
 
 from ._datasets import (
     CATEGORY,
@@ -59,7 +60,23 @@ class ExpressionRule(_SelectsDatasets):
     Params: ClassVar[type[RuleParams]] = DatasetSelection
 
     def data_requirements(self, settings: QAVFSettings) -> DataRequirements | None:
-        return None  # Expressions may query any supplied frame via subqueries.
+        """Each expression's dataset and the datasets its subqueries read.
+
+        ``None`` (every dataset, for the whole rule) unless the parser proves
+        every expression's reads: a subquery may name any supplied frame.
+        """
+        reads = PredicateDependencies(settings.datasets)
+        datasets: set[str] = set()
+        for name, spec in settings.datasets.items():
+            if self.params.datasets is not None and name not in self.params.datasets:
+                continue
+            for check in spec.expressions_of(name):
+                dependencies = reads.of(check.violation_condition(), name)
+                if not dependencies.proven:
+                    return None
+                datasets.add(name)
+                datasets.update(dependencies.datasets)
+        return DataRequirements(frozenset(datasets))
 
     def item_name(self, finding: Finding | None) -> str | None:
         """The ``expression`` item a finding reports on (``None`` for the summary)."""

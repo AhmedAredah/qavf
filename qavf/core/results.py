@@ -62,20 +62,11 @@ class _Entry:
     item_id: str | None = field(compare=False, default=None)
 
 
-class ResultCollector:
-    """Collect native results in the full backend's shape and order."""
+class RuleSwitches:
+    """Which native input rules report, decided from the settings alone."""
 
-    def __init__(self, connection, settings):
-        self.connection = connection
+    def __init__(self, settings):
         self.settings = settings
-        self.results = []
-        self.locators = {}
-        self._orders = []
-        self._entries = []
-        self._elapsed = {}
-        self._sequence = itertools.count()
-        self._positions = {name: index for index, name in enumerate(settings.datasets)}
-        self._tag_index = None
 
     def enabled(self, rule_id, dataset=None):
         """Whether ``rule_id`` reports: schema contracts always run, and the
@@ -95,6 +86,22 @@ class ResultCollector:
         # Schema contracts run unless a run-time selection leaves them (or this
         # dataset) out.
         return applied is None or applied.contract_runs(dataset)
+
+
+class ResultCollector(RuleSwitches):
+    """Collect native results in the full backend's shape and order."""
+
+    def __init__(self, connection, settings):
+        super().__init__(settings)
+        self.connection = connection
+        self.results = []
+        self.locators = {}
+        self._orders = []
+        self._entries = []
+        self._elapsed = {}
+        self._sequence = itertools.count()
+        self._positions = {name: index for index, name in enumerate(settings.datasets)}
+        self._tag_index = None
 
     def records(self, query):
         from qavf.core.evidence import SqlEvidenceReader

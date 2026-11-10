@@ -534,10 +534,8 @@ class NativeRunner:
                 query_resolver=sources.resolve,
                 control=self.control,
             )
-            query_inputs = bool(settings.assertions and out.enabled("INP-007")) or any(
-                spec.expressions and out.enabled("INP-006", name)
-                for name, spec in settings.datasets.items()
-            )
+            # SQL with unproven reads may query any loaded dataset: keep them all.
+            query_inputs = bool(plan.fallback)
             parents = {
                 fk.ref_dataset
                 for name, spec in settings.datasets.items()
@@ -582,6 +580,8 @@ class NativeRunner:
             snapshot_lifetime="independent dependency component",
             dependency_components=len(plan.groups),
         )
+        if plan.fallback:
+            usage["projection_fallback"] = list(plan.fallback)
         report = QAReport(
             metadata=RunMetadata(
                 run_id=str(uuid4()),

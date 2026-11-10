@@ -681,6 +681,8 @@ class PlanText:
             lines.append(
                 f"  {dataset.name:<20} {dataset.input_kind:<10} {columns} declared columns"
             )
+            if plan.backend == "duckdb":
+                lines.append(f"    reads: {self._retained(dataset)}")
         lines += ["", f"Planned checks ({len(plan.rules)}):"]
         for rule in plan.rules:
             label = rule.item_name or rule.check_name or rule.name
@@ -689,11 +691,24 @@ class PlanText:
         if plan.excluded:
             lines += ["", "Not run:"]
             lines += [f"  {name}: {reason}" for name, reason in plan.excluded.items()]
+        if plan.projection_fallback:
+            lines += ["", "Every column of every dataset is read, as one component, because:"]
+            lines += [f"  - {item}" for item in plan.projection_fallback]
         if plan.unresolved:
             lines += ["", "Unresolved (the plan is incomplete):"]
             lines += [f"  - {item}" for item in plan.unresolved]
         lines += ["", "No data was read."]
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _retained(dataset: Any) -> str:
+        """The native backend's planned columns and loading component of a dataset."""
+        if dataset.retained_columns is None:
+            text = f"every column ({dataset.retention})" if dataset.retention else "every column"
+        else:
+            text = ", ".join(dataset.retained_columns) or "no columns"
+        together = [name for name in dataset.component if name != dataset.name]
+        return text + (f"; loaded with {', '.join(together)}" if together else "")
 
 
 def _cmd_explain(args: argparse.Namespace) -> int:

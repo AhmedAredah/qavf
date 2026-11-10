@@ -29,6 +29,7 @@ from qavf.sources.base import SourceRegistry
 
 if TYPE_CHECKING:
     from qavf._input_types import ValidationInput
+    from qavf.core.planning import NativePlan
 
 
 class DatasetExplanation(SnapshotModel):
@@ -41,6 +42,12 @@ class DatasetExplanation(SnapshotModel):
     observed_schema: None = None
     source_evaluations: None = None
     notes: tuple[str, ...] = ()
+    retained_columns: tuple[str, ...] | None = None
+    """The columns the native backend reads (``None``: every column, or a Polars plan)."""
+    retention: str | None = None
+    """Why the native backend reads every column of this dataset."""
+    component: tuple[str, ...] = ()
+    """The datasets the native backend keeps loaded together with this one."""
 
 
 class RuleExplanation(SnapshotModel):
@@ -68,6 +75,8 @@ class ValidationPlan(SnapshotModel):
     """The selection the plan runs under (``None``: everything configured)."""
     excluded: dict[str, str] = Field(default_factory=dict)
     unresolved: tuple[str, ...] = ()
+    projection_fallback: tuple[str, ...] = ()
+    """Why the native backend reads every dataset in full as one component."""
     resources: dict[str, Any] = Field(default_factory=dict)
     profile: ProfileName | None = None
     data_read: bool = False
@@ -177,11 +186,17 @@ def explain(
     if profile is not None:
         settings = apply_profile(settings, profile)
     settings = narrow(settings, selection)
+    native: NativePlan | None = None
     if chosen == "duckdb":
         # The native backend's own admission: unsupported work is refused, not dropped.
         from qavf.core.configuration import prepare as native_admission
+        from qavf.core.planning import NativePlan
+        from qavf.core.results import RuleSwitches
 
-        native_admission(data, schema, config, resources, profile, selection)
+        native_settings, native_inputs = native_admission(
+            data, schema, config, resources, profile, selection
+        )
+        native = NativePlan.build(native_settings, RuleSwitches(native_settings), native_inputs)
     descriptions = []
     for name, spec in settings.datasets.items():
         source = spec.source_config() or {}
@@ -196,6 +211,7 @@ def explain(
                 declared_columns=tuple(spec.schema_spec.columns) if spec.schema_spec else (),
                 row_budget=spec.effective_load_policy().row_budget,
                 notes=tuple(notes),
+                **(native.describe(name) if native is not None else {}),
             )
         )
     unresolved: list[str] = []
@@ -265,6 +281,7 @@ def explain(
         selection=selection.describe() if selection.active else None,
         excluded=excluded,
         unresolved=tuple(unresolved),
+        projection_fallback=native.fallback if native is not None else (),
         complete=not unresolved,
         profile=profile,
         resources={

@@ -608,7 +608,62 @@ def _scoped_expression_scenario(directory: Path) -> dict[str, Any]:
     }
 
 
+def _projected_expressions_scenario(directory: Path) -> dict[str, Any]:
+    """Parser-proven expressions keep narrow, separate inputs (EP-04): a local
+    expression, one reading another dataset, and a ``where`` with a subquery."""
+    counts = _write(directory, "counts.csv", "year,total,note\n2020,5,x\n2021,7,y\n")
+    trips = _write(
+        directory, "trips.csv", "id,year,payload\n1,2020,p\n2,2019,q\n3,2021,r\n4,2018,s\n"
+    )
+    other = _write(directory, "other.csv", "id,payload\n1,a\n-2,b\n")
+    return {
+        "datasets": {
+            "counts": {"path": counts, "schema": {"columns": {"year": {"dtype": "int"}}}},
+            "trips": {
+                "path": trips,
+                "schema": {"columns": {"id": {"dtype": "int"}}},
+                "checks": [
+                    {
+                        "check": "expression",
+                        "name": "counted year",
+                        "expr": "year IN (SELECT year FROM counts)",
+                    },
+                    {
+                        "check": "expression",
+                        "name": "known ids",
+                        "expr": "id < 4",
+                        "where": "year NOT IN (SELECT year FROM counts WHERE total > 6)",
+                    },
+                ],
+            },
+            "other": {
+                "path": other,
+                "schema": {"columns": {"id": {"dtype": "int"}}},
+                "checks": [{"check": "expression", "name": "positive", "expr": "id > 0"}],
+            },
+        },
+        "engine": {"max_affected_records": 3},
+    }
+
+
+def _ordered_assertion_scenario(directory: Path) -> dict[str, Any]:
+    """A failing SQL check counts every row and keeps the first rows by every
+    column, with repeated values and NULLs (EP-07)."""
+    values = "".join(f"{i % 4},{'' if i % 5 == 0 else i % 7}\n" for i in range(200))
+    data = _write(directory, "v.csv", "a,b\n" + values)
+    return {
+        "datasets": {"v": {"path": data}},
+        "checks": [
+            {"check": "sql", "name": "all rows", "sql": "SELECT a, b FROM v"},
+            {"check": "sql", "name": "repeated", "sql": "SELECT a % 2 AS a, b FROM v WHERE a > 0"},
+        ],
+        "engine": {"max_affected_records": 6},
+    }
+
+
 SCENARIOS = {
+    "projected_expressions": _projected_expressions_scenario,
+    "ordered_assertion": _ordered_assertion_scenario,
     "scoped_expression": _scoped_expression_scenario,
     "across": _across_scenario,
     "views": _views_scenario,
