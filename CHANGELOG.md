@@ -176,6 +176,12 @@ Reports written by earlier versions still load.
 
 ### Fixed
 
+- Accepting a baseline, writing a report or publishing an isolated worker's
+  result no longer fails on Windows when a virus scanner or the search indexer
+  briefly holds the file being replaced: every atomic replace in QAVF goes
+  through one helper (`qavf/file_replace.py`) that retries the rename on a
+  `PermissionError` with a short, bounded backoff (up to about 2 s) on Windows
+  only, then raises. The release scripts share the same helper.
 - `qavf run` prints result labels on a console that is not UTF-8 (e.g. a Windows
   cp1252 pipe): `·` falls back to `-` instead of showing as `�`.
 - Two unnamed checks of one kind on a dataset no longer share an identity: a

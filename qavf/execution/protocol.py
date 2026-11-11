@@ -10,6 +10,7 @@ from typing import Any
 
 from qavf.audit_codec import AuditSizeError, decode_audit, iter_audit_json
 from qavf.execution.errors import ExecutionLimitError
+from qavf.file_replace import replace_file
 from qavf.inputs.descriptors import Query
 from qavf.settings import QAVFSettings
 
@@ -107,6 +108,6 @@ def write_result(path: Path, chunks: Iterable[bytes], limit: int) -> None:
         with partial.open("xb") as handle:
             for chunk in bounded_chunks(chunks, limit):
                 handle.write(chunk)
-        partial.replace(path)
+        replace_file(partial, path)
     finally:
         partial.unlink(missing_ok=True)

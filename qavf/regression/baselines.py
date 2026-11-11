@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field, ValidationInfo, field_serializer, model_v
 from qavf._version import __version__
 from qavf.audit_codec import decode_audit, encode_audit
 from qavf.config_paths import BASELINE_MANIFEST_SUFFIX
+from qavf.file_replace import replace_file
 from qavf.inputs.normalize import Configuration
 from qavf.inputs.resources import ResourceLimits
 from qavf.io import atomic_write
@@ -183,8 +184,8 @@ def accept_baseline(
                 atomic_write(
                     transaction / "state.json", json.dumps({"old": old, "committed": False})
                 )
-                os.replace(staged, target)
-                os.replace(staged_manifest, manifest_path(target))
+                replace_file(staged, target)
+                replace_file(staged_manifest, manifest_path(target))
                 atomic_write(
                     transaction / "state.json", json.dumps({"old": old, "committed": True})
                 )
@@ -259,7 +260,7 @@ def _recover(path: Path) -> None:
                     # restartable if interrupted between its two replacements.
                     temporary = transaction / f"restore-{uuid4().hex}"
                     shutil.copy2(transaction / backup, temporary)
-                    os.replace(temporary, destination)
+                    replace_file(temporary, destination)
                 else:
                     destination.unlink(missing_ok=True)
     shutil.rmtree(transaction)

@@ -10,9 +10,9 @@ import os
 import platform
 import subprocess
 import sys
-import time
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 SOURCE_INPUTS = (
@@ -133,7 +133,21 @@ def environment() -> dict[str, Any]:
     }
 
 
-REPLACE_TOLERANCE_S = 2.0
+def _shared_replace() -> ModuleType:
+    """QAVF's ``qavf/file_replace.py``, loaded by path: the release scripts run from
+    the source tree, also where QAVF itself is not installed, and share its one
+    implementation of a Windows-tolerant atomic replace."""
+    location = Path(__file__).resolve().parents[2] / "qavf" / "file_replace.py"
+    spec = importlib.util.spec_from_file_location("_qavf_file_replace", location)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {location}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_REPLACE = _shared_replace()
+REPLACE_TOLERANCE_S: float = _REPLACE.REPLACE_TOLERANCE_S
 """How long a Windows replace may wait out a scanner or indexer briefly holding the target."""
 
 
@@ -150,15 +164,7 @@ def replace_file(source: Path, target: Path) -> None:
     A record is rewritten several times in quick succession; on Windows a virus
     scanner or the indexer may still hold the previous version open, and the
     replace then fails with a sharing violation (``PermissionError``) for a moment.
-    That is retried for :data:`REPLACE_TOLERANCE_S`; elsewhere, and after that,
-    the error is real and raised.
+    That is retried for :data:`REPLACE_TOLERANCE_S` (``qavf/file_replace.py``);
+    elsewhere, and after that, the error is real and raised.
     """
-    deadline = time.monotonic() + (REPLACE_TOLERANCE_S if sys.platform == "win32" else 0.0)
-    while True:
-        try:
-            os.replace(source, target)
-            return
-        except PermissionError:
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.02)
+    _REPLACE.replace_file(source, target)

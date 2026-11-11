@@ -13,6 +13,7 @@ from io import IOBase
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
+from qavf.file_replace import replace_file
 from qavf.output_format import table_output
 from qavf.redaction import redact_text
 from qavf.sources.base import SourceEnvironment
@@ -46,7 +47,7 @@ def atomic_stream(path: str | Path) -> Iterator[BinaryIO]:
             stream.flush()
             os.fsync(stream.fileno())
         _check_publication(target)
-        os.replace(temporary, target)
+        replace_file(temporary, target)
     except BaseException:
         Path(temporary).unlink(missing_ok=True)
         raise
