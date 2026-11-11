@@ -45,7 +45,7 @@ class NoSleep:
 def _held(monkeypatch: pytest.MonkeyPatch, failures: int, platform: str = "win32") -> HeldTarget:
     held = HeldTarget(failures)
     monkeypatch.setattr(file_replace.sys, "platform", platform)
-    monkeypatch.setattr(file_replace.os, "replace", held)
+    monkeypatch.setattr(file_replace, "_rename", held)
     return held
 
 
@@ -64,9 +64,9 @@ def test_the_retry_backs_off_and_gives_up_after_its_tolerance(tmp_path, monkeypa
     source.write_text("new")
     held = _held(monkeypatch, failures=10**6)
     clock = iter(float(step) / 10 for step in range(10**6))
-    monkeypatch.setattr(file_replace.time, "monotonic", clock.__next__)
+    monkeypatch.setattr(file_replace, "_clock", clock.__next__)
     sleeps = NoSleep()
-    monkeypatch.setattr(file_replace.time, "sleep", sleeps)
+    monkeypatch.setattr(file_replace, "_pause", sleeps)
     with pytest.raises(PermissionError):
         replace_file(source, tmp_path / "old", tolerance_s=2.0)
     assert 1 < held.calls < 40
@@ -111,7 +111,7 @@ def test_accepting_a_baseline_waits_out_a_held_journal_or_target(tmp_path, monke
     accept_baseline(frame, path, ["k"])
     held = _held(monkeypatch, failures=0)
     flaky = FlakyEveryOther(held)
-    monkeypatch.setattr(file_replace.os, "replace", flaky)
+    monkeypatch.setattr(file_replace, "_rename", flaky)
     changed = frame.with_columns(pl.col("v") * 10)
     accept_baseline(changed, path, ["k"], reason="re-accepted", replace=True)
     assert flaky.failed >= 4

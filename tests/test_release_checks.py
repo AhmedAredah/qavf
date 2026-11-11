@@ -476,7 +476,7 @@ def test_evidence_records_survive_a_briefly_held_target(tmp_path, monkeypatch, p
     provenance.write_json(record, {"status": "running"})
     held = _HeldTarget(failures=3)
     monkeypatch.setattr(provenance.sys, "platform", platform)
-    monkeypatch.setattr(provenance.os, "replace", held)
+    monkeypatch.setattr(provenance._REPLACE, "_rename", held)
     if platform == "win32":
         provenance.write_json(record, {"status": "failed"})
         assert json.loads(record.read_text())["status"] == "failed"

@@ -25,6 +25,12 @@ REPLACE_TOLERANCE_S = 2.0
 _FIRST_DELAY_S = 0.01
 _LONGEST_DELAY_S = 0.2
 
+# The module's own handles on the system calls, so tests replace them here
+# without affecting every other thread of the process.
+_rename = os.replace
+_clock = time.monotonic
+_pause = time.sleep
+
 
 class HeldTargetRetry:
     """Retries one rename while Windows reports the target briefly held.
@@ -38,17 +44,17 @@ class HeldTargetRetry:
 
     def replace(self, source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
         """``os.replace(source, target)``, retried while the target is briefly held."""
-        deadline = time.monotonic() + self.tolerance_s
+        deadline = _clock() + self.tolerance_s
         delay = _FIRST_DELAY_S
         while True:
             try:
-                os.replace(source, target)
+                _rename(source, target)
                 return
             except PermissionError:
-                remaining = deadline - time.monotonic()
+                remaining = deadline - _clock()
                 if remaining <= 0:
                     raise
-                time.sleep(min(delay, remaining))
+                _pause(min(delay, remaining))
                 delay = min(delay * 2, _LONGEST_DELAY_S)
 
 
