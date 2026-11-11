@@ -63,20 +63,19 @@ def test_without_a_snapshot_a_concurrent_update_mixes_versions(database, monkeyp
 
 
 def test_a_snapshot_sees_one_coherent_version(database, monkeypatch) -> None:
-    real_read = DatabaseSource.read
+    real_stage = DataContext._stage_member
     read: list[str] = []
 
-    def read_then_update(self, con):
-        frame = real_read(self, con)
-        read.append(self.params.table)
+    def stage_then_update(self, stage, con, name):
+        real_stage(self, stage, con, name)
+        read.append(name)
         if len(read) == 1:
-            # After the first table is read, an upstream job commits a new version of the
-            # other one (same database instance, its own transaction, committed at once).
-            other = "lines" if self.params.table == "orders" else "orders"
+            # After the first table is staged, an upstream job commits a new version of
+            # the other one (same database instance, its own transaction, committed at once).
+            other = "lines" if name == "orders" else "orders"
             con.cursor().execute(f"UPDATE live.{other} SET version = 2")
-        return frame
 
-    monkeypatch.setattr(DatabaseSource, "read", read_then_update)
+    monkeypatch.setattr(DataContext, "_stage_member", stage_then_update)
     ctx = DataContext.from_settings(_settings(database, snapshot=True))
     # Asking for one dataset reads the whole snapshot group.
     versions = (ctx.get("orders")["version"][0], ctx.get("lines")["version"][0])

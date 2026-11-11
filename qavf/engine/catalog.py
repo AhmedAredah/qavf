@@ -88,9 +88,12 @@ class DatasetCatalog:
             return dict(entry.schema) if entry is not None and entry.schema is not None else None
 
     def record_frame(self, name: str, frame: pl.DataFrame) -> None:
+        self.record_shape(name, frame.schema, frame.height)
+
+    def record_shape(self, name: str, schema: Mapping[str, pl.DataType], rows: int) -> None:
         with self._lock:
             entry = self._entry(name)
-            entry.schema, entry.rows = dict(frame.schema), frame.height
+            entry.schema, entry.rows = dict(schema), rows
 
     def record_load(self, name: str, notes: Mapping[str, Any], seconds: float) -> None:
         with self._lock:
@@ -145,10 +148,16 @@ class DatasetCatalog:
             )
 
     def record_snapshot(
-        self, name: str, frame: pl.DataFrame, connection: str, members: list[str], started: datetime
+        self,
+        name: str,
+        schema: Mapping[str, pl.DataType],
+        rows: int,
+        connection: str,
+        members: list[str],
+        started: datetime,
     ) -> None:
         with self._lock:
-            self.record_frame(name, frame)
+            self.record_shape(name, schema, rows)
             entry = self._entry(name)
             entry.identity_used = True
             entry.loaded_at = started

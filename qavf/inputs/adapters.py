@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 import duckdb
 import polars as pl
 
-from qavf.duckdb_results import query_frame
+from qavf.duckdb_results import query_frame, relation
 from qavf.settings import SourcePolicy
 from qavf.sources.base import DataSource, ScanPlan, SourceEnvironment, SourceError, SourceParams
 from qavf.sources.frames import admitted_frame
@@ -85,6 +85,13 @@ class _QueryInput(DataSource[SourceParams]):
             if frame is None:
                 raise SourceError("the SQL statement returned no result set")
             return check_budget(frame, self.params.row_budget, self.describe())
+
+    def snapshot_relation(self, con: Any) -> Any:
+        with self._query_lock:
+            sql, parameters = normalize_sql_paths(
+                self.query.sql, self.env.base_dir, self.query.parameters
+            )
+            return relation(con, budgeted(sql, self.params.row_budget), parameters)
 
     def load(self) -> pl.DataFrame:
         if isinstance(self.query.connection, duckdb.DuckDBPyConnection):

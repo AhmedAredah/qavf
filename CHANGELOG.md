@@ -126,6 +126,17 @@ Reports written by earlier versions still load.
   every column in one evaluation that holds only the evidence rows, on both
   backends, instead of staging every failing row first.
 - `scripts/benchmark_local_performance.py` measures both.
+- A `Query` on a borrowed DuckDB connection is copied into the native backend's
+  owned table one bounded Arrow batch at a time, not as one complete Arrow table.
+  The row budget stays exact, cancellation is checked between batches, the
+  caller's connection is only read, and types are unchanged. `qavf explain` reports
+  it as `staging: bounded_batch_copy`.
+- A coherent database snapshot (`snapshot: true`) streams each member in bounded
+  batches to owned spill files inside its transaction and publishes the files
+  together after commit. A group is bounded by spill space, no longer by
+  `memory_budget_bytes`; a failed or cancelled attempt deletes its files and a
+  retry restarts the whole group. `qavf explain` reports `staging:
+  spill_backed_snapshot`.
 
 ### Fixed
 

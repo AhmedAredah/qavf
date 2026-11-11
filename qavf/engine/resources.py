@@ -438,6 +438,46 @@ class FrameStore(MutableMapping[str, pl.DataFrame]):
             finally:
                 staging.close()
 
+    def new_spill(self) -> SpillFile:
+        """A new owned file in this store's directory, charged to its spill budget.
+
+        Whoever writes it owns it until :meth:`adopt` publishes it.
+        """
+        return SpillFile(self.directory / f"{uuid4().hex}.arrow", self.spill_budget)
+
+    def adopt(
+        self,
+        spills: Mapping[str, tuple[SpillFile, int]],
+        publish_metadata: Callable[[], None],
+        publication_guard: contextlib.AbstractContextManager,
+    ) -> None:
+        """Publish a complete group of written IPC files as spilled entries, atomically.
+
+        Each value is a file from :meth:`new_spill` holding one complete frame and
+        that frame's decoded size, the estimate a later read compares with free
+        cache space before keeping it in memory. Nothing is read or copied here.
+        Ownership moves to the store only when the whole group is published; if
+        this raises before that, the caller still owns, and deletes, the files.
+        """
+        with self._writes, publication_guard, self.lock:
+            if self._closed:
+                raise ResourceLimitError("frame store has been closed")
+            replaced = sum(owned.size for key, owned in self._spill_files.items() if key in spills)
+            incoming = sum(owned.size for owned, _ in spills.values())
+            if self.spill_bytes - replaced + incoming > self.spill_limit:
+                raise ResourceLimitError("frame spill budget exhausted")
+            for key in spills:
+                self.discard(key)
+            for key, (owned, size) in spills.items():
+                self._publish_spill(key, owned)
+                self.sizes[key] = size
+            try:
+                publish_metadata()
+            except BaseException:
+                failures = attempt_cleanup(functools.partial(self.discard, key) for key in spills)
+                raise_cleanup_errors("failed publication could not be released", failures)
+                raise
+
     def _write_spill(self, frame: pl.DataFrame) -> SpillFile:
         if frame.estimated_size() > min(
             self.spill_limit - self.spill_bytes, self.spill_budget.remaining

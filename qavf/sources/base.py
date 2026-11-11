@@ -328,6 +328,16 @@ class DataSource[P: SourceParams](ABC):
         override it together with :meth:`snapshot_connection`."""
         raise NotImplementedError
 
+    def snapshot_relation(self, con: Any) -> Any | None:
+        """The DuckDB relation :meth:`read` would collect, limited to the row budget
+        plus one row, for a source that reads through SQL.
+
+        A snapshot streams it in bounded Arrow batches to owned spill files inside its
+        transaction instead of collecting it. ``None`` (the default) keeps :meth:`read`,
+        whose complete result is then written to a spill file before the next member.
+        """
+        return None
+
     def explain_failure(self, error: SourceError) -> SourceError | None:
         """A clearer error for an operation on this source that failed for good.
 

@@ -13,11 +13,12 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import duckdb
 import polars as pl
 
+from qavf.bounded_batches import BoundedBatches
 from qavf.duckdb_results import arrow_table, bind_relation, first_row, query_frame
 from qavf.engine.capabilities import ReaderCapabilities
 from qavf.engine.catalog import DatasetCatalog
@@ -30,6 +31,7 @@ from qavf.engine.connections import (
 from qavf.engine.relations import bind_scan
 from qavf.engine.resources import ResourceLimitError, RunResources, retained_size
 from qavf.engine.session import Invocation, KeyedLocks
+from qavf.engine.snapshot_staging import MemberPreparationError, SnapshotStage
 from qavf.engine.sql import (
     BoundedSample,
     check_sql_columns,
@@ -61,7 +63,7 @@ from qavf.sources.collection import collect_result
 from qavf.sources.errors import redacted_error
 from qavf.sources.execution import SourceOperations
 from qavf.sources.frames import as_polars
-from qavf.sources.native import OwnedConnection
+from qavf.sources.native import OwnedConnection, read_error
 from qavf.sources.sql import (
     normalize_single_query,
     quote_identifier,
@@ -87,14 +89,19 @@ class DatasetNotAvailableError(KeyError):
     """Raised when a rule asks for a dataset the context cannot provide."""
 
 
-class _LatestAttempt:
-    """Open one observation per source attempt, closing every earlier attempt first."""
+class _Closeable(Protocol):
+    def close(self) -> None: ...
 
-    def __init__(self, open_attempt: Callable[[], Observation]) -> None:
+
+class _LatestAttempt[T: _Closeable]:
+    """Own one result per source attempt (an observation, a snapshot stage), closing
+    every earlier attempt first."""
+
+    def __init__(self, open_attempt: Callable[[], T]) -> None:
         self._open_attempt = open_attempt
-        self._attempts: list[Observation] = []
+        self._attempts: list[T] = []
 
-    def __call__(self) -> Observation:
+    def __call__(self) -> T:
         """Discard earlier attempts and own a fresh one."""
         self.close()
         current = self._open_attempt()
@@ -1675,6 +1682,8 @@ class DataContext:
         Permanent unavailable members remain individually unavailable; transient
         failures restart the entire transaction. Retry and identity decisions
         belong to the same coordinator as eager and native source execution.
+        Members are staged as owned spill files and published together as
+        spilled cache entries, so the group is bounded by spill space, not memory.
         """
         with self._operations.guard(), self._key_lock(("snapshot", connection)):
             members = sorted(
@@ -1688,24 +1697,20 @@ class DataContext:
                     for name in members
                 ):
                     return
+            attempts = _LatestAttempt(
+                functools.partial(self._snapshot_attempt, connection, members)
+            )
             try:
-                staged, failures, started_at = self._operations.run(
-                    [self._catalog.sources[name] for name in members],
-                    lambda: self._snapshot_attempt(connection, members),
+                stage = self._operations.run(
+                    [self._catalog.sources[name] for name in members], attempts
                 )
                 self._check_cancelled()
-                self._frames.publish(
-                    staged,
-                    functools.partial(
-                        self._publish_snapshot_metadata,
-                        connection,
-                        members,
-                        staged,
-                        failures,
-                        started_at,
-                    ),
+                self._frames.adopt(
+                    stage.spills(),
+                    functools.partial(self._publish_snapshot_metadata, connection, members, stage),
                     self._lock,
                 )
+                stage.detach()
             except Exception as exc:
                 self._check_cancelled()
                 failure = redacted_error(
@@ -1714,28 +1719,29 @@ class DataContext:
                 with self._lock:
                     for name in members:
                         self._catalog.record_failure(name, failure)
+            finally:
+                attempts.close()
 
     def _publish_snapshot_metadata(
-        self,
-        connection: str,
-        members: list[str],
-        staged: dict[str, pl.DataFrame],
-        failures: dict[str, SourceError],
-        started_at: datetime,
+        self, connection: str, members: list[str], stage: SnapshotStage
     ) -> None:
-        """Record a snapshot attempt's member failures and frames at publication."""
+        """Record a snapshot attempt's member failures and shapes at publication."""
         self._check_cancelled()
-        for name in staged:
+        for name in stage.members:
             self._require_available(name)
-        for name, failure in failures.items():
+        for name, failure in stage.failures.items():
             self._catalog.record_failure(name, failure)
-        for name, frame in staged.items():
-            self._catalog.record_snapshot(name, frame, connection, members, started_at)
+        for name, member in stage.members.items():
+            self._catalog.record_snapshot(
+                name, member.schema, member.rows, connection, members, stage.started_at
+            )
 
-    def _snapshot_attempt(
-        self, connection: str, members: list[str]
-    ) -> tuple[dict[str, pl.DataFrame], dict[str, SourceError], datetime]:
-        """Read one transaction; return staged data without publishing a cache entry."""
+    def _snapshot_attempt(self, connection: str, members: list[str]) -> SnapshotStage:
+        """Read one transaction into owned spill files without publishing a cache entry.
+
+        Each member streams in bounded Arrow batches, so the attempt holds about one
+        batch in memory at a time. A failed or cancelled attempt deletes its files.
+        """
         bindings: dict[str, ConnectionSpec] = {}
         secrets: dict[str, SecretSpec] = {}
         for name in members:
@@ -1748,17 +1754,19 @@ class DataContext:
             # aborts on binder errors) restarts the read without that member, so
             # every published member still comes from one transaction.
             while True:
-                staged: dict[str, pl.DataFrame] = {}
-                staged_bytes = 0
+                stage = SnapshotStage(
+                    self._frames.new_spill, self._catalog.prepare, datetime.now(UTC)
+                )
+                stage.failures = failures
                 aborted = False
-                started_at = datetime.now(UTC)
                 try:
                     con.execute("BEGIN TRANSACTION")
                     for name in pending:
                         self._check_cancelled()
                         try:
-                            source = self._catalog.sources[name]
-                            frame = collect_result(source.read(con), source.params.row_budget)
+                            self._stage_member(stage, con, name)
+                        except (ResourceLimitError, MemberPreparationError):
+                            raise
                         except Exception as exc:
                             error = exc if isinstance(exc, SourceError) else redacted_error(exc)
                             if isinstance(error, SourceIntegrityError) or error.retryable:
@@ -1777,28 +1785,43 @@ class DataContext:
                                 aborted = True
                                 break
                             continue
-                        budget = self._catalog.sources[name].params.row_budget
-                        if budget is not None and frame.height > budget:
-                            raise SourceError(
-                                f"dataset {name!r} has more than {budget:,} rows (row_budget)"
-                            )
-                        staged_bytes += retained_size(frame)
-                        target = self._resources.memory_bytes
-                        if target is not None and staged_bytes > target:
-                            raise ResourceLimitError(
-                                f"snapshot {connection!r} exceeds memory_budget_bytes={target}"
-                            )
-                        staged[name] = self._catalog.prepare(name, frame)
                     if not aborted:
                         con.execute("COMMIT")
-                        return staged, failures, started_at
-                except BaseException:
+                        return stage
+                except BaseException as exc:
                     with contextlib.suppress(duckdb.Error):
                         con.rollback()
+                    stage.close()
+                    if isinstance(exc, MemberPreparationError):
+                        raise exc.error from None
                     raise
                 with contextlib.suppress(duckdb.Error):
                     con.rollback()
+                stage.close()
                 pending = [name for name in pending if name not in failures]
+
+    def _stage_member(self, stage: SnapshotStage, con: Any, name: str) -> None:
+        """Stream one member inside the snapshot transaction, admitting its row budget."""
+        source = self._catalog.sources[name]
+        budget = source.params.row_budget
+        try:
+            relation = source.snapshot_relation(con)
+            if relation is None:
+                frame = collect_result(source.read(con), budget)
+                self._admit_snapshot_rows(name, budget, frame.height)
+                self._check_cancelled()
+                stage.stage_frame(name, frame)
+                return
+            admit = functools.partial(self._admit_snapshot_rows, name, budget)
+            with BoundedBatches(relation, admit, self._check_cancelled) as batches:
+                stage.stage_batches(name, batches)
+        except duckdb.Error as exc:
+            raise read_error(exc) from exc
+
+    @staticmethod
+    def _admit_snapshot_rows(name: str, budget: int | None, rows: int) -> None:
+        if budget is not None and rows > budget:
+            raise SourceError(f"dataset {name!r} has more than {budget:,} rows (row_budget)")
 
     def _cached(self, name: str) -> pl.DataFrame | None:
         """The loaded frame (as a clone), ``None`` if not loaded; raises for a recorded failure."""

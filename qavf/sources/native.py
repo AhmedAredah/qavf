@@ -262,17 +262,21 @@ def fetch(
         if result is None:
             raise SourceError("the SQL statement returned no result set")
         return result
-    except duckdb.IOException as exc:
-        # DuckDB messages repeat the location (credentials and signed tokens included).
-        message = str(exc)
-        if "No files found" in message or "No such file" in message or "does not exist" in message:
-            raise redacted_error(exc, SourceNotFoundError) from None
-        raise redacted_error(exc) from None
     except duckdb.Error as exc:
-        raise redacted_error(exc) from None
+        raise read_error(exc) from None
     finally:
         if not keep_open:
             con.close()
+
+
+def read_error(exc: duckdb.Error) -> SourceError:
+    """The redacted source error for a failed DuckDB read; missing data is not found."""
+    if isinstance(exc, duckdb.IOException):
+        # DuckDB messages repeat the location (credentials and signed tokens included).
+        message = str(exc)
+        if "No files found" in message or "No such file" in message or "does not exist" in message:
+            return redacted_error(exc, SourceNotFoundError)
+    return redacted_error(exc)
 
 
 def budgeted(sql: str, budget: int | None) -> str:

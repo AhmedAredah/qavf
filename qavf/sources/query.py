@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 
 import polars as pl
 
+from qavf.duckdb_results import relation
 from qavf.sources.base import DataSource, ScanPlan, SourceParams
 from qavf.sources.native import budgeted, check_budget, connect, fetch
 from qavf.sources.parameters import DatabaseParams, QueryParams
@@ -50,6 +51,9 @@ class SQLSource[P: SourceParams](DataSource[P]):
         sql = budgeted(self._sql(), self.params.row_budget)
         frame = fetch(con, sql, keep_open=True)
         return check_budget(frame, self.params.row_budget, self._budget_description())
+
+    def snapshot_relation(self, con: Any) -> Any:
+        return relation(con, budgeted(self._sql(), self.params.row_budget))
 
     def snapshot_connection(self) -> str | None:
         attached = self._attachments()
