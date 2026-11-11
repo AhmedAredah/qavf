@@ -216,7 +216,7 @@ def snapshot_source(tmp_path):
 def test_snapshot_transient_failure_retries_complete_attempt(snapshot_source):
     with DataContext(sources={"data": snapshot_source}) as ctx:
         source = ctx._catalog.sources["data"]
-        original = source.read
+        original = source.snapshot_relation
         calls = []
 
         def read(con):
@@ -225,7 +225,7 @@ def test_snapshot_transient_failure_retries_complete_attempt(snapshot_source):
                 raise SourceError("temporary", retryable=True)
             return original(con)
 
-        source.read = read
+        source.snapshot_relation = read
         assert ctx.get("data").item() == 1
         assert len(calls) == 2
         assert ctx.describe()[0].notes["retries_used"] == 1
@@ -240,7 +240,7 @@ def test_snapshot_retry_unsafe_source_is_not_retried(snapshot_source):
             calls.append(1)
             raise SourceError("temporary", retryable=True)
 
-        ctx._catalog.sources["data"].read = read
+        ctx._catalog.sources["data"].snapshot_relation = read
         with pytest.raises(DatasetNotAvailableError):
             ctx.get("data")
         assert len(calls) == 1
