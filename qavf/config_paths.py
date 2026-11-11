@@ -58,8 +58,9 @@ SOURCE_PATH_KEYS = ("path", "paths")
 BASELINE_MANIFEST_SUFFIX = ".manifest.json"
 """Suffix of an accepted baseline's acceptance manifest, next to the baseline file."""
 
-PathVisitor = Callable[[str, PathRole], str]
-"""Receives one path value and its role; returns the value to keep."""
+PathVisitor = Callable[[str, PathRole], str | list[str]]
+"""Receives one path value and its role; returns the value to keep (a list when a
+reference to a list of paths was substituted)."""
 
 PathPart = tuple[str | None, type[BaseModel]]
 """``(key, model)``: ``raw[key]`` (``raw`` itself for ``None``) is described by ``model``."""

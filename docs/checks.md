@@ -153,8 +153,38 @@ check settings naming files (a `matches_baseline` `path` or `source`, a zone
 layer's or crosswalk's `path`, a comparison level's layer) and `plugins.paths`.
 Column names, `rename`, `schema`, `views`, `series`, `metrics`, `where`, `expr`,
 SQL text and `extensions` are never rewritten, so a column named `path` means the
-same in an included file as inline. Absolute paths, URLs and values starting with
-`${...}` are kept; settings of plugin checks QAVF does not know are kept as written.
+same in an included file as inline. Absolute paths and URLs are kept; settings of
+plugin checks QAVF does not know are kept as written.
+
+A path means the same whether it is written literally or through a variable. In
+an included file, the file's own `${vars.name}` references and `${ENV}` references
+in a file-path setting are substituted before the path is rebased, so
+`path: roads.csv` and `path: ${vars.input_file}` with `vars: {input_file:
+roads.csv}` both name `modules/roads.csv` below. A variable the file does not
+define itself (or one that an including file, such as the root, also defines)
+belongs to the file that sets it: a path that starts with it is kept as written
+and resolved relative to the root configuration's directory. Text written around
+such a reference is still the included file's (`data/${vars.f}` in
+`modules/child.yaml` is `modules/data/<value>`).
+
+```text
+# qa.yaml                                # modules/child.yaml
+include: [modules/child.yaml]            vars: {input_file: roads.csv}
+vars: {region_file: regions.csv}         datasets:
+                                           roads:   {path: '${vars.input_file}'}   # modules/roads.csv
+                                           regions: {path: '${vars.region_file}'}  # regions.csv (the root's)
+```
+
+If `qa.yaml` also set `input_file: prod.csv`, the root would own that variable and
+`roads` would read `prod.csv` next to `qa.yaml`. `include` entries themselves take
+`${ENV}` and `${ENV:-default}` (`include: ['${MODULE_DIR:-modules}/child.yaml']`),
+relative to the including file; they cannot use `${vars.name}`, because files are
+read before any file's `vars` merge.
+
+A file reached through more than one include path (a diamond: two modules that
+both include `shared/base.yaml`) is merged once, so its datasets are not reported
+as defined twice. Two different files that define one dataset or check name are
+still an error, and an include cycle is still an error.
 
 Views behave the same on both backends: each is the parent dataset's rows that
 match `where`, with `columns` (or all columns), and SQL in `sql` and `expression`

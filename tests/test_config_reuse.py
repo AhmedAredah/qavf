@@ -36,6 +36,7 @@ def _params(settings: QAVFSettings) -> list[dict[str, Any]]:
 
 
 def _write(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
 
@@ -514,3 +515,46 @@ def test_quoted_yaml_words_stay_text(tmp_path: Path) -> None:
     )
     column = load_settings(config).datasets["x"].schema_spec.columns["a"]
     assert column.isin == ["yes", "no"]
+
+
+def test_a_diamond_include_merges_the_shared_file_once(tmp_path: Path) -> None:
+    # Review CFG-09: two modules including one base reported its dataset as defined twice.
+    _write(tmp_path / "shared" / "base.yaml", SHARED)
+    _write(
+        tmp_path / "a" / "a.yaml", "include: [../shared/base.yaml]\ndatasets:\n  a: {path: a.csv}\n"
+    )
+    _write(tmp_path / "b" / "b.yaml", "include: ['${QAVF_TEST_UNSET_DIR:-../shared}/base.yaml']\n")
+    config = _write(tmp_path / "qa.yaml", "include: [a/a.yaml, b/b.yaml]\n")
+    settings = load_settings(config)
+    assert sorted(settings.datasets) == ["a", "sites"]
+    assert settings.datasets["sites"].path == "shared/sites.csv"
+    assert [item.name for item in settings.checks] == ["shared query"]
+    assert settings.included_paths == tuple(
+        (tmp_path / name).resolve() for name in ("a/a.yaml", "shared/base.yaml", "b/b.yaml")
+    )
+
+
+def test_a_file_included_twice_by_one_file_is_merged_once(tmp_path: Path) -> None:
+    _write(tmp_path / "base.yaml", SHARED)
+    config = _write(tmp_path / "qa.yaml", "include: [base.yaml, ./base.yaml]\n")
+    assert list(load_settings(config).datasets) == ["sites"]
+
+
+def test_different_files_defining_one_dataset_in_a_diamond_are_still_an_error(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "base.yaml", SHARED)
+    _write(tmp_path / "copy.yaml", SHARED)
+    _write(tmp_path / "a.yaml", "include: [base.yaml]\n")
+    _write(tmp_path / "b.yaml", "include: [copy.yaml]\n")
+    config = _write(tmp_path / "qa.yaml", "include: [a.yaml, b.yaml]\n")
+    with pytest.raises(ValueError, match="datasets 'sites' is already defined by an included file"):
+        load_settings(config)
+
+
+def test_a_cycle_through_a_diamond_is_still_an_error(tmp_path: Path) -> None:
+    _write(tmp_path / "base.yaml", "include: [a.yaml]\n")
+    _write(tmp_path / "a.yaml", "include: [base.yaml]\n")
+    config = _write(tmp_path / "qa.yaml", "include: [base.yaml, a.yaml]\n")
+    with pytest.raises(ValueError, match="include cycle"):
+        load_settings(config)

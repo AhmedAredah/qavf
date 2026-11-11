@@ -104,6 +104,9 @@ Reports written by earlier versions still load.
   takes `backend=`, `only=`, `tags=`, `skip_tags=` and `datasets=`, applying the same
   selection and backend admission as `validate`.
 - `qavf init --full` writes the complete reference configuration.
+- `include` entries expand `${ENV}` and `${ENV:-default}` before they are resolved
+  (`include: ['${MODULE_DIR:-modules}/child.yaml']`); `${vars.name}` still cannot
+  be used there, since includes are read before `vars` merge.
 
 ### Changed
 
@@ -114,6 +117,14 @@ Reports written by earlier versions still load.
 - Usage and configuration errors print the message and field path without the
   library file and line (shown with `-v`).
 - `mypy` checks the bodies of unannotated functions too (`check_untyped_defs`).
+- In an included file, a file-path setting written through the file's own
+  `${vars.name}` (or `${ENV}`) is substituted before it is rebased, so it names the
+  same file as the literal text would (it used to resolve against the root
+  configuration's directory). A variable the file does not define, or one the root
+  also defines, still resolves relative to the root, which owns it.
+- A file reached through more than one include path (a diamond) is merged once
+  instead of failing as a duplicate dataset; different files defining one dataset
+  or check name, and include cycles, are still errors.
 
 ### Performance
 

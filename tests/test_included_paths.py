@@ -210,3 +210,117 @@ def test_file_paths_in_included_check_defaults_are_rebased(tmp_path: Path) -> No
     baseline, outliers = settings.datasets["counts"].checks
     assert baseline.settings["path"] == "shared/baselines/counts.csv"
     assert outliers.settings["column"] == "path"
+
+
+VARIABLE_CHILD = """
+vars: {input_file: roads.csv, files: [a.csv, b.csv]}
+datasets:
+  literal:
+    path: roads.csv
+  through_variable:
+    path: ${vars.input_file}
+  spelled_out:
+    path: data/${vars.input_file}
+  listed:
+    source: {type: file, paths: '${vars.files}'}
+"""
+
+
+def test_a_path_through_the_file_s_own_variable_is_rebased_like_its_literal(
+    tmp_path: Path,
+) -> None:
+    # Review CFG-07: refactoring a literal into a local variable selected the root's file.
+    _write(tmp_path / "modules" / "child.yaml", VARIABLE_CHILD)
+    _write(tmp_path / "modules" / "roads.csv", "id\n1\n")
+    _write(tmp_path / "roads.csv", "id\n2\n")
+    settings = load_settings(_write(tmp_path / "qa.yaml", "include: [modules/child.yaml]\n"))
+    datasets = settings.datasets
+    assert datasets["literal"].path == datasets["through_variable"].path == "modules/roads.csv"
+    assert settings.resolve(datasets["through_variable"].path) == (
+        tmp_path / "modules" / "roads.csv"
+    )
+    assert datasets["spelled_out"].path == "modules/data/roads.csv"
+    assert datasets["listed"].source == {
+        "type": "file",
+        "paths": ["modules/a.csv", "modules/b.csv"],
+    }
+    # Other uses of the variable keep its value as written.
+    assert settings.vars["input_file"] == "roads.csv"
+
+
+def test_a_root_variable_in_an_included_path_stays_relative_to_the_root(tmp_path: Path) -> None:
+    _write(tmp_path / "modules" / "child.yaml", "datasets:\n  roads: {path: '${vars.f}'}\n")
+    config = _write(
+        tmp_path / "qa.yaml", "include: [modules/child.yaml]\nvars: {f: data/roads.csv}\n"
+    )
+    assert load_settings(config).datasets["roads"].path == "data/roads.csv"
+
+
+def test_a_root_override_of_a_module_variable_owns_the_path(tmp_path: Path) -> None:
+    _write(tmp_path / "modules" / "child.yaml", VARIABLE_CHILD)
+    config = _write(
+        tmp_path / "qa.yaml", "include: [modules/child.yaml]\nvars: {input_file: prod.csv}\n"
+    )
+    datasets = load_settings(config).datasets
+    # The root sets the variable, so a path that is its value is relative to the root;
+    # text the module writes around it stays the module's, relative to the module.
+    assert datasets["through_variable"].path == "prod.csv"
+    assert datasets["spelled_out"].path == "modules/data/prod.csv"
+    assert datasets["literal"].path == "modules/roads.csv"
+
+
+def test_a_variable_of_an_intermediate_file_resolves_relative_to_the_root(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path / "a" / "b" / "inner.yaml", "datasets:\n  inner: {path: '${vars.f}'}\n")
+    _write(tmp_path / "a" / "outer.yaml", "include: [b/inner.yaml]\nvars: {f: x.csv}\n")
+    settings = load_settings(_write(tmp_path / "qa.yaml", "include: [a/outer.yaml]\n"))
+    assert settings.datasets["inner"].path == "x.csv"
+
+
+def test_environment_references_in_an_included_path_are_rebased(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("QAVF_TEST_SUBDIR", "data")
+    monkeypatch.setenv("QAVF_TEST_ABSOLUTE", (tmp_path / "abs").as_posix())
+    _write(
+        tmp_path / "modules" / "child.yaml",
+        "datasets:\n"
+        "  relative: {path: '${QAVF_TEST_SUBDIR}/x.csv'}\n"
+        "  absolute: {path: '${QAVF_TEST_ABSOLUTE}/x.csv'}\n"
+        "  defaulted: {path: '${QAVF_TEST_UNSET:-fallback}/x.csv'}\n",
+    )
+    datasets = load_settings(
+        _write(tmp_path / "qa.yaml", "include: [modules/child.yaml]\n")
+    ).datasets
+    assert datasets["relative"].path == "modules/data/x.csv"
+    assert datasets["absolute"].path == (tmp_path / "abs" / "x.csv").as_posix()
+    assert datasets["defaulted"].path == "modules/fallback/x.csv"
+
+
+def test_include_entries_expand_environment_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Review CFG-07: include: ['${MODULE_DIR:-modules}/child.yaml'] failed as a literal name.
+    _write(tmp_path / "modules" / "child.yaml", "datasets:\n  roads: {path: roads.csv}\n")
+    _write(tmp_path / "other" / "child.yaml", "datasets:\n  other: {path: roads.csv}\n")
+    config = _write(tmp_path / "qa.yaml", "include: ['${QAVF_TEST_MODULES:-modules}/child.yaml']\n")
+    monkeypatch.delenv("QAVF_TEST_MODULES", raising=False)
+    settings = load_settings(config)
+    assert list(settings.datasets) == ["roads"]
+    assert settings.datasets["roads"].path == "modules/roads.csv"
+    assert settings.included_paths == ((tmp_path / "modules" / "child.yaml").resolve(),)
+    monkeypatch.setenv("QAVF_TEST_MODULES", "other")
+    assert list(load_settings(config).datasets) == ["other"]
+
+
+def test_an_unset_environment_reference_in_include_is_an_error(tmp_path: Path) -> None:
+    config = _write(tmp_path / "qa.yaml", "include: ['${QAVF_TEST_NEVER_SET}/child.yaml']\n")
+    with pytest.raises(ValueError, match=r"QAVF_TEST_NEVER_SET.*is not set"):
+        load_settings(config)
+
+
+def test_include_entries_do_not_take_variables(tmp_path: Path) -> None:
+    config = _write(tmp_path / "qa.yaml", "vars: {d: modules}\ninclude: ['${vars.d}/c.yaml']\n")
+    with pytest.raises(ValueError, match="cannot include"):
+        load_settings(config)
