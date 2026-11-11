@@ -167,12 +167,15 @@ class OriginIndex:
         return None
 
     def mentioned(self, text: str) -> Origin | None:
-        """The origin of the first configuration path ``text`` names (an error message)."""
+        """The origin of the most specific configuration path ``text`` names (an error
+        message): the one with the most parts, the first of those."""
+        best: tuple[int, Origin] | None = None
         for match in _MENTIONED_PATH.finditer(text):
-            found = self.locate(parse_path(match.group(0).rstrip(".")))
-            if found is not None:
-                return found
-        return None
+            path = parse_path(match.group(0).rstrip("."))
+            found = self.locate(path)
+            if found is not None and (best is None or len(path) > best[0]):
+                best = (len(path), found)
+        return best[1] if best is not None else None
 
     def pop_subtree(self, prefix: ConfigPath) -> OriginIndex:
         """Remove and return what lies under ``prefix``, relative to it."""

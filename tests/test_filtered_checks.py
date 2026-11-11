@@ -277,7 +277,7 @@ def test_defaulted_min_applicable_rows_goes_with_where() -> None:
 
 def test_defaults_refuse_min_applicable_rows_for_checks_not_filtered() -> None:
     config = {"defaults": {"drift": {"min_applicable_rows": 2}}}
-    with pytest.raises(ValidationError, match="defaults.drift.min_applicable_rows: not a setting"):
+    with pytest.raises(ValidationError, match=r"defaults.drift.min_applicable_rows: not a setting"):
         QAVFSettings.model_validate(config)
 
 

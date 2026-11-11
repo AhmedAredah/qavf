@@ -149,11 +149,27 @@ Reports written by earlier versions still load.
   among their parameters and report `population_rows`, `applicable_rows` and
   `excluded_rows`; no matching row, or fewer than `min_applicable_rows`, leaves the
   check not assessed; `defaults.<check>.min_applicable_rows` sets it for every item
-  of a filtered check (still only with `where`). Items with one condition share one read of the rows, the
-  condition is parsed when the configuration loads (with its file and line), and
+  of a filtered check (still only with `where`). Items with one condition share one
+  read of the rows, the condition is parsed when the configuration loads (with its file and line), and
   `qavf explain` shows it with the columns it reads. Top-level checks other than
   `compare` reject `where`, pointing at views. Dataset and view names containing
   `.__where_` are reserved. Polars backend.
+- **Inference families.** `drift`, `trend`, `trend_outliers` and `compare` items take
+  `inference: {family: <name>}`: the items naming one family have their p-values
+  corrected together, as one family of every member's tests (the members must agree
+  on one correction other than `none`; other checks reject `inference` when the
+  configuration loads). The runner measures each member with the other checks and
+  judges them once the family is corrected, so splitting or merging items no longer
+  changes the correction family. Results carry `inference` (family, method, family
+  size, member instance ids, the item's adjusted p-values), shown in the HTML report;
+  `qavf explain` lists every family. A selection running only some members corrects
+  over those and reports `selected N of M members`; `run.partial_families: refuse`
+  makes it an error. `qavf migrate` gives the items of a 0.6 `STA-002` or `TMP-002`
+  rule that corrected several comparisons or series together a shared family named
+  after the rule, keeping 0.6's correction. Polars backend.
+- An error raised for the whole configuration is located at the most specific
+  configuration path its message names (`checks[1].inference.family`, not the
+  `checks` list).
 
 ### Changed
 

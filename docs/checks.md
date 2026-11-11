@@ -24,6 +24,7 @@ Only configured checks run. Every item takes these fields besides its own settin
 | `tags` | Words grouping checks for run-time selection |
 | `enabled` | `false` keeps a check configured but off; an item switched off before any settings are given may omit its required ones |
 | `description` | Shown in reports |
+| `inference` | `{family: <name>}` on `drift`, `trend`, `trend_outliers` and `compare`: correct this item's p-values together with every other item of that family ([inference families](#inference-families)) |
 
 `where` (a SQL condition on the dataset's columns: assess only the rows that match
 it) is taken by every check placed in a dataset's `checks`. `expression` and plugin
@@ -265,6 +266,7 @@ run:
   fail_on: ERROR                     # lowest severity that fails the run
   fail_on_incomplete: true           # a check that could not run fails the run
   require: [no missing years, counts]  # check names, or a dataset for all its checks
+  partial_families: allow            # or refuse: see inference families
   tags:
     exploratory: {fail_on: never}    # per-tag policy
 ```
@@ -284,6 +286,53 @@ dataset entry requires every check on that dataset and its schema contracts. A
 check may not be named like a dataset, so an entry is never ambiguous. A run-time
 selection narrows requirements: items it leaves out are not required, and entries
 matching no selected item are dropped.
+
+## Inference families
+
+A check that tests significance corrects its p-values for multiple testing within
+its own item by default: a `drift` item over its comparisons, a `trend` item over
+its series, a `trend_outliers` item within each series, a `compare` item within
+each family of a level (the groups of a measure, the buckets of a time axis). Items
+that name one family with `inference: {family: <name>}` are corrected together
+instead, as one family of every member's tests, so splitting one item into several
+(or merging them) does not change the correction:
+
+```yaml
+checks:
+  - {check: drift, datasets: [readings@archive, readings@live], column: speed, method: ks,
+     correction: holm, inference: {family: nightly drift}}
+  - {check: drift, datasets: [readings@archive, readings@live], column: volume, method: ks,
+     correction: holm, inference: {family: nightly drift}}
+```
+
+- `drift`, `trend`, `trend_outliers` and `compare` take `inference`; any other
+  check rejects it when the configuration loads (with its file and line), as does
+  the native backend, which has no statistical checks.
+- The members of a family must agree on one `correction` (`bonferroni`, `holm`,
+  `bh` or `by`); a disagreement, or a member with `correction: none` (which
+  corrects nothing, the default of `trend`), is a configuration error. A `compare`
+  member must test significance (a `decision` other than `material`) with one
+  correction across its levels.
+- The family size is the number of tests of every member in the run, counting a
+  member's untested hypotheses as `p = 1` as within an item; each test is still
+  judged against its own `alpha`. A `trend_outliers` member's residuals join the
+  family rather than being corrected per series.
+- Every member is measured with the other checks, and judged once every member's
+  p-values exist. A `compare` member is evaluated twice, once to measure and once
+  to judge (comparisons are deterministic; a change between the two is an error).
+- Each member's results carry `inference`: the family, its `method`, its
+  `family_size`, the `members` (instance ids) corrected together, the item's
+  `tests` and its `adjusted` p-values. The HTML report shows the family next to
+  each member, and `qavf explain` lists every family with its members.
+- A member that cannot be measured (its dataset is unavailable, nothing could be
+  tested) reports as usual and is left out of the family, which the other
+  members' `inference.notes` say; a non-finite p-value is left out the same way.
+- A selection (`--only`, `--tags`, `--skip-tags`, `--dataset`) that runs only some
+  members corrects the family over those members, and says so: `selected 1 of 2
+  members (not run: checks[1])` in each member's `inference.notes` and in `qavf
+  explain`. With `run.partial_families: refuse` such a selection is an error
+  instead. Members switched off with `enabled: false` are not part of the family.
+- `overrides` may set `inference.family` on a check instance.
 
 ## Many datasets
 
@@ -358,7 +407,8 @@ reports name them by role (`consensus`, `pooled`) or by member, and only the
 run's audit metadata lists them.
 
 Statistical tests are corrected for multiple testing within each check item, as
-set by its `correction`; items are never pooled into one family.
+set by its `correction`, unless items name a shared
+[inference family](#inference-families).
 
 ### Reports
 
@@ -395,5 +445,6 @@ change without writing; `--drop-disabled` leaves disabled rules out).
 | A column's `checks` | The column's `conditions` |
 | `engine.fail_on`, `fail_on_incomplete`, `require` | `run` (`require` entries become check names) |
 | `engine.run_unconfigured_rules`, `include_categories`, `exclude_categories` | Removed; `migrate` prints the equivalent `--tags` / `--skip-tags` |
+| A `STA-002` or `TMP-002` rule correcting several comparisons or series together | One item each, sharing `inference: {family: STA-002}` (or `TMP-002`), so the correction family is unchanged; not when its correction is `none` |
 
 Reports written by older versions still load; only configurations change.

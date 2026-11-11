@@ -336,6 +336,42 @@ shared binning) use the shared tests, distances and corrections. Each has a `cor
 `bonferroni`, their behaviour before) and reports `p_value`, `adjusted_p` and `effect`
 in its evidence; their default results are unchanged.
 
+## Inference families
+
+By default each check item is its own correction family (each series, for TMP-003;
+each family of a level, for a comparison). Check items naming one family,
+`inference: {family: <name>}`, are corrected as one family instead
+([checks.md](checks.md#inference-families) has the configuration rules):
+
+1. Each member rule (`qavf.engine.families.CorrectedRule`) is first **measured**:
+   it reads its data and returns its raw tests (`FamilyTests`): the p-values of the
+   tests that ran, in a fixed order, and the family size they count (untested
+   hypotheses count as `p = 1`, as within an item).
+2. After every rule of the run, the runner corrects each family once
+   (`PooledFamily.correct`): the members' p-values are concatenated in
+   configuration order and adjusted with the members' common method over the sum of
+   their family sizes. A non-finite p-value is left out (adjusted `NaN`, never
+   significant) and does not count.
+3. Each member is then **judged** with its share of the adjusted p-values
+   (`FamilyTests.finish`), against its own `alpha`, exactly as it judges its own
+   correction alone, so a family of the items a QAVF 0.6 rule was split into gives
+   that rule's adjusted p-values and verdicts.
+
+A comparison corrects many small families inside its levels: while measured, a
+`RecordingLedger` (`qavf.inference.ledger`) keeps the raw p-values of each
+correction in order; while judged, a `ReplayingLedger` hands each correction its
+family-adjusted values, and the level's `significance` summary reports the family's
+size. The comparison runs twice; seeded resampling makes both runs test the same
+p-values, and any difference is an error rather than a silent mix.
+
+A member's datasets stay loaded until it is judged. Results carry the family as
+`RuleResult.inference` (`InferenceFamily`: `family`, `method`, `family_size`,
+`members`, `configured_members`, `tests`, `adjusted`, `notes`).
+
+A plugin rule can join families by subclassing `CorrectedRule`: implement
+`measure(ctx)` returning a `FamilyTests` (or findings when nothing can be tested)
+and keep a `correction` parameter; its check items then take `inference`.
+
 ## Writing a test plugin
 
 A test is a registered component. Declare what it reads (`needs`: `samples`,

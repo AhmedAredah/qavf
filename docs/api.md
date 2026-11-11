@@ -293,7 +293,8 @@ print(plan.model_dump_json(indent=2))
 ```
 
 The immutable `ValidationPlan` lists selected rules, declared dataset/column
-dependencies, known kinds of work, resource settings, excluded checks, and
+dependencies, known kinds of work, inference families (`families`: each with its
+correction and the members the selection runs), resource settings, excluded checks, and
 unresolved information. It does not open input files, call loaders, collect lazy
 frames, or consume Arrow protocols. File-based configuration itself is read.
 Observed schemas, row counts, exact physical scans, and native working memory
