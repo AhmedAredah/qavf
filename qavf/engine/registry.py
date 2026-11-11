@@ -208,6 +208,8 @@ class CheckBinding:
     rows: RowFilter | None = None
     """The rows a dataset item's ``where`` selects, when the rule reads them through a
     hidden view of the dataset; its results show the dataset and the condition."""
+    inference_family: str | None = None
+    """The inference family the item's tests are corrected with (``None``: alone)."""
 
 
 class Rule[P: RuleParams](ABC):

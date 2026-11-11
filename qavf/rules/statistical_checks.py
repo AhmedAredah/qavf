@@ -6,16 +6,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
+import numpy as np
 import polars as pl
 from pydantic import Field
 
 from qavf.compare.pairing import GroupPlan
 from qavf.engine.context import DataContext
+from qavf.engine.families import CorrectedRule, FamilyCorrection, FamilyTests
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
 from qavf.inference._support import scipy_stats
-from qavf.inference.multiple import adjust
 from qavf.inference.results import Correction
 from qavf.rules._contracts import isolate_contract
 from qavf.rules._groups import GroupedFindings
@@ -286,7 +287,43 @@ class _PendingKS:
     metrics: dict[str, Any]
 
 
-class DistributionDriftRule(Rule):
+class _DriftTests(FamilyTests):
+    """A drift item's findings, with its KS comparisons awaiting the correction."""
+
+    def __init__(
+        self,
+        rule: DistributionDriftRule,
+        findings: list[Finding],
+        measured: dict[int, _PendingKS],
+        tests: int,
+    ) -> None:
+        self._rule = rule
+        self._findings = findings
+        self._measured = measured
+        """KS comparisons awaiting the correction, by their place in ``findings``."""
+        self._tests = tests
+
+    @property
+    def p_values(self) -> np.ndarray:
+        return np.array([pending.p_value for pending in self._measured.values()], dtype=float)
+
+    @property
+    def family_size(self) -> int:
+        # Untested KS comparisons count as p = 1: Bonferroni divides by every one.
+        return self._tests
+
+    def finish(self, ctx: DataContext, correction: FamilyCorrection) -> list[Finding]:
+        findings = list(self._findings)
+        for i, q in zip(self._measured, correction.adjusted, strict=True):
+            findings[i] = self._rule.ks_finding(self._measured[i], float(q), correction)
+        if not findings:
+            return [Finding.skip("No drift comparisons are configured.")]
+        if self._rule.params.group is not None:
+            return GroupedFindings(self._rule.params.group).finish(ctx, findings)
+        return findings
+
+
+class DistributionDriftRule(CorrectedRule):
     """A column's distribution has not drifted from its reference."""
 
     rule_id: ClassVar[str] = "STA-002"
@@ -314,9 +351,9 @@ class DistributionDriftRule(Rule):
             )
         )
 
-    def evaluate(self, ctx: DataContext) -> list[Finding]:
+    def measure(self, ctx: DataContext) -> _DriftTests:
         comparisons = self.params.comparisons
-        tests = max(sum(c.method == "ks" for c in comparisons), 1)
+        tests = sum(c.method == "ks" for c in comparisons)
         findings: list[Finding] = []
         measured: dict[int, _PendingKS] = {}
         """KS comparisons awaiting the correction, by their place in ``findings``."""
@@ -353,20 +390,14 @@ class DistributionDriftRule(Rule):
                         findings.append(Finding.skip(comparison.label()))  # replaced below
                     else:
                         findings.append(finding)
-        # Untested KS comparisons count as p = 1: Bonferroni divides by every one.
-        pending = [measured[i].p_value for i in measured]
-        adjusted = adjust(pending, self.params.correction, family_size=tests)
-        for i, q in zip(measured, adjusted, strict=True):
-            findings[i] = self._ks_finding(measured[i], float(q), tests)
-        if not findings:
-            return [Finding.skip("No drift comparisons are configured.")]
-        if self.params.group is not None:
-            return GroupedFindings(self.params.group).finish(ctx, findings)
-        return findings
+        return _DriftTests(self, findings, measured, tests)
 
-    def _ks_finding(self, measured: _PendingKS, adjusted: float, tests: int) -> Finding:
+    def ks_finding(
+        self, measured: _PendingKS, adjusted: float, family: FamilyCorrection
+    ) -> Finding:
         """Judge one KS comparison once the family is corrected."""
-        c, correction = measured.comparison, self.params.correction
+        c, correction = measured.comparison, family.method
+        tests = max(family.family_size, 1)
         metrics = dict(measured.metrics)
         statistic, probability = measured.statistic, measured.p_value
         if correction == "bonferroni":

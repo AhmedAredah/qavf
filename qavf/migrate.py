@@ -41,6 +41,9 @@ from qavf.configuration import parse_config_text
 from qavf.engine.registry import Rule, RuleRegistry, default_registry
 
 _LIST_DRIVEN = {"INP-006": "expression", "INP-007": "sql"}
+_POOLED_CORRECTIONS = {"STA-002": "bonferroni", "TMP-002": "none"}
+"""QAVF 0.6 rules that corrected every comparison or series together, with their
+default correction: split into items, those items keep that family."""
 _TOP_ORDER = ("project", "datasets", "connections", "secrets", "checks", "run", "engine")
 
 
@@ -196,9 +199,17 @@ class Migrator:
             if not enabled and self.drop_disabled:
                 migration.notes.append(f"rules.{code}: disabled; {len(items)} item(s) dropped")
                 continue
+            family = _inference_family(code, params, len(items))
+            if family is not None:
+                migration.notes.append(
+                    f"rules.{code}: its {len(items)} checks share inference family "
+                    f"{family!r}, so their tests stay corrected together as in QAVF 0.6"
+                )
             names = []
             for decompiled in items:
                 item = dict(decompiled.item)
+                if family is not None:
+                    item["inference"] = {"family": family}
                 if severity is not None and "severity" not in item:
                     item["severity"] = severity
                 if not enabled:
@@ -460,6 +471,16 @@ _NAMED_BLOCKS = {
     "metric": NamedBlock("metrics", "entity"),
 }
 """Check settings whose inline definitions become named dataset entries."""
+
+
+def _inference_family(code: str, params: Mapping[str, Any], items: int) -> str | None:
+    """The inference family the items of a QAVF 0.6 rule share (named after the rule):
+    one that corrected all of its comparisons or series together, split into several
+    items, with a correction other than ``none``."""
+    default = _POOLED_CORRECTIONS.get(code)
+    if default is None or items < 2 or params.get("correction", default) == "none":
+        return None
+    return code
 
 
 def _default_name(check: str, datasets: list[str]) -> str:

@@ -216,7 +216,27 @@ def narrow(
     ]
     copied.apply_selection(AppliedSelection(selection, frozenset(switched_off)))
     copied.adopt_origins(settings.origins)
+    if settings.run.partial_families == "refuse":
+        _refuse_partial_families(copied, selection)
     return copied
+
+
+def _refuse_partial_families(settings: QAVFSettings, selection: Selection) -> None:
+    """Raise for a selection running only some members of an inference family.
+
+    Raises:
+        SelectionError: under ``run.partial_families: refuse``.
+    """
+    from qavf.checks.families import FamilyPlans
+
+    partial = FamilyPlans(settings).partial()
+    if partial:
+        family = partial[0]
+        raise SelectionError(
+            f"the selection {selection.describe()} {family.selected()} of inference family "
+            f"{family.name!r} (not run: {', '.join(family.left_out)}), and "
+            "run.partial_families is refuse; select every member or none"
+        )
 
 
 class ItemTags:

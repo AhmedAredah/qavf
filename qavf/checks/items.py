@@ -16,7 +16,16 @@ from pydantic.json_schema import SkipJsonSchema
 
 from qavf.engine.severity import Severity
 
-COMMON_FIELDS = ("check", "name", "severity", "where", "tags", "enabled", "description")
+COMMON_FIELDS = (
+    "check",
+    "name",
+    "severity",
+    "where",
+    "tags",
+    "enabled",
+    "description",
+    "inference",
+)
 """Fields every check item accepts; everything else is the check's own settings."""
 
 FILTER_SETTING = "min_applicable_rows"
@@ -31,6 +40,24 @@ def settings_required_when_enabled(schema: dict[str, Any]) -> None:
     schema["required"] = ["check"]
     schema["if"] = {"properties": {"enabled": {"const": False}}, "required": ["enabled"]}
     schema["else"] = {"required": required}
+
+
+class InferenceSettings(BaseModel):
+    """``inference``: the multiple-testing family a check item's tests belong to."""
+
+    model_config = ConfigDict(extra="forbid", use_attribute_docstrings=True)
+
+    family: str = Field(min_length=1)
+    """Name of the family: items naming the same family have their p-values corrected
+    together (one Bonferroni, Holm, BH or BY family over every member's tests), with
+    the correction the members agree on."""
+
+    @field_validator("family")
+    @classmethod
+    def _family_name(cls, family: str) -> str:
+        if family != family.strip():
+            raise ValueError(f"family {family!r} must not start or end with whitespace")
+        return family
 
 
 class CheckItem(BaseModel):
@@ -65,6 +92,11 @@ class CheckItem(BaseModel):
     """Keep a check configured but switched off."""
     description: str | None = None
     """Shown in reports."""
+    inference: InferenceSettings | None = None
+    """Checks that test significance (``drift``, ``trend``, ``trend_outliers``,
+    ``compare``): ``{family: <name>}`` corrects this item's p-values together with
+    those of every other item naming the same family, instead of within this item
+    alone."""
 
     @field_validator("tags")
     @classmethod
@@ -147,6 +179,8 @@ class ExpressionItem(CheckItem):
     """How a row whose expression evaluates to NULL counts (SQL CHECK semantics: pass)."""
     min_applicable_rows: int = Field(default=0, ge=0, strict=True)
     """With ``where``: fewer matching rows than this makes the check not assessed."""
+    inference: SkipJsonSchema[None] = None
+    """Not taken: the check runs no statistical test."""
 
 
 class SqlItem(CheckItem):
@@ -163,6 +197,8 @@ class SqlItem(CheckItem):
     """Not taken: the query has its own WHERE clause."""
     sql: str
     """Query returning offending rows; every dataset is a table under its name."""
+    inference: SkipJsonSchema[None] = None
+    """Not taken: the check runs no statistical test."""
 
 
 class TagPolicy(BaseModel):
@@ -188,6 +224,11 @@ class RunSettings(BaseModel):
     """Checks that must actually be assessed: check names, or a dataset name for every
     check on that dataset. A required check that is disabled, skipped or not assessed
     makes the run incomplete. An entry that matches nothing is a configuration error."""
+    partial_families: Literal["allow", "refuse"] = "allow"
+    """When a selection (``--only``, ``--tags``, ``--skip-tags``, ``--dataset``) runs
+    only some members of an inference family: ``allow`` corrects the family over the
+    selected members alone (results and ``qavf explain`` say ``selected N of M
+    members``); ``refuse`` makes such a selection an error."""
     tags: dict[str, TagPolicy] = Field(default_factory=dict)
     """Pass/fail policy per tag, e.g. ``exploratory: {fail_on: never}``. Built-in checks
     also carry their family as a tag (``temporal``, ``input``, …). When several tags of a
@@ -238,6 +279,7 @@ __all__ = [
     "CheckDefaults",
     "CheckItem",
     "ExpressionItem",
+    "InferenceSettings",
     "RunSettings",
     "SqlItem",
     "TagPolicy",

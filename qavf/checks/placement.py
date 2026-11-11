@@ -318,6 +318,11 @@ def row_check_errors(settings: QAVFSettings) -> list[str]:
         stub = not placed.item.enabled and not placed.item.settings
         if validate is not None and not stub:
             problems.extend(validate(placed.item, placed.scope))
+        if validate is not None and placed.item.inference is not None:
+            problems.append(
+                f"{placed.scope.at('inference')}: the {placed.item.check} check runs no "
+                "statistical test, so it cannot join an inference family"
+            )
     problems.extend(default_problems(settings.defaults, ROW_CHECK_SETTINGS))
     return problems + name_errors(settings)
 

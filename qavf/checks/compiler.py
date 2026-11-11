@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from qavf.checks.catalog import CATALOG, CheckDefinition, PluginDefinition, definition_for
+from qavf.checks.families import FamilyValidation
 from qavf.checks.items import CheckItem
 from qavf.checks.placement import (
     ROW_CHECKS,
@@ -81,6 +82,7 @@ class CompiledCheck:
             if isinstance(self.definition, PluginDefinition)
             else None,
             rows=self.rows,
+            inference_family=self.item.inference.family if self.item.inference else None,
         )
 
     def rule(self) -> Rule:
@@ -123,6 +125,7 @@ def configuration_errors(settings: QAVFSettings) -> list[str]:
         if definition.configurable and name not in ROW_CHECKS
     }
     problems.extend(default_problems(settings.defaults, known))
+    problems.extend(FamilyValidation(settings, CATALOG).errors())
     return problems + row_check_errors(settings)
 
 
@@ -169,6 +172,9 @@ def compile_checks(
             continue
         compiled.append(CompiledCheck(definition, placed, params, rows))
     problems.extend(_default_check_problems(settings, registry))
+    if registry is not None:
+        definitions = {check.check: check.definition for check in compiled}
+        problems.extend(FamilyValidation(settings, definitions).errors())
     if problems:
         raise CheckCompilationError("invalid checks: " + "; ".join(problems))
     return compiled

@@ -44,6 +44,7 @@ from qavf.engine.compilation import (
 )
 from qavf.engine.context import DataContext, DatasetNotAvailableError
 from qavf.engine.derived_names import shown_datasets, shown_value
+from qavf.engine.family_pass import FamilyStage
 from qavf.engine.filtered import FilteredPopulation, FilteredResult
 from qavf.engine.registry import Finding, Rule, RuleRegistry
 from qavf.engine.resources import ResourceLimitError, retained_size
@@ -152,6 +153,8 @@ class QARunner:
             self._sources = self.sources
         self.excluded: dict[str, str] = {}
         """Check items left out of the plan (disabled), by item name, with the reason."""
+        self._families: FamilyStage | None = None
+        """The inference families of the run in progress."""
 
     @property
     def registry(self) -> RuleRegistry:
@@ -267,6 +270,9 @@ class QARunner:
         with contextlib.ExitStack() as ownership:
             if ctx is None:
                 ownership.callback(context.close)
+            families = self._families = FamilyStage.of(rules, self.settings)
+            if families is not None:
+                ownership.callback(self._end_families, families)
             execution_plan = build_plan(rules, self.settings, context.declared())
             if ctx is None:
                 context._execution_plan = execution_plan
@@ -288,6 +294,8 @@ class QARunner:
                 context.finish_inactive_workers()
             else:
                 batches = [self._execute(rule, context, control=control) for rule in rules]
+            if families is not None:
+                batches = self._judge_families(families, rules, batches, context, control)
             for name, reason in context.verify_inputs().items():
                 batches.append(
                     [
@@ -358,6 +366,34 @@ class QARunner:
         if control is not None:
             control.finished(report)
         return report
+
+    def _judge_families(
+        self,
+        families: FamilyStage,
+        rules: list[Rule],
+        batches: list[list[RuleResult]],
+        ctx: DataContext,
+        control: RunControl | None,
+    ) -> list[list[RuleResult]]:
+        """Correct every inference family over its measured members, judge each member
+        with its share, and mark every member's results with its family."""
+        families.correct()
+        waiting = families.waiting(rules)
+        timeout = self.settings.engine.rule_timeout_s
+        members = [rules[index] for index in waiting]
+        if timeout is not None and members:
+            judged = self._run_with_deadlines(members, ctx, 1, timeout, control)
+        else:
+            judged = [self._execute(rule, ctx, control=control, emit=False) for rule in members]
+        batches = list(batches)
+        for index, results in zip(waiting, judged, strict=True):
+            batches[index] = results
+        return [families.annotate(rule, batch) for rule, batch in zip(rules, batches, strict=True)]
+
+    def _end_families(self, families: FamilyStage) -> None:
+        families.close()
+        if self._families is families:
+            self._families = None
 
     def _fit_report_budget(self, report: QAReport) -> QAReport:
         """Bound persisted report bytes without losing assessment/coverage outcomes."""
@@ -710,6 +746,8 @@ class QARunner:
             results = self._execute_isolated(rule, ctx)
             elapsed = round(time.perf_counter() - started, 6)
             load = round(ctx.thread_load_seconds() - loaded, 6)
+            if self._families is not None:
+                elapsed, load = self._families.timed(rule, elapsed, load)
             results = [
                 result.model_copy(
                     update={
@@ -731,7 +769,8 @@ class QARunner:
         finally:
             if began:
                 try:
-                    if ctx._execution_plan is not None:
+                    held = self._families is not None and self._families.holds(rule)
+                    if ctx._execution_plan is not None and not held:
                         ctx.release(ctx._execution_plan.complete(rule.key))
                 except Exception as exc:
                     results.append(
@@ -818,7 +857,10 @@ class QARunner:
         """Evaluate an available rule and turn its findings into results."""
         start = time.perf_counter()
         try:
-            outcome = rule.evaluate(ctx)
+            families = self._families
+            outcome = rule.evaluate(ctx) if families is None else families.outcome(rule, ctx)
+            if outcome is None:
+                return []  # measured; judged with its inference family after every rule
             # A generator rule runs while it is consumed: keep that inside the guard.
             findings = [outcome] if isinstance(outcome, Finding) else list(outcome)
         except DatasetNotAvailableError as exc:

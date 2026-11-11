@@ -714,6 +714,9 @@ class PlanText:
                     ", ".join(rule.where_columns) if rule.where_columns is not None else "unknown"
                 )
                 lines.append(f"    where: {rule.where} (reads: {reads})")
+        if plan.families:
+            lines += ["", f"Inference families ({len(plan.families)}):"]
+            lines += [f"  {family.describe()}" for family in plan.families]
         if plan.overrides:
             lines += ["", f"Overrides applied ({len(plan.overrides)}):"]
             lines += [f"  {item}" for item in plan.overrides]

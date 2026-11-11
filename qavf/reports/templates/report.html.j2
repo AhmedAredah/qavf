@@ -109,6 +109,7 @@
       {% if result.datasets %}<span>Datasets: {{ result.datasets | join(", ") }}</span>{% endif %}
       <span>Affected: {{ result | affected }}</span>
       <span>Time: {{ result.execution_time_s | duration }}</span>
+      {% if result.inference %}<span>Inference family: {{ result.inference.describe() }}</span>{% endif %}
     </div>
     {% if result.recommendation %}<div class="advice"><strong>Recommendation.</strong> {{ result.recommendation }}</div>{% endif %}
     {% if result.metrics %}<p><a href="#metrics-{{ view.anchor }}">Structured metrics and comparison identity</a></p>{% endif %}
@@ -154,7 +155,7 @@
           <td>{{ result.category }}</td>
           <td>{{ status_chip(result.status) }}</td>
           <td>{{ severity_chip(result.severity) }}</td>
-          <td>{{ result.message }}</td>
+          <td>{{ result.message }}{% if result.inference %}<br><span class="muted">Inference family {{ result.inference.describe() }}</span>{% endif %}</td>
           <td class="num">{% if result.affected_count %}{% if not result.affected_count_exact %}at least {% endif %}{{ "{:,}".format(result.affected_count) }}{% if result.unit %} <span class="muted">{{ result.unit }}</span>{% endif %}{% else %}—{% endif %}</td>
           <td class="num">{{ result.execution_time_s | duration }}</td>
         </tr>

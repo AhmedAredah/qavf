@@ -63,6 +63,7 @@ from qavf.compare.pairing import (
 )
 from qavf.engine.derived import DerivedParams, derived_name
 from qavf.engine.derived_names import RowFilter
+from qavf.engine.families import CorrectedRule
 from qavf.engine.registry import Rule
 from qavf.input_rules import INPUT_RULES
 from qavf.rules.comparison_checks import DatasetComparisonRule
@@ -179,6 +180,12 @@ class CheckDefinition(ABC):
     @abstractmethod
     def item_fields(self) -> dict[str, FieldSpec]:
         """The check's own settings, for the configuration JSON Schema."""
+
+    @property
+    def supports_inference(self) -> bool:
+        """Whether the check's items take ``inference`` (its verdicts depend on a
+        multiple-testing correction)."""
+        return issubclass(self.rule_cls, CorrectedRule)
 
     def default_settings(self) -> tuple[str, ...]:
         """The check's own settings ``defaults`` may give (with the common
@@ -1473,7 +1480,8 @@ def _item_model(definition: CheckDefinition) -> type[BaseModel]:
     common = {
         name: field
         for name, field in _COMMON_ITEM_FIELDS.items()
-        if name != "where" or definition.takes_where
+        if (name != "where" or definition.takes_where)
+        and (name != "inference" or definition.supports_inference)
     }
     if definition.filters_rows:
         common[FILTER_SETTING] = _MIN_APPLICABLE_ROWS

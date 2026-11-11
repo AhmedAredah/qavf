@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field
 
+from qavf.checks.families import FamilyPlans
 from qavf.checks.placement import placed_items
 from qavf.checks.selection import Selection, narrow
 from qavf.engine.compilation import (
@@ -15,8 +16,9 @@ from qavf.engine.compilation import (
     build_source_registry,
     compile_rules,
 )
+from qavf.engine.families import CorrectedRule
 from qavf.engine.planning import build_plan
-from qavf.engine.registry import RuleRegistry, default_registry
+from qavf.engine.registry import Rule, RuleRegistry, default_registry
 from qavf.inputs.normalize import Configuration, prepare_configuration
 from qavf.inputs.resources import ResourceLimits
 from qavf.optional import resolve_backend
@@ -76,6 +78,34 @@ class RuleExplanation(SnapshotModel):
     """The columns of its dataset that ``where`` reads (``None``: not proven)."""
 
 
+class FamilyExplanation(SnapshotModel):
+    """An inference family: the check items whose tests are corrected together."""
+
+    name: str
+    method: str | None = None
+    """The correction its members apply (``None``: no member is planned)."""
+    members: tuple[str, ...] = ()
+    """Instance ids of the members the run evaluates."""
+    configured_members: tuple[str, ...] = ()
+    """Instance ids of every member the configuration declares."""
+
+    @property
+    def partial(self) -> bool:
+        return len(self.members) < len(self.configured_members)
+
+    def describe(self) -> str:
+        """``drift checks (holm): checks[0], checks[1]``, with a partial selection."""
+        method = f" ({self.method})" if self.method else ""
+        text = f"{self.name}{method}: {', '.join(self.members) or 'no member runs'}"
+        if self.partial:
+            left_out = [m for m in self.configured_members if m not in self.members]
+            text += (
+                f"; selected {len(self.members)} of {len(self.configured_members)} members "
+                f"(not run: {', '.join(left_out)})"
+            )
+        return text
+
+
 class ValidationPlan(SnapshotModel):
     """Inspectable planning facts, with unknown costs explicitly left unknown."""
 
@@ -92,6 +122,9 @@ class ValidationPlan(SnapshotModel):
     overrides: tuple[str, ...] = ()
     """Each applied ``overrides`` entry, in the order applied: the instance it
     changed, the target as written, the settings it set and its file."""
+    families: tuple[FamilyExplanation, ...] = ()
+    """Inference families: items whose tests are corrected together, with the members
+    the selection runs."""
     resources: dict[str, Any] = Field(default_factory=dict)
     profile: ProfileName | None = None
     data_read: bool = False
@@ -324,6 +357,7 @@ def explain(
         )
     rules: list[RuleExplanation] = []
     excluded: dict[str, str] = {}
+    methods: dict[str, str] = {}
     try:
         compiled = compile_rules(planned_settings, registry, sources)
         dependencies = build_plan(compiled.rules, planned_settings, settings.datasets).describe()
@@ -344,6 +378,7 @@ def explain(
                 )
             )
         excluded = dict(compiled.excluded)
+        methods = _family_methods(compiled.rules)
     except ConfigurationError as exc:
         if load_plugins:
             raise
@@ -358,6 +393,15 @@ def explain(
         unresolved=tuple(unresolved),
         projection_fallback=native.fallback if native is not None else (),
         overrides=tuple(applied.describe() for applied in settings.applied_overrides),
+        families=tuple(
+            FamilyExplanation(
+                name=plan.name,
+                method=methods.get(plan.name),
+                members=plan.members,
+                configured_members=plan.configured,
+            )
+            for plan in FamilyPlans(settings).plans.values()
+        ),
         complete=not unresolved,
         profile=profile,
         resources={
@@ -377,4 +421,20 @@ def explain(
     )
 
 
-__all__ = ["DatasetExplanation", "RuleExplanation", "ValidationPlan", "explain"]
+def _family_methods(rules: Sequence[Rule]) -> dict[str, str]:
+    """The correction of each inference family, from its first planned member."""
+    methods: dict[str, str] = {}
+    for rule in rules:
+        family = rule.binding.inference_family if rule.binding is not None else None
+        if family is not None and isinstance(rule, CorrectedRule):
+            methods.setdefault(family, rule.family_method())
+    return methods
+
+
+__all__ = [
+    "DatasetExplanation",
+    "FamilyExplanation",
+    "RuleExplanation",
+    "ValidationPlan",
+    "explain",
+]

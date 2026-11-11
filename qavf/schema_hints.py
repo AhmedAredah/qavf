@@ -132,6 +132,7 @@ _CHECK: dict[str, Hint] = {
     "tags": ("Check", "Tags", True),
     "enabled": ("Check", "Enabled", False),
     "description": ("Check", "Description", False),
+    "inference": ("Check", "Inference family", True),
 }
 """Fields every check item has; the check's own settings are hinted below or generically."""
 
@@ -263,13 +264,13 @@ HINTS: dict[str, dict[str, Hint]] = {
         "name": ("Grouped values", "Name", True),
     },
     "ExpressionItem": {
-        **_CHECK,
+        **{key: hint for key, hint in _CHECK.items() if key != "inference"},
         "expr": ("Settings", "Expression", False),
         "null_as": ("Settings", "A null result counts as", True),
         "min_applicable_rows": ("Settings", "Minimum applicable rows", True),
     },
     "SqlItem": {
-        **{key: hint for key, hint in _CHECK.items() if key != "where"},
+        **{key: hint for key, hint in _CHECK.items() if key not in ("where", "inference")},
         "sql": ("Settings", "Query returning offending rows", False),
     },
     "CheckItem": _CHECK,
@@ -277,8 +278,10 @@ HINTS: dict[str, dict[str, Hint]] = {
         "fail_on": ("Pass / fail", "Fail on severity", False),
         "fail_on_incomplete": ("Pass / fail", "Fail when checks cannot run", False),
         "require": ("Pass / fail", "Checks that must be assessed", True),
+        "partial_families": ("Pass / fail", "Selections running part of a family", True),
         "tags": ("Pass / fail", "Policies per tag", True),
     },
+    "InferenceSettings": {"family": ("Check", "Family name", False)},
     "TagPolicy": {"fail_on": ("Pass / fail", "Fail on severity (this tag)", False)},
     "ViewSpec": {
         "where": ("View", "Rows where", False),

@@ -34,7 +34,7 @@ from qavf.compare.results import CheckResult
 from qavf.compare.spec import ComparisonSpec, Side
 from qavf.inference.decision import Decision, decide, needs_test
 from qavf.inference.independent import Moments
-from qavf.inference.multiple import correct
+from qavf.inference.ledger import family_correct
 from qavf.inference.registry import TESTS, InferenceTest, Needs, TestInput
 from qavf.inference.results import (
     Correction,
@@ -394,12 +394,11 @@ def judge(
             test = plan.test.equivalent if policy == "equivalence" else plan.test.run
             results.append(test(member.data).model_copy(update={"label": member.label}))
     run = [i for i, result in enumerate(results) if result is not None]
-    family = sum(applicable)
-    corrected = correct(
+    corrected, family = family_correct(
         [results[i] for i in run],  # type: ignore[misc]
         inference.correction,
         inference.alpha,
-        family_size=family,
+        family_size=sum(applicable),
     )
     for i, result in zip(run, corrected, strict=True):
         results[i] = result

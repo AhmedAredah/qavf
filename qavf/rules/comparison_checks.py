@@ -6,16 +6,22 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import Any, ClassVar
 
+import numpy as np
+
 from qavf.compare.engine import compare_in_context
 from qavf.compare.group_levels import group_levels
 from qavf.compare.pairing import GroupPlan
 from qavf.compare.registry import entry_point_scope, entry_points_enabled
 from qavf.compare.results import DatasetComparison
-from qavf.compare.spec import ComparisonSpec
+from qavf.compare.significance import Inference
+from qavf.compare.spec import ComparisonSpec, InferenceParams
 from qavf.engine.context import DataContext
+from qavf.engine.families import CorrectedRule, FamilyCorrection, FamilyTests
 from qavf.engine.planning import DataRequirements
-from qavf.engine.registry import Finding, Rule, RuleParams
+from qavf.engine.registry import Finding, RuleParams
 from qavf.engine.severity import Severity
+from qavf.inference.ledger import FamilyReplayError, RecordingLedger, ReplayingLedger
+from qavf.inference.results import Correction
 from qavf.rules._groups import GroupedFindings
 from qavf.settings import QAVFSettings
 
@@ -114,7 +120,46 @@ def _findings(result: DatasetComparison, spec: ComparisonSpec) -> list[Finding]:
     return findings
 
 
-class DatasetComparisonRule(Rule):
+class _ComparisonTests(FamilyTests):
+    """The corrections a comparison made while measured, replayed when it is judged.
+
+    A comparison corrects many small families inside its levels; their raw
+    p-values join the inference family in the order they were corrected. Judging
+    evaluates the comparison again with each correction handed its share of the
+    family's adjusted p-values (comparisons are deterministic).
+    """
+
+    def __init__(self, rule: DatasetComparisonRule, ledger: RecordingLedger) -> None:
+        self._rule = rule
+        self._ledger = ledger
+
+    @property
+    def p_values(self) -> np.ndarray:
+        return self._ledger.p_values
+
+    @property
+    def family_size(self) -> int:
+        return self._ledger.family_size
+
+    @property
+    def methods(self) -> frozenset[str]:
+        return self._ledger.methods
+
+    def finish(self, ctx: DataContext, correction: FamilyCorrection) -> list[Finding]:
+        replay = ReplayingLedger(
+            self._ledger.recorded, correction.adjusted, correction.method, correction.family_size
+        )
+        with replay.active():
+            findings = self._rule.compared(ctx)
+        if not replay.complete():
+            raise FamilyReplayError(
+                "the comparison corrected fewer families when judged than when measured; "
+                "its inputs must not change during the run"
+            )
+        return findings
+
+
+class DatasetComparisonRule(CorrectedRule):
     """Datasets compare within tolerance at each configured level."""
 
     rule_id: ClassVar[str] = "CMP-001"
@@ -169,10 +214,46 @@ class DatasetComparisonRule(Rule):
                 datasets |= set(plan.members)
         return DataRequirements(frozenset(datasets))
 
-    def evaluate(self, ctx: DataContext) -> Finding | list[Finding]:
+    def family_corrections(self) -> frozenset[str]:
+        """The corrections of the levels that test significance (``decision`` other
+        than ``material``), each level's own or its comparison's."""
+        corrections: set[str] = set()
+        from qavf.compare.levels import LEVELS
+
+        for spec in self.params.comparisons:
+            for level in spec.selected_levels():
+                params = LEVELS.create(level.level, level.params).params
+                if not isinstance(params, InferenceParams):
+                    continue
+                inference = Inference.of(spec, params)
+                if inference.tests:
+                    corrections.add(inference.correction)
+        return frozenset(corrections)
+
+    def family_method(self) -> Correction:
+        methods = sorted(self.family_corrections())
+        method: Correction = methods[0] if len(methods) == 1 else "none"  # type: ignore[assignment]
+        return method
+
+    def evaluate(self, ctx: DataContext) -> list[Finding]:
+        """Each level's families corrected where they are judged."""
+        return self.compared(ctx)
+
+    def measure(self, ctx: DataContext) -> FamilyTests | list[Finding]:
+        """Evaluate once, recording every correction's raw p-values; a comparison that
+        corrected nothing is final."""
+        ledger = RecordingLedger()
+        with ledger.active():
+            findings = self.compared(ctx)
+        if not ledger.recorded:
+            return findings
+        return _ComparisonTests(self, ledger)
+
+    def compared(self, ctx: DataContext) -> list[Finding]:
+        """Every comparison's findings (and the group's)."""
         plan = self.params.group
         if not self.params.comparisons and plan is None:
-            return Finding.skip("No comparisons are configured.")
+            return [Finding.skip("No comparisons are configured.")]
         findings: list[Finding] = []
         if plan is not None:
             for level in group_levels(plan):

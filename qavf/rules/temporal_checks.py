@@ -40,6 +40,7 @@ import polars as pl
 from pydantic import Field
 
 from qavf.engine.context import DataContext
+from qavf.engine.families import CorrectedRule, FamilyCorrection, FamilyTests
 from qavf.engine.planning import DataRequirements
 from qavf.engine.registry import Finding, Rule, RuleParams
 from qavf.engine.severity import Severity
@@ -712,7 +713,94 @@ class TrendDirectionParams(SeriesParams):
     (``bh``, ``by``, ``holm``, ``bonferroni``); applies with ``alpha``."""
 
 
-class TrendDirectionRule(_TemporalRule):
+@dataclass(slots=True)
+class _TrendTally:
+    """What a trend item examined, beside its tests."""
+
+    records: BoundedEvidence
+    blocked: list[Finding]
+    used: list[SeriesSpec]
+    examined: int = 0
+    too_short: int = 0
+
+
+class _TrendTests(FamilyTests):
+    """A trend item's Kendall p-values, with the wrong-way series awaiting the
+    correction; their evidence payloads stay in ``evidence`` until judged."""
+
+    def __init__(
+        self,
+        alpha: float | None,
+        tally: _TrendTally,
+        family: array[float],
+        against: array[int],
+        effects: array[float],
+        evidence: DeferredEvidence,
+    ) -> None:
+        self._alpha = alpha
+        self._tally = tally
+        self._family = family
+        self._against = against
+        self._effects = effects
+        self._evidence = evidence
+
+    @property
+    def p_values(self) -> np.ndarray:
+        return np.asarray(self._family, dtype=float)
+
+    @property
+    def family_size(self) -> int:
+        return len(self._family)
+
+    def close(self) -> None:
+        self._evidence.__exit__(None, None, None)
+
+    def finish(self, ctx: DataContext, correction: FamilyCorrection) -> list[Finding]:
+        tally, records, alpha = self._tally, self._tally.records, self._alpha
+        adjusted = correction.adjusted
+        for index, tau in zip(self._against, self._effects, strict=True):
+            # A p-value left out of a family (NaN) is never significant.
+            if alpha is not None and not adjusted[index] <= alpha:
+                continue
+            if len(records.records) >= records.limit or not ctx.evidence_bytes:
+                records.count += 1
+                continue
+            payload = self._evidence.get(index)
+            if payload is None:
+                records.count += 1
+                continue
+            key, label, expected, periods, first, last = payload
+            record = annotate(
+                key,
+                series=label,
+                expected=expected,
+                kendall_tau=round(tau, 4),
+                periods=periods,
+                first_value=first,
+                last_value=last,
+            )
+            records.append(
+                {
+                    **record,
+                    "p_value": round(self._family[index], 6),
+                    "adjusted_p": round(float(adjusted[index]), 6),
+                    "correction": correction.method,
+                    "effect": round(tau, 4),
+                }
+            )
+        return _outcome(
+            records,
+            tally.used,
+            tally.examined,
+            f"{records.count:,} series trend against expectation.",
+            f"All {tally.examined:,} series follow their expected direction.",
+            tally.blocked,
+            too_short=tally.too_short,
+            unit="series",
+        )
+
+
+class TrendDirectionRule(_TemporalRule, CorrectedRule):
     """Series with an expected direction actually move that way."""
 
     rule_id: ClassVar[str] = "TMP-002"
@@ -731,15 +819,19 @@ class TrendDirectionRule(_TemporalRule):
     )
     Params: ClassVar[type[RuleParams]] = TrendDirectionParams
 
-    def evaluate(self, ctx: DataContext) -> list[Finding]:
-        with DeferredEvidence(ctx) as evidence:
-            return self._evaluate(ctx, evidence)
-
-    def _evaluate(self, ctx: DataContext, evidence: DeferredEvidence) -> list[Finding]:
+    def measure(self, ctx: DataContext) -> FamilyTests | list[Finding]:
         if not any(spec.expected_trend for spec in self.params.series):
             return [Finding.skip("No series declares an expected trend.")]
         if scipy_stats() is None:
             return [Finding.unassessed(_MISSING_STATS)]
+        evidence = DeferredEvidence(ctx)
+        try:
+            return self._measure(ctx, evidence)
+        except BaseException:
+            evidence.__exit__(None, None, None)
+            raise
+
+    def _measure(self, ctx: DataContext, evidence: DeferredEvidence) -> _TrendTests:
         records = BoundedEvidence(ctx.evidence_limit, byte_limit=ctx.evidence_bytes)
         blocked: list[Finding] = []
         used: list[SeriesSpec] = []
@@ -836,46 +928,8 @@ class TrendDirectionRule(_TemporalRule):
                                     "effect": round(tau, 4),
                                 }
                             )
-        adjusted = adjust(family, self.params.correction) if against else np.empty(0)
-        for index, tau in zip(against, effects, strict=True):
-            if self.params.alpha is not None and adjusted[index] > self.params.alpha:
-                continue
-            if len(records.records) >= records.limit or not ctx.evidence_bytes:
-                records.count += 1
-                continue
-            payload = evidence.get(index)
-            if payload is None:
-                records.count += 1
-                continue
-            key, label, expected, periods, first, last = payload
-            record = annotate(
-                key,
-                series=label,
-                expected=expected,
-                kendall_tau=round(tau, 4),
-                periods=periods,
-                first_value=first,
-                last_value=last,
-            )
-            records.append(
-                {
-                    **record,
-                    "p_value": round(family[index], 6),
-                    "adjusted_p": round(float(adjusted[index]), 6),
-                    "correction": self.params.correction,
-                    "effect": round(tau, 4),
-                }
-            )
-        return _outcome(
-            records,
-            used,
-            examined,
-            f"{records.count:,} series trend against expectation.",
-            f"All {examined:,} series follow their expected direction.",
-            blocked,
-            too_short=too_short,
-            unit="series",
-        )
+        tally = _TrendTally(records, blocked, used, examined, too_short)
+        return _TrendTests(self.params.alpha, tally, family, against, effects, evidence)
 
 
 # ----------------------------------------------------------------- TMP-003
@@ -898,7 +952,7 @@ class TrendOutlierParams(SeriesParams):
     (``holm``, ``bh``, ``by``, ``none``)."""
 
 
-class TrendOutlierRule(_TemporalRule):
+class TrendOutlierRule(_TemporalRule, CorrectedRule):
     """Individual periods do not fall off their series' own trend line."""
 
     rule_id: ClassVar[str] = "TMP-003"
@@ -918,25 +972,43 @@ class TrendOutlierRule(_TemporalRule):
     Params: ClassVar[type[RuleParams]] = TrendOutlierParams
 
     def evaluate(self, ctx: DataContext) -> list[Finding]:
+        """Alone, each series' residuals are corrected as one family."""
         if not self.params.series:
             return [Finding.skip("No series are configured.")]
         if scipy_stats() is None:
             return [Finding.unassessed(_MISSING_STATS)]
-        records = BoundedEvidence(ctx.evidence_limit)
-        blocked: list[Finding] = []
-        used: list[SeriesSpec] = []
-        points = 0
-        too_short = 0
+        sink = _SeriesOutliers(self.params, BoundedEvidence(ctx.evidence_limit))
+        tally = self._scan(ctx, sink)
+        return sink.outcome(tally)
+
+    def measure(self, ctx: DataContext) -> FamilyTests | list[Finding]:
+        """In an inference family, the residuals of every series join the family."""
+        if not self.params.series:
+            return [Finding.skip("No series are configured.")]
+        if scipy_stats() is None:
+            return [Finding.unassessed(_MISSING_STATS)]
+        sink = _FamilyOutliers(self.params, BoundedEvidence(ctx.evidence_limit), ctx)
+        try:
+            sink.tally = self._scan(ctx, sink)
+        except BaseException:
+            sink.close()
+            raise
+        return sink
+
+    def _scan(self, ctx: DataContext, sink: _OutlierSink) -> _TrendTally:
+        """Fit every group of every series and hand each fitted test to ``sink``."""
+        tally = _TrendTally(sink.records, [], [])
+        blocked = tally.blocked
         for spec in self.params.series:
             with isolate_contract(spec.label, (spec.dataset,), blocked):
                 series = _aggregate(ctx, spec, blocked)
                 if series is None:
                     continue
-                used.append(spec)
+                tally.used.append(spec)
                 for key, frame in _groups(series, spec):
                     with isolate_contract(spec.label, (spec.dataset,), blocked, affected=[key]):
                         if frame.height < self.params.min_points:
-                            too_short += 1
+                            tally.too_short += 1
                             continue
                         try:
                             positions = _sequence(spec, frame)
@@ -968,45 +1040,158 @@ class TrendOutlierRule(_TemporalRule):
                                 )
                             )
                             continue
-                        points += len(values)
-                        flagged = (test.adjusted_p < self.params.alpha) & (
-                            np.abs(test.relative_deviation) >= self.params.min_relative_deviation
-                        )
-                        for index in np.flatnonzero(flagged):
-                            time_value = times[index]
-                            period = (
-                                frame[spec.time_column][int(index)]
-                                if spec.bucket is not None
-                                else int(time_value)
-                                if float(time_value).is_integer()
-                                else float(time_value)
-                            )
-                            records.append(
-                                annotate(
-                                    {**key, spec.time_column: period},
-                                    series=spec.label,
-                                    value=float(values[index]),
-                                    trend_value=float(test.fitted[index]),
-                                    relative_deviation=round(
-                                        float(test.relative_deviation[index]), 4
-                                    ),
-                                    studentized_residual=round(float(test.residuals[index]), 3),
-                                    adjusted_p=float(test.adjusted_p[index]),
-                                    p_value=float(test.p_value[index]),
-                                    correction=self.params.correction,
-                                    effect=round(float(test.relative_deviation[index]), 4),
-                                )
-                            )
+                        tally.examined += len(values)
+                        sink.add(_FittedSeries(spec, key, frame, times, values, test))
+        return tally
+
+
+@dataclass(frozen=True, slots=True)
+class _FittedSeries:
+    """One group of a series with its trend outlier test."""
+
+    spec: SeriesSpec
+    key: dict[str, Any]
+    frame: pl.DataFrame
+    times: np.ndarray
+    values: np.ndarray
+    test: _TrendTest
+
+    def period(self, index: int) -> Any:
+        """The period of the ``index``-th value, as the data spells it."""
+        time_value = self.times[index]
+        if self.spec.bucket is not None:
+            return self.frame[self.spec.time_column][index]
+        return int(time_value) if float(time_value).is_integer() else float(time_value)
+
+    def row(self, index: int) -> dict[str, Any]:
+        """The group's key and the period of the ``index``-th value."""
+        return {**self.key, self.spec.time_column: self.period(index)}
+
+    def fields(self, index: int) -> dict[str, Any]:
+        """The evidence of the ``index``-th value, but its correction."""
+        test = self.test
+        return {
+            "series": self.spec.label,
+            "value": float(self.values[index]),
+            "trend_value": float(test.fitted[index]),
+            "relative_deviation": round(float(test.relative_deviation[index]), 4),
+            "studentized_residual": round(float(test.residuals[index]), 3),
+        }
+
+    def effect(self, index: int) -> float:
+        return round(float(self.test.relative_deviation[index]), 4)
+
+
+class _OutlierSink:
+    """Where a trend outlier scan hands each fitted series."""
+
+    def __init__(self, params: TrendOutlierParams, records: BoundedEvidence) -> None:
+        self.params = params
+        self.records = records
+
+    def material(self, fitted: _FittedSeries) -> np.ndarray:
+        """Whether each value departs materially from its trend."""
+        deviation = np.abs(fitted.test.relative_deviation)
+        return np.asarray(deviation >= self.params.min_relative_deviation)
+
+    def add(self, fitted: _FittedSeries) -> None:
+        """Take one fitted series."""
+        raise NotImplementedError
+
+    def outcome(self, tally: _TrendTally) -> list[Finding]:
+        """The rule's findings once every flagged period is recorded."""
+        records = self.records
         return _outcome(
             records,
-            used,
-            points,
+            tally.used,
+            tally.examined,
             f"{plural(records.count, 'period')} fall materially off their series' trend.",
-            f"All {points:,} values are consistent with their trends.",
-            blocked,
-            too_short=too_short,
+            f"All {tally.examined:,} values are consistent with their trends.",
+            tally.blocked,
+            too_short=tally.too_short,
             unit="values",
         )
+
+
+class _SeriesOutliers(_OutlierSink):
+    """Judges each series at once, corrected over its own residuals."""
+
+    def add(self, fitted: _FittedSeries) -> None:
+        test = fitted.test
+        flagged = (test.adjusted_p < self.params.alpha) & self.material(fitted)
+        for index in np.flatnonzero(flagged):
+            at = int(index)
+            self.records.append(
+                annotate(
+                    fitted.row(at),
+                    **fitted.fields(at),
+                    adjusted_p=float(test.adjusted_p[at]),
+                    p_value=float(test.p_value[at]),
+                    correction=self.params.correction,
+                    effect=fitted.effect(at),
+                )
+            )
+
+
+class _FamilyOutliers(_OutlierSink, FamilyTests):
+    """Keeps every residual p-value for the family's correction; the evidence of the
+    material departures waits in a store until they are judged."""
+
+    def __init__(
+        self, params: TrendOutlierParams, records: BoundedEvidence, ctx: DataContext
+    ) -> None:
+        super().__init__(params, records)
+        self.tally = _TrendTally(records, [], [])
+        self._family = array("d")
+        self._candidates = array("Q")
+        """Family ordinals of the material departures."""
+        self._evidence = DeferredEvidence(ctx)
+
+    @property
+    def p_values(self) -> np.ndarray:
+        return np.asarray(self._family, dtype=float)
+
+    @property
+    def family_size(self) -> int:
+        return len(self._family)
+
+    def close(self) -> None:
+        self._evidence.__exit__(None, None, None)
+
+    def add(self, fitted: _FittedSeries) -> None:
+        start = len(self._family)
+        self._family.extend(np.asarray(fitted.test.p_value, dtype=float).tolist())
+        for index in np.flatnonzero(self.material(fitted)):
+            at = int(index)
+            self._candidates.append(start + at)
+            self._evidence.add(start + at, (fitted.row(at), fitted.fields(at), fitted.effect(at)))
+
+    def finish(self, ctx: DataContext, correction: FamilyCorrection) -> list[Finding]:
+        records = self.records
+        for ordinal in self._candidates:
+            adjusted = float(correction.adjusted[ordinal])
+            # A p-value left out of a family (NaN) is never significant.
+            if not adjusted < self.params.alpha:
+                continue
+            if len(records.records) >= records.limit:
+                records.count += 1
+                continue
+            payload = self._evidence.get(ordinal)
+            if payload is None:
+                records.count += 1
+                continue
+            row, fields, effect = payload
+            records.append(
+                annotate(
+                    row,
+                    **fields,
+                    adjusted_p=adjusted,
+                    p_value=float(self._family[ordinal]),
+                    correction=correction.method,
+                    effect=effect,
+                )
+            )
+        return self.outcome(self.tally)
 
 
 @dataclass(frozen=True, slots=True)

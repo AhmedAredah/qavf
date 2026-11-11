@@ -304,6 +304,43 @@ class GroupReport(SnapshotModel):
     their status: ``<check>: <status>``."""
 
 
+class InferenceFamily(SnapshotModel):
+    """The inference family a check item's tests were corrected with
+    (``inference: {family: ...}``)."""
+
+    family: str
+    method: str
+    """The correction the members agree on (``bonferroni``, ``holm``, ``bh``, ``by``)."""
+    family_size: int
+    """Tests the correction counted: every corrected member's, untested ones as ``p = 1``."""
+    members: list[str] = Field(default_factory=list)
+    """Instance ids of the members whose tests were corrected together in this run."""
+    configured_members: int = 0
+    """Members the configuration declares; more than :attr:`members` when a selection
+    ran only some of them or a member could not be measured."""
+    tests: int = 0
+    """This item's p-values in the family."""
+    adjusted: list[float | None] = Field(default_factory=list)
+    """This item's adjusted p-values in its test order (at most
+    ``engine.max_affected_records``; ``None`` for a p-value left out as non-finite)."""
+    notes: list[str] = Field(default_factory=list)
+    """What changed the family in this run: ``selected N of M members``, members not
+    measured, p-values left out."""
+
+    @property
+    def partial(self) -> bool:
+        """Whether fewer members were corrected together than the configuration declares."""
+        return len(self.members) < self.configured_members
+
+    def describe(self) -> str:
+        """``drift checks: holm over 4 tests of 2 members``, with the notes."""
+        text = (
+            f"{self.family}: {self.method} over {self.family_size:,} test(s) of "
+            f"{len(self.members)} member(s)"
+        )
+        return text + (f" ({'; '.join(self.notes)})" if self.notes else "")
+
+
 class RuleResult(SnapshotModel):
     """Outcome of one rule execution."""
 
@@ -369,6 +406,9 @@ class RuleResult(SnapshotModel):
     recommendation: str = ""
     metrics: dict[str, Any] = Field(default_factory=dict)
     datasets: list[str] = Field(default_factory=list)
+    inference: InferenceFamily | None = None
+    """The inference family the item's tests were corrected with (``None``: corrected
+    within the item alone, and in reports written before it existed)."""
 
     @model_validator(mode="before")
     @classmethod
