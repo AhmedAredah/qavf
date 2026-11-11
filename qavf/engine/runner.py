@@ -26,6 +26,7 @@ from pydantic_core import to_json
 from qavf._version import __version__
 from qavf.audit_codec import EVIDENCE_OMITTED, canonical_digest
 from qavf.audit_codec import bounded_diagnostic as _bounded_diagnostic
+from qavf.backend_choice import BackendChoice
 from qavf.checks.requirements import Requirements, RuleDescription
 from qavf.checks.selection import ItemTags
 from qavf.engine.compilation import (
@@ -248,7 +249,7 @@ class QARunner:
                 )
             from qavf.execution.dispatch import validate_isolated
 
-            return validate_isolated(self.settings, frames)
+            return validate_isolated(self.settings, frames, choice=self._backend_choice())
         rules = self.plan()
         workers = self._worker_count(len(rules), frames)
         # Parallel rules each run DuckDB queries with their own thread pool; share the
@@ -358,7 +359,8 @@ class QARunner:
         )
         from qavf.run_provenance import RunProvenance
 
-        report = self._fit_report_budget(RunProvenance(self.settings, "polars").stamp(report))
+        provenance = RunProvenance(self.settings, self._backend_choice())
+        report = self._fit_report_budget(provenance.stamp(report))
         summary = report.summary
         logger.info(
             "QA finished in %.2fs: %d passed, %d failed, %d errored, %d skipped (highest: %s)",
@@ -395,6 +397,10 @@ class QARunner:
         for index, results in zip(waiting, judged, strict=True):
             batches[index] = results
         return [families.annotate(rule, batch) for rule, batch in zip(rules, batches, strict=True)]
+
+    def _backend_choice(self) -> BackendChoice:
+        """How this run's backend (Polars) was chosen, passed on explicitly."""
+        return BackendChoice.ran(self.settings, "polars")
 
     def _end_releases(self, releases: ReleaseSchedule) -> None:
         if self._releases is releases:

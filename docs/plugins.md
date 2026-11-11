@@ -90,6 +90,39 @@ while its findings are read, sequentially, on the thread pool and under
 `qavf.rules.helpers` has `usable`, `total`, `tag`, `stack`, `plural`, `outcome` and
 `MetricSpec`, which the built-in rules use.
 
+### Narrow context ports
+
+`Rule.evaluate` still receives the whole `DataContext`, and the context keeps every
+public method it had. A helper that needs only part of it can declare that part
+instead, with one of the protocols in `qavf.engine.ports`. The context satisfies
+all of them, so you can pass `ctx` straight through. The difference is in testing:
+a test only has to supply the methods the port names.
+
+| Port | Members |
+|---|---|
+| `SourceLookup` | `source` |
+| `DatasetReads` | `specs`, `contract_spec`, `names`, `declared`, `has`, `unavailable_reason`, `get`, `schema`, `describe`, `source` |
+| `DatasetReductions` | `scan`, `collect`, `collect_many`, `project`, `reduce` |
+| `SqlQueries` | `sql`, `sql_sample`, `consume_sql`, `referenced` |
+| `ObservationAccess` | `observe`, `projected_observations`, `observation_plan` |
+| `WorkStorage` | `memory_budget_bytes`, `check_materialization`, `check_retained_bytes`, `work_store`, `spill_file`, `release` |
+| `RuleSessions` | `begin_rule`, `end_rule`, `cancel_rule`, `cancel_active_rules`, `finish_worker`, `thread_load_seconds` |
+| `EvidencePolicy` | `evidence_limit`, `evidence_bytes` |
+| `RunReporting` | `reporting_snapshot`, `resource_usage`, `verify_inputs` |
+
+The ports can also be combined. `FindingReads` is `DatasetReads` plus
+`EvidencePolicy`, and `LevelReads` adds `DatasetReductions` to that.
+
+```python
+from qavf.engine.ports import DatasetReads
+
+def missing_columns(ctx: DatasetReads, dataset: str, wanted: list[str]) -> list[str]:
+    return [c for c in wanted if c not in ctx.schema(dataset)]
+```
+
+The context's private attributes are not part of any port and may change without
+notice.
+
 ### One rule, several graded checks
 
 Return a list of findings, each with a `check` label and optionally its own

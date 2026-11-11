@@ -222,6 +222,27 @@ Reports written by earlier versions still load.
   (`roads.active`) applies its parent's column contract (types and N/A tokens) to
   key values.
 
+### Internal
+
+- `DataContext` keeps its public API but now has narrow typed ports in
+  `qavf.engine.ports` (catalog reads, reductions, SQL, observations, work
+  storage, rule sessions, evidence, reporting). mypy checks that the context
+  provides every port, and a test checks that it keeps every public member. The
+  filtered-population count, the evidence row locator, grouped findings, group
+  comparison levels and statistics planning now take the narrowest port they use
+  (see [Writing plugins](docs/plugins.md#narrow-context-ports)).
+- Snapshot coordination (`SnapshotCoordinator`) and verified source execution
+  (`SourceExecution`: eager loads, source operations and fingerprints) have moved
+  out of `DataContext` into their own collaborators. The runner now schedules
+  dataset release itself instead of keeping its plan on the context.
+  `DataContext` is down from 106 methods to 96, and from 1,738 lines to 1,512.
+- Both backends now share some policy. One `RunLimits` reads `engine.*` once, and
+  one `RetryPolicy` decides source retries for the native input reader and the
+  Polars source policy alike. The backend choice is resolved once per run and
+  passed explicitly to report provenance, including across isolated dispatch.
+- The resource-planning tests now use a fixed free-disk figure, so they no longer
+  depend on how much disk the test machine has free.
+
 ### Performance
 
 - A row expression or `where` condition no longer reads every column of every

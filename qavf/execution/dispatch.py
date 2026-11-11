@@ -12,15 +12,29 @@ from qavf.reports.models import QAReport
 from qavf.settings import QAVFSettings
 
 if TYPE_CHECKING:
+    from qavf.backend_choice import BackendChoice
     from qavf.compare.results import DatasetComparison
     from qavf.compare.spec import ComparisonSpec
     from qavf.regression.models import ComparisonResult
 
 
 def validate_isolated(
-    settings: QAVFSettings, frames: Mapping[str, Any] | None, *, backend: str = "polars"
+    settings: QAVFSettings,
+    frames: Mapping[str, Any] | None,
+    *,
+    backend: str = "polars",
+    choice: BackendChoice | None = None,
 ) -> QAReport:
+    """Validate in an isolated worker; its report is stamped here with ``choice`` (how
+    the backend was chosen; resolved from ``settings`` when not given)."""
     from qavf.execution.supervisor import execute
+    from qavf.run_provenance import RunProvenance
+
+    provenance = (
+        RunProvenance(settings, choice)
+        if choice is not None
+        else RunProvenance.of(settings, backend)
+    )
 
     inputs = isolated_inputs(frames or {}, settings)
     if set(inputs) != set(frames or {}):
@@ -32,11 +46,9 @@ def validate_isolated(
         report = QAReport.model_validate_json(data)
     except (ValueError, TypeError) as exc:
         raise ExecutionLimitError("isolated worker returned an invalid QA report") from exc
-    from qavf.run_provenance import RunProvenance
-
     # The worker's settings were rebuilt: how the backend and limits were given
     # is known here only.
-    return RunProvenance(settings, backend).stamp(report)
+    return provenance.stamp(report)
 
 
 def compare_isolated(

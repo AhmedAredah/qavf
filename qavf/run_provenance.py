@@ -2,7 +2,8 @@
 
 Both runners stamp their report with :class:`RunProvenance`, and so does the parent
 of an isolated worker (whose settings no longer know how the backend or a limit
-was chosen): ``metadata.backend``, ``metadata.backend_source`` and
+was chosen). The backend choice is resolved once per run and passed to it
+explicitly, also across the isolated dispatch: ``metadata.backend``, ``metadata.backend_source`` and
 ``metadata.resource_usage["limits"]``.
 """
 
@@ -21,9 +22,15 @@ if TYPE_CHECKING:
 class RunProvenance:
     """How the backend and each resource limit of a run were given."""
 
-    def __init__(self, settings: QAVFSettings, backend: str) -> None:
+    def __init__(self, settings: QAVFSettings, choice: BackendChoice) -> None:
         self.settings = settings
-        self.choice = BackendChoice.ran(settings, backend)
+        self.choice = choice
+
+    @classmethod
+    def of(cls, settings: QAVFSettings, backend: str) -> RunProvenance:
+        """The provenance of a run of ``backend``: the choice recorded on ``settings``
+        when it names that backend, else how ``engine.backend`` chose it."""
+        return cls(settings, BackendChoice.ran(settings, backend))
 
     def limits(self) -> dict[str, dict[str, Any]]:
         """Each limit set anywhere (not left at its default): value, source, origin."""

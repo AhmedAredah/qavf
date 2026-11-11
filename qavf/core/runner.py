@@ -14,6 +14,7 @@ import duckdb
 
 from qavf import input_rules as wording
 from qavf._version import __version__
+from qavf.backend_choice import BackendChoice
 from qavf.checks.requirements import Requirements, input_rule_description
 from qavf.core.checks import DatasetChecks
 from qavf.core.configuration import prepare
@@ -210,8 +211,10 @@ def _fit_report(report, limit):
 class NativeRunner:
     """Own one run; delegate source, planning, policy and evidence responsibilities."""
 
-    def __init__(self, settings, inputs, control=None):
+    def __init__(self, settings, inputs, control=None, choice=None):
         self.settings = settings
+        self.choice = choice if choice is not None else BackendChoice.ran(settings, "duckdb")
+        """How the backend was chosen (:class:`~qavf.backend_choice.BackendChoice`)."""
         self.inputs = inputs
         self.control = control
         self.datasets = []
@@ -629,7 +632,7 @@ class NativeRunner:
         )
         from qavf.run_provenance import RunProvenance
 
-        report = RunProvenance(settings, "duckdb").stamp(report)
+        report = RunProvenance(settings, self.choice).stamp(report)
         report = _fit_report(report, settings.engine.max_report_bytes)
         if self.control is not None:
             self.control.finished(report)
@@ -657,9 +660,10 @@ def validate_core(
     settings, inputs = prepare(data, schema, config, resources, profile, selection)
     if backend is not None:
         settings.apply_backend(backend)
+    choice = BackendChoice.ran(settings, "duckdb")
     control = control_for(on_event, cancel, settings.engine.execution_mode)
     if settings.engine.execution_mode == "isolated":
         from qavf.core.execution import validate_isolated
 
-        return validate_isolated(settings, inputs)
-    return NativeRunner(settings, inputs, control).run()
+        return validate_isolated(settings, inputs, choice)
+    return NativeRunner(settings, inputs, control, choice).run()

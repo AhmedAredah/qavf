@@ -35,8 +35,10 @@ class Deadline:
             self.timer.join()
 
 
-def validate_isolated(settings, inputs):
-    """Transport descriptors only; never consume a borrowed object to serialize it."""
+def validate_isolated(settings, inputs, choice=None):
+    """Transport descriptors only; never consume a borrowed object to serialize it.
+
+    ``choice`` (how the backend was chosen) is stamped on the worker's report here."""
     from qavf.execution.dispatch import validate_isolated as dispatch
 
     local = settings.model_copy(deep=True)
@@ -64,4 +66,4 @@ def validate_isolated(settings, inputs):
                 "source": source,
             }
         )
-    return dispatch(local, queries, backend="duckdb")
+    return dispatch(local, queries, backend="duckdb", choice=choice)
