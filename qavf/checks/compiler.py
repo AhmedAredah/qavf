@@ -118,7 +118,7 @@ def configuration_errors(settings: QAVFSettings) -> list[str]:
             # A check switched off before any settings were given is not validated.
             problems.extend(definition.errors(placed.item, placed.scope, parameters=not deferred))
     known = {
-        name: tuple(definition.item_fields())
+        name: definition.default_settings()
         for name, definition in CATALOG.items()
         if definition.configurable and name not in ROW_CHECKS
     }
@@ -185,7 +185,7 @@ def _default_check_problems(settings: QAVFSettings, registry: RuleRegistry | Non
                 "what is available (plugins must be installed)."
             )
         elif isinstance(definition, PluginDefinition):
-            known = {check: tuple(definition.item_fields())}
+            known = {check: definition.default_settings()}
             problems.extend(default_problems({check: settings.defaults[check]}, known))
     return problems
 

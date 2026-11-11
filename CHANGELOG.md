@@ -148,7 +148,8 @@ Reports written by earlier versions still load.
   same check reports on a view of those rows. Results name the dataset, list `where`
   among their parameters and report `population_rows`, `applicable_rows` and
   `excluded_rows`; no matching row, or fewer than `min_applicable_rows`, leaves the
-  check not assessed. Items with one condition share one read of the rows, the
+  check not assessed; `defaults.<check>.min_applicable_rows` sets it for every item
+  of a filtered check (still only with `where`). Items with one condition share one read of the rows, the
   condition is parsed when the configuration loads (with its file and line), and
   `qavf explain` shows it with the columns it reads. Top-level checks other than
   `compare` reject `where`, pointing at views. Dataset and view names containing

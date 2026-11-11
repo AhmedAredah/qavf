@@ -156,7 +156,9 @@ a view `active` of dataset `roads` cannot both exist.
 Resolution: `include` files merge first, in order, and the including file wins; a
 dataset or check name repeated across files is an error. `vars` and `${ENV}`
 substitute before validation, and an unknown variable is an error. A check's own
-settings win over `defaults`. A `series` or `metric` name resolves within its
+settings win over `defaults`; `defaults` may also give `severity`, `where`, `tags`,
+`enabled` and (for checks filtered through `where`) `min_applicable_rows`, which
+still goes with `where` once the defaults apply. A `series` or `metric` name resolves within its
 dataset first; `other.name` reaches another dataset's block. In a check setting
 declared as a list (`missing_periods` `expected`, `key_grid`
 `dimensions.<column>.values`, ...), `2016..2024` or `{from: 2016, to: 2024, step: 1}`

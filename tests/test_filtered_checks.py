@@ -247,6 +247,40 @@ def test_min_applicable_rows_goes_with_where() -> None:
         QAVFSettings.model_validate({"datasets": {"alpha": {"checks": [item]}}})
 
 
+def test_defaults_give_min_applicable_rows_to_filtered_items() -> None:
+    item = {"check": "fresh", "column": "seen", "max_age": "30d", "now": "2024-05-02T00:00:00"}
+    config = {
+        "defaults": {"fresh": {"min_applicable_rows": 17}},
+        "datasets": {"alpha": {"checks": [{**item, "where": WHERE}]}},
+        "engine": {"parallel": False},
+    }
+    alpha = {"alpha": _frames()["alpha"]}
+    report = validate(alpha, config=config, backend="polars")
+    (result,) = _results(report, "alpha")
+    assert result.status.value == "ERROR"
+    assert result.parameters["min_applicable_rows"] == 17
+    # An item's own setting wins over the default.
+    config["datasets"]["alpha"]["checks"][0]["min_applicable_rows"] = 16  # type: ignore[index]
+    (result,) = _results(validate(alpha, config=config, backend="polars"), "alpha")
+    assert result.status.value == "PASS"
+
+
+def test_defaulted_min_applicable_rows_goes_with_where() -> None:
+    item = {"check": "fresh", "column": "seen", "max_age": "30d"}
+    config = {
+        "defaults": {"fresh": {"min_applicable_rows": 2}},
+        "datasets": {"alpha": {"checks": [item]}},
+    }
+    with pytest.raises(ValidationError, match="'min_applicable_rows' goes with 'where'"):
+        QAVFSettings.model_validate(config)
+
+
+def test_defaults_refuse_min_applicable_rows_for_checks_not_filtered() -> None:
+    config = {"defaults": {"drift": {"min_applicable_rows": 2}}}
+    with pytest.raises(ValidationError, match="defaults.drift.min_applicable_rows: not a setting"):
+        QAVFSettings.model_validate(config)
+
+
 def test_items_with_one_condition_share_one_hidden_view() -> None:
     settings = QAVFSettings.model_validate(
         {

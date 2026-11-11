@@ -180,6 +180,14 @@ class CheckDefinition(ABC):
     def item_fields(self) -> dict[str, FieldSpec]:
         """The check's own settings, for the configuration JSON Schema."""
 
+    def default_settings(self) -> tuple[str, ...]:
+        """The check's own settings ``defaults`` may give (with the common
+        ``min_applicable_rows`` of a check filtered through a hidden view)."""
+        own = tuple(self.item_fields())
+        if self.filters_rows and FILTER_SETTING not in own:
+            return (*own, FILTER_SETTING)
+        return own
+
     def locate(self, loc: Sequence[Any]) -> str:
         """The item setting a rule-parameter error location refers to."""
         return _location(loc)
