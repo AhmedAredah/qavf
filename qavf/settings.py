@@ -1035,6 +1035,35 @@ class DatasetSpec(_Strict):
     source's path or table. Each copy is a dataset of its own, ``<dataset>@<copy>``;
     ``<dataset>@*`` lists every copy."""
 
+    @field_validator("source", mode="after")
+    @classmethod
+    def _source_settings(cls, source: dict[str, Any] | None) -> dict[str, Any] | None:
+        """A built-in source type's settings are checked now, without reading anything
+        (a plugin's when the run is planned): see :class:`SourceSettingsCheck`."""
+        if source is not None:
+            from qavf.sources.parameters import SourceSettingsCheck
+
+            SourceSettingsCheck().check(source)
+        return source
+
+    @model_validator(mode="after")
+    def _named_blocks(self) -> DatasetSpec:
+        """Every named ``series`` and ``metrics`` definition is valid, used or not.
+
+        Their models live with the series and metric checks, which need Polars;
+        without it those checks cannot run, and the definitions are left unchecked.
+        """
+        if not (self.series or self.metrics):
+            return self
+        try:
+            from qavf.checks.catalog import NamedBlockCheck
+        except ModuleNotFoundError as exc:
+            if not (exc.name or "").startswith("polars"):
+                raise
+            return self
+        NamedBlockCheck.validate({"series": self.series, "metrics": self.metrics})
+        return self
+
     @model_validator(mode="after")
     def _expanded(self) -> DatasetSpec:
         if self.across is not None:

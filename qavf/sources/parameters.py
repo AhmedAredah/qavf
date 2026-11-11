@@ -185,3 +185,34 @@ class PythonParams(SourceParams):
     """``package.module:function`` returning a Polars or pandas DataFrame or a
     PyArrow table."""
     kwargs: dict[str, Any] = Field(default_factory=dict)
+
+
+BUILTIN_SOURCE_PARAMS: Mapping[str, type[SourceParams]] = {
+    "file": FileParams,
+    "query": QueryParams,
+    "database": DatabaseParams,
+    "python": PythonParams,
+}
+"""The parameter model of each built-in source type (as the source registry binds them)."""
+
+
+class SourceSettingsCheck:
+    """Validates a dataset's ``source`` settings when the configuration is loaded.
+
+    A built-in source type is checked against its parameter model at once, without
+    reading anything, so a misspelt setting (``headre: false``) fails while the
+    configuration loads, with its field path, on every backend. A plugin's source
+    type is unknown until its registry is loaded: it is checked when the run is
+    planned (:meth:`qavf.sources.base.SourceRegistry.build`).
+    """
+
+    def __init__(self, models: Mapping[str, type[SourceParams]] = BUILTIN_SOURCE_PARAMS) -> None:
+        self.models = models
+
+    def check(self, source: Mapping[str, Any]) -> None:
+        """Raise ``pydantic.ValidationError`` (field paths within ``source``) for
+        invalid settings of a built-in source type."""
+        kind = source.get("type")
+        model = self.models.get(kind) if isinstance(kind, str) else None
+        if model is not None:
+            model.model_validate(dict(source))

@@ -31,6 +31,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from pydantic.fields import FieldInfo
+from pydantic_core import InitErrorDetails
 
 from qavf.checks.items import CheckItem, ExpressionItem, SqlItem, settings_required_when_enabled
 from qavf.checks.placement import (
@@ -1426,12 +1427,103 @@ def _inline_model(definition: InlineCheck) -> type[BaseModel]:
     )
 
 
+class NamedBlockCheck:
+    """Validates a dataset's named ``series`` or ``metrics`` definition when the
+    configuration loads, whether or not a check uses it.
+
+    A definition is checked as a check naming it would read it: its keys renamed to
+    the element fields (``entity`` -> ``entity_column``), shorthand translated
+    (``per: counts.aadt``) and the dataset added, then validated against the
+    element model the series or metric checks share. Errors keep their path within
+    the definition, under the setting names as written.
+    """
+
+    def __init__(self, definition: InlineCheck) -> None:
+        self.definition = definition
+
+    @classmethod
+    def for_section(cls, section: str) -> NamedBlockCheck | None:
+        """The check for definitions under ``series`` or ``metrics``."""
+        for definition in CATALOG.values():
+            if (
+                isinstance(definition, InlineCheck)
+                and BLOCK_SECTIONS.get(definition.inline_key) == section
+            ):
+                return cls(definition)
+        return None
+
+    @classmethod
+    def validate(cls, sections: Mapping[str, Mapping[str, Any]]) -> None:
+        """Raise one ``pydantic.ValidationError`` listing every invalid definition.
+
+        ``sections`` maps ``series``/``metrics`` to one dataset's definitions.
+        """
+        errors: list[InitErrorDetails] = []
+        for section, blocks in sections.items():
+            check = cls.for_section(section) if blocks else None
+            if check is not None:
+                for name, block in blocks.items():
+                    errors.extend(check.errors(name, block))
+        if errors:
+            raise ValidationError.from_exception_data("DatasetSpec", errors)
+
+    def errors(self, name: str, block: Any) -> list[InitErrorDetails]:
+        """The problems of one definition, located at ``<section>.<name>.<setting>``."""
+        definition = self.definition
+        section = BLOCK_SECTIONS[definition.inline_key]
+        if not isinstance(block, Mapping):
+            return [_problem((section, name), f"define the {definition.inline_key} as a mapping")]
+        element: dict[str, Any] = {
+            definition.inline_renames.get(str(key), str(key)): value for key, value in block.items()
+        }
+        problems: list[InitErrorDetails] = []
+        try:
+            definition.translate(element)
+        except CheckSettingError as exc:
+            setting = (exc.field or "").rpartition(".")[2]
+            problems.append(_problem((section, name, *([setting] if setting else [])), exc.message))
+            element.pop(definition.inline_renames.get(setting, setting), None)
+        if "dataset" in element:
+            problems.append(
+                _problem((section, name, "dataset"), "the dataset is the one defining it")
+            )
+        element["dataset"] = "dataset"  # the defining dataset; the models only need a name
+        try:
+            definition.element_model.model_validate(element)
+        except ValidationError as exc:
+            back = _reverse(definition.inline_renames)
+            problems.extend(
+                InitErrorDetails(
+                    type=error["type"],
+                    loc=(section, name, *_renamed_loc(error["loc"], back)),
+                    input=error["input"],
+                    ctx=error.get("ctx", {}),
+                )
+                for error in exc.errors(include_url=False)
+            )
+        return problems
+
+
+def _problem(loc: tuple[str | int, ...], message: str) -> InitErrorDetails:
+    return InitErrorDetails(
+        type="value_error", loc=loc, input=None, ctx={"error": ValueError(message)}
+    )
+
+
+def _renamed_loc(loc: Sequence[Any], back: Mapping[str, str]) -> tuple[Any, ...]:
+    """An element error location under the setting names a definition is written with."""
+    if not loc or not isinstance(loc[0], str):
+        return tuple(loc)
+    return (back.get(loc[0], loc[0]), *loc[1:])
+
+
 __all__ = [
     "BY_RULE",
     "CATALOG",
     "CONTRACT_RULES",
     "CheckDefinition",
     "Decompiled",
+    "NamedBlockCheck",
     "PluginDefinition",
     "definition_for",
     "derived_datasets",

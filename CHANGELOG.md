@@ -176,6 +176,13 @@ Reports written by earlier versions still load.
 
 ### Fixed
 
+- A dataset's `source` settings and its named `series` and `metrics` are validated
+  when the configuration loads, without reading data, used or not: `source: {type:
+  file, headre: false}` or an unused `series: {s: {bad_key: 7}}` is a validation
+  error with its field path (`datasets.x.source.headre`) on both backends, where the
+  DuckDB backend reported an INP-001 failure, Polars raised at run time and an
+  unused series passed silently. Built-in source types are checked against their
+  parameter models; a plugin's source type is checked when the run is planned.
 - Accepting a baseline, writing a report or publishing an isolated worker's
   result no longer fails on Windows when a virus scanner or the search indexer
   briefly holds the file being replaced: every atomic replace in QAVF goes
