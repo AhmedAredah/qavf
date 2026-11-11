@@ -210,6 +210,27 @@ def _parser() -> argparse.ArgumentParser:
     explain.add_argument("--only", action="append", default=[], metavar="NAME")
     explain.add_argument("--dataset", action="append", default=[], metavar="NAME")
 
+    resolve = commands.add_parser(
+        "resolve",
+        help="print the fully resolved configuration (include, vars, defaults, across, "
+        "overrides), secrets redacted; --origins shows where each value came from",
+        description="Print the configuration a run would use, after include, vars and "
+        "${ENV}, defaults, across and overrides, with secrets redacted. No data is read. "
+        "Exit status 0 when the configuration is valid, 2 (with field paths and the file "
+        "and line of each problem) when it is not.",
+    )
+    resolve.add_argument(
+        "-c", "--config", required=True, type=Path, help="YAML or JSON configuration"
+    )
+    resolve.add_argument(
+        "--origins",
+        action="store_true",
+        help="show where each value was written (file:line:column) and the applied overrides",
+    )
+    resolve.add_argument("--format", choices=["yaml", "json"], default="yaml")
+    resolve.add_argument("-o", "--output", type=Path, help="file to write (default: stdout)")
+    resolve.add_argument("--force", action="store_true", help="overwrite an existing file")
+
     init = commands.add_parser(
         "init", help="write a minimal starting configuration (--full: every setting)"
     )
@@ -746,6 +767,25 @@ def _cmd_explain(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_resolve(args: argparse.Namespace) -> int:
+    """The resolved configuration, redacted, optionally with origins (``qavf resolve``)."""
+    from qavf.resolution import resolve
+
+    resolved = resolve(args.config)
+    text = resolved.render(args.format, origins=args.origins)
+    if args.output is None:
+        sys.stdout.write(text)
+        return EXIT_OK
+    _use("ProtectedInputs", "load_settings", "atomic_write")
+    # The configuration and the files it names are never replaced, even with --force.
+    ProtectedInputs.of_settings(load_settings(args.config), args.config).check(args.output)
+    if args.output.exists() and not args.force:
+        raise ValueError(f"refusing to overwrite {args.output} (use --force)")
+    atomic_write(args.output, text)
+    print(f"Resolved configuration written: {args.output}")
+    return EXIT_OK
+
+
 def _cmd_profile(args: argparse.Namespace) -> int:
     _use("profile_input", "yaml")
     profile = profile_input(args.path, margin=args.margin, max_categories=args.max_categories)
@@ -997,6 +1037,7 @@ _COMMANDS = {
     "capabilities": _cmd_capabilities,
     "init": _cmd_init,
     "explain": _cmd_explain,
+    "resolve": _cmd_resolve,
     "schema": _cmd_schema,
     "profile": _cmd_profile,
     "list-checks": _cmd_list_checks,

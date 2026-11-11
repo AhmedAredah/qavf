@@ -60,6 +60,7 @@ For your own data, generate a configuration with inferred limits, review it, the
 ```bash
 qavf init -d data/counts.csv -d crashes=data/crashes.parquet --margin 0.1
 qavf explain -c qavf.yaml   # validate the configuration and show the plan; reads no data
+qavf resolve -c qavf.yaml --origins   # the configuration a run uses, and where each value came from
 qavf run -c qavf.yaml
 ```
 
@@ -377,6 +378,7 @@ datasets with the default strategy report exactly as a single comparison. See
 | `qavf run -c CONFIG` | Run QA and write HTML/JSON reports |
 | `qavf init -d [NAME=]PATH` | Profile data and write a minimal starting configuration (`--full`: the complete reference) |
 | `qavf explain -c CONFIG` | Validate a configuration and show the plan without reading data (`--dataset`, `--tags`, `--backend`, `--format json`); exit 2 names the invalid field |
+| `qavf resolve -c CONFIG` | Print the fully resolved configuration (after include, vars/`${ENV}`, defaults, `across` and overrides), secrets redacted; `--origins` shows the file and line each value came from (`--format yaml\|json`, `-o FILE`) |
 | `qavf profile PATH` | Print inferred QA limits for a file |
 | `qavf schema` | Write the configuration JSON Schema for editor support |
 | `qavf list-checks` | List the checks a configuration can use |

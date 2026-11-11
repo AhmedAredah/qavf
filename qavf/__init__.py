@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from qavf.regression.models import ComparisonResult
     from qavf.reports.html import render_html, write_html
     from qavf.reports.models import CheckIdentity, QAReport, RuleResult
+    from qavf.resolution import ResolvedConfig, resolve
     from qavf.run_control import CancellationToken, RunEvent
     from qavf.settings import QAVFSettings, load_settings, settings_from_text
     from qavf.sources import DataSource, SourceParams
@@ -70,6 +71,7 @@ _EXPORTS = {
     "QAVFSettings": "qavf.settings",
     "Query": "qavf.inputs.descriptors",
     "ResourceLimits": "qavf.inputs.resources",
+    "ResolvedConfig": "qavf.resolution",
     "RunEvent": "qavf.run_control",
     "Rule": "qavf.engine.registry",
     "RuleParams": "qavf.engine.registry",
@@ -89,6 +91,7 @@ _EXPORTS = {
     "profile_input": "qavf.profiling",
     "register": "qavf.engine.registry",
     "render_html": "qavf.reports.html",
+    "resolve": "qavf.resolution",
     "settings_from_text": "qavf.settings",
     "validate": "qavf.api",
     "write_html": "qavf.reports.html",
@@ -116,6 +119,7 @@ __all__ = [
     "QARunner",
     "QAVFSettings",
     "Query",
+    "ResolvedConfig",
     "ResourceLimits",
     "Rule",
     "RuleParams",
@@ -138,6 +142,7 @@ __all__ = [
     "profile_input",
     "register",
     "render_html",
+    "resolve",
     "settings_from_text",
     "validate",
     "write_html",

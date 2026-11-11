@@ -330,6 +330,57 @@ It exits 0 when the configuration is valid and 2, naming the field path (for exa
 cannot run a configured check. `-o` never writes over the configuration or a file it
 names. `--load-plugins` plans plugin checks too, importing their code.
 
+## Resolving a configuration
+
+`resolve(config)` returns the configuration a run would use, after `include`,
+`vars` and `${ENV}` substitution, `defaults`, `across` expansion and `overrides`,
+validated without reading any data and with secrets redacted. The
+`ResolvedConfig` it returns holds the values (`configuration`), where each was
+written (`origins`, by path: file, line and column, noted when the value arrived
+through a variable, a default, an `across` copy or an override) and the applied
+overrides (`overrides`). `render("yaml" | "json", origins=True)` formats it.
+
+```python
+from qavf import resolve
+
+resolved = resolve("project.yaml")
+resolved.origins["datasets.counts.schema.min_rows"].describe()
+# 'team/base.yaml:6:14 (via vars.rows)'
+print(resolved.render("yaml", origins=True))
+```
+
+On the command line:
+
+```text
+qavf resolve -c project.yaml [--origins] [--format yaml|json] [-o resolved.yaml] [--force]
+```
+
+With `--origins`, YAML output carries each value's origin as a trailing comment
+and lists the applied overrides in a leading comment; JSON output wraps the
+values as `configuration` beside an `origins` map and an `overrides` list:
+
+```yaml
+# Resolved from project.yaml; origins are file:line:column.
+# Overrides applied (1):
+#   datasets.counts@houston: schema.min_rows from project.yaml:15
+datasets:  # project.yaml:5:1
+  counts@houston:  # team/base.yaml:3:3 (from across copy counts@houston)
+    schema:  # team/base.yaml:6:5 (from across copy counts@houston)
+      min_rows: 7  # project.yaml:15:31 (override counts@houston)
+```
+
+The output is deterministic and reads back as the same configuration (it shows
+the settings written or derived, not every built-in default). It exits 0 when
+the configuration is valid and 2 when it is not, naming each invalid field and
+the file and line it was written at. `-o` never writes over the configuration or
+a file it names, even with `--force`.
+
+Every configuration error read from a file names where the value was written,
+also in an included file: `datasets.x.schema.min_rowz (team/base.yaml:4): Extra
+inputs are not permitted`. A Python caller finds the same locations in the
+error's notes (`exc.__notes__`), and `QAVFSettings.origins` holds them for
+settings loaded from a file.
+
 ## Explicit check profiles
 
 `validate(..., profile="validity")` adds INP-001 through INP-007 for declared

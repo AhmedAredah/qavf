@@ -124,6 +124,24 @@ Reports written by earlier versions still load.
   (`ValidationPlan.overrides`). The editor schema accepts the section and gives it
   UI hints.
 
+- `qavf resolve -c CONFIG [--origins] [--format yaml|json] [-o FILE] [--force]`
+  and `qavf.resolve(config) -> ResolvedConfig` print the configuration a run would
+  use, after `include`, `vars`/`${ENV}`, `defaults`, `across` and `overrides`,
+  validated without reading data and with secrets redacted. With `--origins` each
+  value names the file, line and column it was written at and how it arrived ("via
+  vars.rows", "from defaults.change_rate", "from across copy counts@houston",
+  "override counts"), as YAML comments or a JSON `origins` map, and the applied
+  overrides are listed. The output is deterministic and reads back as the same
+  configuration; it exits 0 when valid and 2 with field paths and origins when not,
+  and `-o` never replaces an input.
+- Configuration errors name where the value was written, also in an included file:
+  `datasets.x.schema.min_rowz (team/base.yaml:4): Extra inputs are not permitted`.
+  Parsing records the location of every key and item (YAML and JSON), and include
+  merging, `vars`/`${ENV}` substitution, `defaults`, `across` and `overrides` keep it;
+  `QAVFSettings.origins` holds the index for settings loaded from a file, Python
+  callers see the locations as the error's notes, and `AppliedOverride.line` (shown
+  by `qavf explain`) is the line an override was written on.
+
 ### Changed
 
 - `qavf init` writes a minimal starter (project, datasets with their inferred

@@ -217,7 +217,9 @@ overrides:
   root configuration's last, so the root has the final word. A file path an
   included file's override sets is relative to that file.
 - `qavf explain` lists each applied override: the instance it changed, the
-  settings it set and the file it came from.
+  settings it set and the file and line it came from. `qavf resolve --origins`
+  prints the resolved configuration with the origin of every value, overrides
+  included (see [the API guide](api.md#resolving-a-configuration)).
 
 ### Views
 
