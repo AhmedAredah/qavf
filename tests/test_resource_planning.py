@@ -10,6 +10,19 @@ from qavf.engine.thread_budget import connection_threads
 from qavf.resource_plan import ResourcePlan, _available_memory
 from qavf.settings import QAVFSettings
 
+_AMPLE_DISK = 512 * 1024**3
+
+
+def _ample_disk(_directory: Path) -> int:
+    """A volume with far more free space than any automatic spill plan asks for."""
+    return _AMPLE_DISK
+
+
+@pytest.fixture
+def ample_disk(monkeypatch):
+    """Plan against a fixed free-disk figure, not this machine's volume."""
+    monkeypatch.setattr("qavf.resource_plan._free_disk_bytes", _ample_disk)
+
 
 def configuration(**engine):
     return QAVFSettings(
@@ -25,7 +38,7 @@ def configuration(**engine):
     )
 
 
-def test_wide_high_cardinality_keys_reduce_parallel_pressure(monkeypatch):
+def test_wide_high_cardinality_keys_reduce_parallel_pressure(monkeypatch, ample_disk):
     monkeypatch.setattr("qavf.resource_plan._available_memory", lambda: 8 * 1024**3)
     frame = SimpleNamespace(num_rows=1_890_000, nbytes=14 * 8 * 1_890_000)
     settings = configuration(memory_budget_bytes=1024**3)
@@ -77,7 +90,7 @@ def test_file_source_mapping_and_custom_pathlike_use_metadata(tmp_path):
         assert plan.input_bytes == path.stat().st_size
 
 
-def test_known_frame_rows_size_keys_even_without_physical_byte_count(monkeypatch):
+def test_known_frame_rows_size_keys_even_without_physical_byte_count(monkeypatch, ample_disk):
     monkeypatch.setattr("qavf.resource_plan._available_memory", lambda: 8 * 1024**3)
     plan = ResourcePlan.build(configuration(), {"d": SimpleNamespace(num_rows=10_000_000)})
     assert plan.input_bytes == 0  # Unknown byte size is not invented.
@@ -159,7 +172,7 @@ def test_automatic_native_threads_follow_each_handle_memory_and_explicit_overrid
     assert connection_threads(None, 4, cpu_count=16) == 4
 
 
-def test_real_csv_keeps_reader_headroom_after_worker_reduction(tmp_path, monkeypatch):
+def test_real_csv_keeps_reader_headroom_after_worker_reduction(tmp_path, monkeypatch, ample_disk):
     from qavf import validate
     from qavf.engine.severity import Status
 
@@ -225,3 +238,22 @@ def test_macos_reports_physical_memory():
 
     memory = _macos_physical_memory()
     assert memory is not None and memory > 0
+
+
+def _scarce_disk(_directory: Path) -> int:
+    return 10 * 1024**2
+
+
+def test_automatic_spill_is_capped_by_free_disk(monkeypatch):
+    monkeypatch.setattr("qavf.resource_plan._available_memory", _eight_gib)
+    monkeypatch.setattr("qavf.resource_plan._free_disk_bytes", _scarce_disk)
+    plan = ResourcePlan.build(configuration(), {"d": SimpleNamespace(num_rows=10_000_000)})
+    assert plan.automatic_spill
+    assert plan.spill_bytes == _scarce_disk(Path()) * 4 // 5
+
+
+def test_free_disk_probe_measures_nearest_existing_ancestor(tmp_path):
+    from qavf.resource_plan import _free_disk_bytes
+
+    assert _free_disk_bytes(tmp_path / "not" / "created") > 0
+    assert not (tmp_path / "not").exists()

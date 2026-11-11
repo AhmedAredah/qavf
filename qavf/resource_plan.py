@@ -127,6 +127,19 @@ def _available_memory() -> int | None:
     return min(candidates) if candidates else None
 
 
+def _free_disk_bytes(directory: Path) -> int:
+    """Free bytes on the volume holding ``directory`` (or its nearest existing
+    ancestor: a requested directory is not created merely to estimate capacity).
+
+    Raises:
+        OSError: when the volume cannot be queried.
+    """
+    ancestor = directory
+    while not ancestor.exists() and ancestor != ancestor.parent:
+        ancestor = ancestor.parent
+    return shutil.disk_usage(ancestor).free
+
+
 def _column_width(spec: Any) -> int:
     dtype = str(getattr(spec, "dtype", "") or "").lower()
     if dtype in {"bool", "boolean"}:
@@ -247,11 +260,7 @@ class ResourcePlan:
                 else Path(tempfile.gettempdir())
             )
             try:
-                # Do not create a requested directory merely to estimate capacity.
-                ancestor = directory
-                while not ancestor.exists() and ancestor != ancestor.parent:
-                    ancestor = ancestor.parent
-                free = shutil.disk_usage(ancestor).free
+                free = _free_disk_bytes(directory)
                 spill = max(0, min(desired_spill, free * 4 // 5))
             except OSError:
                 spill = desired_spill
