@@ -1739,6 +1739,27 @@ class QAVFSettings(_Strict):
             for view, spec in dataset.views.items()
         }
 
+    def where_views(self) -> dict[str, tuple[str, ViewSpec, str]]:
+        """The hidden views of the filtered dataset check items, as
+        ``<dataset>.__where_<digest>`` -> (dataset, definition, first item's ``where`` path).
+
+        A dataset item with ``where`` whose check does not select its rows itself reads
+        such a view (:class:`~qavf.engine.derived_names.RowFilter`); items of one dataset
+        with one condition share it. Never named in results.
+        """
+        from qavf.checks.placement import filtered_items
+        from qavf.engine.derived_names import where_view_name
+
+        hidden: dict[str, tuple[str, ViewSpec, str]] = {}
+        for placed in filtered_items(self):
+            dataset, where = str(placed.scope.dataset), str(placed.item.where)
+            name = where_view_name(dataset, where)
+            if name not in hidden:
+                # Built unvalidated: an unparsable condition is reported at its item.
+                spec = ViewSpec.model_construct(where=where, columns=None, description=None)
+                hidden[name] = (dataset, spec, placed.scope.at("where"))
+        return hidden
+
     def derived_datasets(self) -> dict[str, DerivedParams]:
         """Every dataset a check relating many datasets derives from its members
         (consensus, pooled data), by name (see :func:`qavf.checks.catalog.derived_datasets`)."""
@@ -1751,6 +1772,7 @@ class QAVFSettings(_Strict):
         parents: dict[str, tuple[str, ...]] = {
             name: (parent,) for name, (parent, _) in self.views().items()
         }
+        parents |= {name: (parent,) for name, (parent, _, _) in self.where_views().items()}
         parents |= {name: spec.parents() for name, spec in self.derived_datasets().items()}
         return parents
 
@@ -1778,6 +1800,11 @@ class QAVFSettings(_Strict):
         """Where each value was written, when these settings were loaded from a file
         (:mod:`qavf.origins`); ``None`` for settings validated from a mapping."""
         return self._origins
+
+    def adopt_origins(self, origins: OriginIndex | None) -> None:
+        """Keep ``origins`` (those of the settings these were rebuilt from, by a run-time
+        selection or a profile), so later errors still name the file and line."""
+        self._origins = origins
 
     @property
     def included_paths(self) -> tuple[Path, ...]:

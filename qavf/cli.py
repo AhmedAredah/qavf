@@ -709,6 +709,11 @@ class PlanText:
             label = rule.item_name or rule.check_name or rule.name
             datasets = ", ".join(rule.datasets) or "-"
             lines.append(f"  {rule.rule_id:<9} {label:<24} {rule.severity:<8} datasets: {datasets}")
+            if rule.where is not None:
+                reads = (
+                    ", ".join(rule.where_columns) if rule.where_columns is not None else "unknown"
+                )
+                lines.append(f"    where: {rule.where} (reads: {reads})")
         if plan.overrides:
             lines += ["", f"Overrides applied ({len(plan.overrides)}):"]
             lines += [f"  {item}" for item in plan.overrides]

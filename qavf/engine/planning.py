@@ -15,6 +15,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from qavf.engine.derived_names import RowFilter
     from qavf.engine.registry import Rule
     from qavf.settings import QAVFSettings
 
@@ -59,6 +60,27 @@ class _RuleDependencies:
     rule_id: str
     requirements: DataRequirements
     mode: str
+    rows: RowFilter | None = None
+    """The rows a filtered check item reads through a hidden view of its dataset."""
+    where_columns: tuple[str, ...] | None = None
+    """The dataset columns the item's ``where`` reads (``None``: not proven)."""
+
+    def describe(self) -> dict[str, Any]:
+        """Data-free details; a hidden view is shown as its dataset (whose columns
+        include the view's) with the item's ``where``."""
+        datasets = sorted(self.requirements.datasets)
+        columns = {name: list(cols) for name, cols in self.requirements.columns.items()}
+        described: dict[str, Any] = {"rule_id": self.rule_id}
+        if self.rows is not None:
+            columns.pop(self.rows.view, None)
+            datasets = sorted(self.rows.shown_datasets(datasets))
+        described |= {"datasets": datasets, "dependency_mode": self.mode, "columns": columns}
+        if self.rows is not None:
+            described["where"] = self.rows.where
+            described["where_columns"] = (
+                list(self.where_columns) if self.where_columns is not None else None
+            )
+        return described
 
 
 class ExecutionPlan:
@@ -95,15 +117,7 @@ class ExecutionPlan:
 
     def describe(self) -> list[dict[str, Any]]:
         """Stable, data-free dependency details suitable for a run report."""
-        return [
-            {
-                "rule_id": entry.rule_id,
-                "datasets": sorted(entry.requirements.datasets),
-                "dependency_mode": entry.mode,
-                "columns": {name: list(cols) for name, cols in entry.requirements.columns.items()},
-            }
-            for entry in self._rules.values()
-        ]
+        return [entry.describe() for entry in self._rules.values()]
 
 
 def _ancestors(datasets: Iterable[str], parents: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
@@ -118,6 +132,41 @@ def _ancestors(datasets: Iterable[str], parents: Mapping[str, tuple[str, ...]]) 
     return frozenset(found)
 
 
+class FilteredReads:
+    """The columns of a dataset a filtered check item reads through its hidden view:
+    those the rule declares for the view, and those the item's ``where`` reads."""
+
+    def __init__(self, settings: QAVFSettings) -> None:
+        from qavf.sql_dependencies import PredicateDependencies
+
+        hidden = settings.where_views()
+        self.views = {name: (parent, spec.where) for name, (parent, spec, _) in hidden.items()}
+        self.reads = PredicateDependencies(settings.datasets)
+
+    def columns(self, requirements: DataRequirements) -> dict[str, tuple[str, ...]]:
+        """``requirements.columns`` with each hidden view's parent dataset's columns.
+
+        A parent the rule declares itself, a view without declared columns, or a
+        condition whose reads are not proven leaves the parent's columns unknown.
+        """
+        columns = dict(requirements.columns)
+        for name in sorted(requirements.datasets & self.views.keys()):
+            parent, where = self.views[name]
+            declared = requirements.columns.get(name)
+            if declared is None or parent in requirements.datasets or where is None:
+                continue
+            reads = self.where_columns(parent, where)
+            if reads is not None:
+                read = (*columns.get(parent, ()), *declared, *reads)
+                columns[parent] = tuple(dict.fromkeys(read))
+        return columns
+
+    def where_columns(self, dataset: str, where: str) -> tuple[str, ...] | None:
+        """The columns of ``dataset`` that ``where`` reads (``None``: not proven)."""
+        reads = self.reads.of(where, dataset).columns
+        return tuple(sorted(reads)) if reads is not None else None
+
+
 def build_plan(
     rules: Sequence[Rule], settings: QAVFSettings, dataset_names: Iterable[str]
 ) -> ExecutionPlan:
@@ -130,6 +179,7 @@ def build_plan(
     """
     universe = frozenset(dataset_names)
     parents = settings.dataset_parents()
+    filtered = FilteredReads(settings)
     dependencies = []
     for rule in rules:
         explicit = rule.data_requirements(settings)
@@ -147,9 +197,15 @@ def build_plan(
         if viewed:
             # A view (or a derived dataset) is read from its parents, which must stay
             # loaded while it is used.
-            requirements = DataRequirements(requirements.datasets | viewed, requirements.columns)
-        dependencies.append(_RuleDependencies(rule.key, rule.rule_id, requirements, mode))
+            requirements = DataRequirements(
+                requirements.datasets | viewed, filtered.columns(requirements)
+            )
+        rows = rule.binding.rows if rule.binding is not None else None
+        reads = filtered.where_columns(rows.dataset, rows.where) if rows is not None else None
+        dependencies.append(
+            _RuleDependencies(rule.key, rule.rule_id, requirements, mode, rows, reads)
+        )
     return ExecutionPlan(dependencies)
 
 
-__all__ = ["DataRequirements", "ExecutionPlan", "build_plan"]
+__all__ = ["DataRequirements", "ExecutionPlan", "FilteredReads", "build_plan"]

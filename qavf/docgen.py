@@ -206,7 +206,7 @@ def rules_markdown(registry: RuleRegistry, title: str = "Check reference") -> st
                 skip = tuple(
                     field
                     for field in COMMON_FIELDS
-                    if field != "where" or not definition.supports_where
+                    if field != "where" or not definition.takes_where
                 )
                 lines += model_reference(definition.item_model(), skip=skip)
             else:

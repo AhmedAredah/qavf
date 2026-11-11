@@ -23,6 +23,7 @@ from qavf.checks.placement import (
     row_check_errors,
 )
 from qavf.checks.reuse import default_problems
+from qavf.engine.derived_names import RowFilter
 from qavf.engine.registry import CheckBinding, Rule, RuleRegistry
 
 if TYPE_CHECKING:
@@ -40,6 +41,8 @@ class CompiledCheck:
     definition: CheckDefinition
     placed: PlacedItem
     params: dict[str, Any]
+    rows: RowFilter | None = None
+    """The rows a filtered item assesses, read through a hidden view of its dataset."""
 
     @property
     def item(self) -> CheckItem:
@@ -77,6 +80,7 @@ class CompiledCheck:
             placed_on=self.placed.scope.dataset
             if isinstance(self.definition, PluginDefinition)
             else None,
+            rows=self.rows,
         )
 
     def rule(self) -> Rule:
@@ -158,11 +162,12 @@ def compile_checks(
             compiled.append(CompiledCheck(definition, placed, {}))
             continue
         try:
-            params = definition.compile(placed.item, placed.scope)
+            params = definition.compile_item(placed.item, placed.scope)
+            rows = definition.rows(placed.item, placed.scope)
         except CheckSettingError as exc:
             problems.append(f"{placed.scope.at(exc.field)}: {exc.message}")
             continue
-        compiled.append(CompiledCheck(definition, placed, params))
+        compiled.append(CompiledCheck(definition, placed, params, rows))
     problems.extend(_default_check_problems(settings, registry))
     if problems:
         raise CheckCompilationError("invalid checks: " + "; ".join(problems))

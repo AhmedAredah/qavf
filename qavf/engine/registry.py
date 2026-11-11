@@ -54,6 +54,7 @@ from typing import Any, ClassVar, cast
 import polars as pl
 
 from qavf.engine.context import DataContext
+from qavf.engine.derived_names import RowFilter
 from qavf.engine.planning import DataRequirements
 from qavf.engine.severity import Severity
 from qavf.parameters import RuleParams as RuleParams
@@ -204,6 +205,9 @@ class CheckBinding:
     placed_on: str | None = None
     """The dataset a plugin check is placed on, named by results whose findings do not
     name a dataset (built-in rules name theirs)."""
+    rows: RowFilter | None = None
+    """The rows a dataset item's ``where`` selects, when the rule reads them through a
+    hidden view of the dataset; its results show the dataset and the condition."""
 
 
 class Rule[P: RuleParams](ABC):

@@ -44,6 +44,7 @@ from qavf.engine.compilation import (
 )
 from qavf.engine.context import DataContext, DatasetNotAvailableError
 from qavf.engine.derived_names import shown_datasets, shown_value
+from qavf.engine.filtered import FilteredPopulation, FilteredResult
 from qavf.engine.registry import Finding, Rule, RuleRegistry
 from qavf.engine.resources import ResourceLimitError, retained_size
 from qavf.engine.row_locator import RowLocator
@@ -793,6 +794,28 @@ class QARunner:
                 )
             ]
 
+        population = self._filtered_population(rule, ctx)
+        if population is not None:
+            shortfall = population.shortfall(rule.binding.name if rule.binding else rule.name)
+            if shortfall is not None:
+                unassessed = self._result(
+                    rule, Status.ERROR, shortfall, severity=max(rule.severity, Severity.ERROR)
+                )
+                return [population.scoped(unassessed, described=False)]
+        results = self._evaluated(rule, ctx)
+        if population is None:
+            return results
+        return [population.scoped(result) for result in results]
+
+    @staticmethod
+    def _filtered_population(rule: Rule, ctx: DataContext) -> FilteredPopulation | None:
+        """The rows a filtered check item assesses, counted before its rule runs."""
+        if rule.binding is None or rule.binding.rows is None:
+            return None
+        return FilteredPopulation.count(rule.binding.rows, ctx)
+
+    def _evaluated(self, rule: Rule, ctx: DataContext) -> list[RuleResult]:
+        """Evaluate an available rule and turn its findings into results."""
         start = time.perf_counter()
         try:
             outcome = rule.evaluate(ctx)
@@ -1050,6 +1073,8 @@ class QARunner:
             metrics=metrics,
             datasets=list(self._datasets(rule, finding)),
         )
+        if rule.binding is not None and rule.binding.rows is not None:
+            result = FilteredResult(rule.binding.rows).shown(result)
         return _shown_names(result) if getattr(rule.params, "group", None) else result
 
     def _sample(

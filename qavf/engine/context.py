@@ -427,6 +427,9 @@ class DataContext:
 
         for name, (parent, spec) in settings.views().items():
             self._attach_view(name, ViewSource.of(parent, spec, self.env, self))
+        for name, (parent, spec, _) in settings.where_views().items():
+            # The rows a filtered check item's ``where`` selects; read only by its rule.
+            self._attach_view(name, ViewSource.of(parent, spec, self.env, self))
         for name, params in settings.derived_datasets().items():
             self._attach_view(name, DerivedSource.of(params, self.env, self))
 

@@ -465,6 +465,23 @@ def expression_too_few_applicable(
     )
 
 
+def filtered_too_few(label: str, dataset: str, rows: int, where: str, minimum: int) -> str:
+    """Why a check item filtered by ``where`` was not assessed: too few matching rows."""
+    if not rows:
+        return (
+            f"Not assessed: '{label}': no row of {dataset} matches 'where: {where}'; "
+            "an empty filtered population is not assessed."
+        )
+    return f"Not assessed: '{label}' on {dataset}: {too_few_applicable(rows, where, minimum)}."
+
+
+def filtered_scope(dataset: str, where: str, population: int, applicable: int) -> str:
+    """The rows of ``dataset`` a filtered check item assessed, added to its message."""
+    return (
+        f"Assessed {applicable:,} of {population:,} row(s) of {dataset} matching 'where: {where}'."
+    )
+
+
 def expression_scope(population: int, applicable: int) -> dict[str, int]:
     """The metrics of a filtered expression: its rows, those it applies to and the rest."""
     return {

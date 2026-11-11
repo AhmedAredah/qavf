@@ -49,4 +49,6 @@ def apply_profile(settings: QAVFSettings, name: ProfileName) -> QAVFSettings:
     if "qavf.profile" in extensions and extensions["qavf.profile"] != provenance:
         raise ValueError("extensions['qavf.profile'] conflicts with the selected profile")
     extensions["qavf.profile"] = provenance
-    return settings.model_copy(update={"extensions": extensions})
+    profiled = settings.model_copy(update={"extensions": extensions})
+    profiled.adopt_origins(settings.origins)
+    return profiled

@@ -215,6 +215,7 @@ def narrow(
         if entry in selected or (entry in settings.datasets and entry in selected_datasets)
     ]
     copied.apply_selection(AppliedSelection(selection, frozenset(switched_off)))
+    copied.adopt_origins(settings.origins)
     return copied
 
 

@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from qavf.checks.selection import NOT_SELECTED
 from qavf.engine.registry import Rule, RuleRegistry, default_registry
+from qavf.origins import OriginNotes
 from qavf.plugins.registry import entry_point_scope
 from qavf.redaction import exception_details, redact_text
 from qavf.settings import QAVFSettings, validate_config_mapping_keys
@@ -81,8 +82,15 @@ def compile_rules(
     Raises:
         ConfigurationError: for unknown rule ids or invalid rule parameters.
     """
-    with entry_point_scope(settings.plugins.entry_points):
-        return _compile_rules(settings, registry, sources)
+    try:
+        with entry_point_scope(settings.plugins.entry_points):
+            return _compile_rules(settings, registry, sources)
+    except ConfigurationError as exc:
+        # Settings narrowed by a selection or a profile keep where each value was
+        # written: a check item's error names its file and line.
+        if settings.origins is not None:
+            OriginNotes(settings.origins).attach(exc)
+        raise
 
 
 def _compile_rules(

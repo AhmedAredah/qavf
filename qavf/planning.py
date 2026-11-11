@@ -69,6 +69,11 @@ class RuleExplanation(SnapshotModel):
     columns: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     dependency_mode: str
     work: tuple[str, ...]
+    where: str | None = None
+    """The rows a filtered dataset check item assesses (its ``where``); its datasets and
+    columns include those of the dataset the condition filters."""
+    where_columns: tuple[str, ...] | None = None
+    """The columns of its dataset that ``where`` reads (``None``: not proven)."""
 
 
 class ValidationPlan(SnapshotModel):
@@ -334,6 +339,8 @@ def explain(
                     columns=dependency["columns"],
                     dependency_mode=dependency["dependency_mode"],
                     work=_work(rule.rule_id),
+                    where=dependency.get("where"),
+                    where_columns=dependency.get("where_columns"),
                 )
             )
         excluded = dict(compiled.excluded)

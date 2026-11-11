@@ -19,6 +19,9 @@ from qavf.engine.severity import Severity
 COMMON_FIELDS = ("check", "name", "severity", "where", "tags", "enabled", "description")
 """Fields every check item accepts; everything else is the check's own settings."""
 
+FILTER_SETTING = "min_applicable_rows"
+"""With ``where``: the fewest matching rows a dataset check item is assessed on."""
+
 
 def settings_required_when_enabled(schema: dict[str, Any]) -> None:
     """A check switched off (``enabled: false``) may omit its required settings."""
@@ -51,10 +54,11 @@ class CheckItem(BaseModel):
     severity: Severity | None = None
     """Overrides the check's default severity."""
     where: str | None = None
-    """SQL condition: assess only the rows that match it. Only the checks that list
-    ``where`` among their settings take it (``expression``, ``compare`` and plugins
-    whose parameters declare it); for the others, check a view
-    (``<dataset>.<view>``) or a dataset of the filtered rows."""
+    """SQL condition on the dataset's columns: assess only the rows that match it.
+    Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``,
+    the fewest matching rows it is assessed on; an empty filtered population is not
+    assessed). Of the top-level checks only ``compare`` takes it; for the others,
+    name a view (``<dataset>.<view>``) of each dataset."""
     tags: list[str] = Field(default_factory=list)
     """Words grouping checks for run-time selection."""
     enabled: bool = True
@@ -87,6 +91,15 @@ class CheckItem(BaseModel):
     def settings(self) -> dict[str, Any]:
         """The check's own settings (every key that is not a common field)."""
         return dict(self.model_extra or {})
+
+    def without_filter(self) -> CheckItem:
+        """This item without ``where`` and ``min_applicable_rows``: the item a check
+        that does not filter rows itself runs on the hidden view of its rows."""
+        unfiltered = self.model_copy(deep=True)
+        unfiltered.where = None
+        if unfiltered.model_extra is not None:
+            unfiltered.model_extra.pop(FILTER_SETTING, None)
+        return unfiltered
 
     def default_name(self, datasets: tuple[str, ...]) -> str:
         """``<check> on <dataset>`` (several datasets joined with ``and``)."""
@@ -221,6 +234,7 @@ def checks_union(models: Sequence[type[BaseModel]]) -> Any:
 
 __all__ = [
     "COMMON_FIELDS",
+    "FILTER_SETTING",
     "CheckDefaults",
     "CheckItem",
     "ExpressionItem",

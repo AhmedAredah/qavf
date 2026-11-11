@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from qavf.engine.derived_names import WHERE_VIEW_PREFIX
+
 if TYPE_CHECKING:
     from qavf.settings import QAVFSettings
 
@@ -20,12 +22,18 @@ DERIVED_MARK = "~"
 """Separates a derived dataset's role or member from its item's place."""
 
 
+def is_reserved(name: str) -> bool:
+    """Whether a configured dataset or view name uses the prefix of hidden filtered
+    views (``<dataset>.__where_<digest>``)."""
+    return f".{WHERE_VIEW_PREFIX}".casefold() in name.casefold()
+
+
 @dataclass(frozen=True, slots=True)
 class Relation:
     """A named relation and where the configuration declares it."""
 
     kind: str
-    """``dataset``, ``view`` or ``derived dataset``."""
+    """``dataset``, ``view``, ``filtered view`` (hidden) or ``derived dataset``."""
     name: str
     origin: str
     """The declaration's location, e.g. ``datasets.roads.views.active``."""
@@ -53,6 +61,8 @@ class RelationNamespace:
         for name, (parent, _) in settings.views().items():
             view = name.removeprefix(f"{parent}.")
             namespace.declare(Relation("view", name, f"datasets.{parent}.views.{view}"))
+        for name, (_, _, origin) in settings.where_views().items():
+            namespace.declare(Relation("filtered view", name, origin))
         if namespace.may_hold_derived_names():
             for name in settings.derived_datasets():
                 origin = name.rpartition("~")[2]
@@ -72,8 +82,14 @@ class RelationNamespace:
         """Add ``relation``.
 
         Raises:
-            ValueError: when a relation of that name (ignoring case) is declared.
+            ValueError: when a relation of that name (ignoring case) is declared, or a
+                configured name uses the prefix reserved for hidden filtered views.
         """
+        if relation.kind != "filtered view" and is_reserved(relation.name):
+            raise ValueError(
+                f"{relation.describe()}: names containing '.{WHERE_VIEW_PREFIX}' are reserved "
+                "for the rows a check item's 'where' selects. Rename it."
+            )
         other = self._relations.setdefault(relation.name.lower(), relation)
         if other is relation:
             return
@@ -92,4 +108,4 @@ class RelationNamespace:
         return relation if relation is not None and relation.name == name else None
 
 
-__all__ = ["DERIVED_MARK", "Relation", "RelationNamespace"]
+__all__ = ["DERIVED_MARK", "Relation", "RelationNamespace", "is_reserved"]

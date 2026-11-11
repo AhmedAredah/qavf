@@ -3,13 +3,20 @@
 Derived datasets (:mod:`qavf.engine.derived`) are named after the check item's
 place, ``<role>~checks[2]`` or ``<member>~checks[2]``, so they never clash with
 configured datasets. Results show them by role (``consensus``, ``pooled``) or by
-member instead. Imports neither Polars nor Pydantic.
+member instead.
+
+A dataset check item with ``where`` whose check does not filter rows itself reads
+a hidden view of its dataset, ``<dataset>.__where_<digest of the condition>``
+(:class:`RowFilter`); results show it as the dataset, with ``where`` among the
+parameters. Imports neither Polars nor Pydantic.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -69,4 +76,75 @@ def shown_value(value: Any) -> Any:
     return value
 
 
-__all__ = ["derived_name", "is_derived", "shown_datasets", "shown_name", "shown_value"]
+WHERE_VIEW_PREFIX = "__where_"
+"""Reserved: views named so are the hidden views of filtered check items."""
+_WHERE_VIEW = re.compile(r".+\." + WHERE_VIEW_PREFIX + r"[0-9a-f]{12}")
+
+
+def where_view_name(dataset: str, condition: str) -> str:
+    """The hidden view of ``dataset`` holding the rows matching ``condition``; every
+    item of the dataset with that condition reads the same view."""
+    digest = hashlib.sha256(condition.encode("utf-8")).hexdigest()[:12]
+    return f"{dataset}.{WHERE_VIEW_PREFIX}{digest}"
+
+
+def is_where_view(name: str) -> bool:
+    """Whether ``name`` is the hidden view of a filtered check item."""
+    return _WHERE_VIEW.fullmatch(name) is not None
+
+
+@dataclass(frozen=True, slots=True)
+class RowFilter:
+    """The rows a filtered dataset check item assesses: those of its dataset matching
+    ``where``, read through a hidden view (:func:`where_view_name`)."""
+
+    dataset: str
+    where: str
+    min_applicable_rows: int = 0
+    """Fewer matching rows make the check not assessed; an empty population is never
+    assessed, whatever the minimum."""
+
+    @property
+    def view(self) -> str:
+        return where_view_name(self.dataset, self.where)
+
+    @property
+    def minimum(self) -> int:
+        """The fewest matching rows the check is assessed on (at least one)."""
+        return max(1, self.min_applicable_rows)
+
+    def shown(self, value: Any) -> Any:
+        """``value`` (text, or JSON-like lists and mappings) with the hidden view, in
+        keys and text, shown as its dataset."""
+        if isinstance(value, str):
+            return value.replace(self.view, self.dataset)
+        if isinstance(value, Mapping):
+            return {self.shown(key): self.shown(item) for key, item in value.items()}
+        if isinstance(value, list | tuple):
+            items = [self.shown(item) for item in value]
+            return items if isinstance(value, list) else tuple(items)
+        return value
+
+    def shown_datasets(self, names: Iterable[str]) -> list[str]:
+        """``names`` with the hidden view shown as its dataset, once."""
+        return list(dict.fromkeys(self.shown(name) for name in names))
+
+    def parameters(self) -> dict[str, Any]:
+        """The settings selecting the rows, shown among a result's parameters."""
+        shown: dict[str, Any] = {"where": self.where}
+        if self.min_applicable_rows:
+            shown["min_applicable_rows"] = self.min_applicable_rows
+        return shown
+
+
+__all__ = [
+    "WHERE_VIEW_PREFIX",
+    "RowFilter",
+    "derived_name",
+    "is_derived",
+    "is_where_view",
+    "shown_datasets",
+    "shown_name",
+    "shown_value",
+    "where_view_name",
+]

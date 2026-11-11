@@ -18,6 +18,7 @@ from typing import Any
 import polars as pl
 
 from qavf.audit_codec import freeze_evidence
+from qavf.engine.derived_names import is_where_view
 from qavf.redaction import redact_text
 from qavf.reports.models import DatasetInfo
 from qavf.settings import DatasetSpec, check_canonical_columns
@@ -221,7 +222,8 @@ class DatasetCatalog:
         with self._lock:
             result = []
             for name, entry in sorted(self._observations.items()):
-                if entry.schema is None:
+                if entry.schema is None or is_where_view(name):
+                    # A filtered item's hidden view is reported through its results.
                     continue
                 source = self.sources.get(name)
                 counters = source.identity_telemetry() if source is not None else {}
@@ -257,7 +259,7 @@ class DatasetCatalog:
             reasons = {
                 name: redact_text(str(entry.failure))
                 for name, entry in self._observations.items()
-                if entry.failure is not None
+                if entry.failure is not None and not is_where_view(name)
             }
             available = set(materialized) | self.sources.keys() | self.provided_names
             for name in self.specs.keys() - available:

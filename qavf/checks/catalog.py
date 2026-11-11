@@ -33,7 +33,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
 from pydantic.fields import FieldInfo
 from pydantic_core import InitErrorDetails
 
-from qavf.checks.items import CheckItem, ExpressionItem, SqlItem, settings_required_when_enabled
+from qavf.checks.items import (
+    FILTER_SETTING,
+    CheckItem,
+    ExpressionItem,
+    SqlItem,
+    settings_required_when_enabled,
+)
 from qavf.checks.placement import (
     BLOCK_SECTIONS,
     CheckSettingError,
@@ -56,6 +62,7 @@ from qavf.compare.pairing import (
     pair_label,
 )
 from qavf.engine.derived import DerivedParams, derived_name
+from qavf.engine.derived_names import RowFilter
 from qavf.engine.registry import Rule
 from qavf.input_rules import INPUT_RULES
 from qavf.rules.comparison_checks import DatasetComparisonRule
@@ -191,13 +198,51 @@ class CheckDefinition(ABC):
         """Whether the check's items take the common ``where`` setting."""
         return self.where_field is not None
 
+    @property
+    def filters_rows(self) -> bool:
+        """Whether a dataset item's ``where`` selects the rows the check reads through a
+        hidden view of the dataset (the check does not filter rows itself)."""
+        return self.configurable and self.placement == "dataset" and not self.supports_where
+
+    @property
+    def takes_where(self) -> bool:
+        """Whether the check's items take ``where`` at all (natively or filtered)."""
+        return self.supports_where or self.filters_rows
+
     def where(self, item: CheckItem) -> dict[str, Any]:
         """The element field receiving the common ``where`` setting."""
         if item.where is None:
             return {}
         if self.where_field is None:
-            raise CheckSettingError("where", unsupported_where(self.name))
+            raise CheckSettingError("where", unsupported_where(self.name, top_level=True))
         return {self.where_field: item.where}
+
+    def rows(self, item: CheckItem, scope: Scope) -> RowFilter | None:
+        """The rows a filtered dataset item assesses (``None``: the check reads its
+        dataset, or applies ``where`` itself).
+
+        Raises:
+            CheckSettingError: for a ``min_applicable_rows`` that is not a count, or
+                given without ``where``.
+        """
+        if scope.dataset is None or not self.filters_rows:
+            return None
+        minimum = item.settings.get(FILTER_SETTING, 0)
+        if item.where is None:
+            if FILTER_SETTING in item.settings:
+                raise CheckSettingError(FILTER_SETTING, f"'{FILTER_SETTING}' goes with 'where'")
+            return None
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 0:
+            raise CheckSettingError(FILTER_SETTING, "must be a whole number of rows, 0 or more")
+        return RowFilter(scope.dataset, item.where, minimum)
+
+    def compile_item(self, item: CheckItem, scope: Scope) -> dict[str, Any]:
+        """The rule parameters for ``item``: a filtered dataset item's check reads the
+        hidden view of its rows (:meth:`rows`), without ``where`` of its own."""
+        rows = self.rows(item, scope)
+        if rows is None:
+            return self.compile(item, scope)
+        return self.compile(item.without_filter(), scope.filtered(rows.view))
 
     def errors(self, item: CheckItem, scope: Scope, *, parameters: bool = True) -> list[str]:
         """Problems with ``item``, each prefixed with the setting's path.
@@ -210,7 +255,7 @@ class CheckDefinition(ABC):
         if self.placement == "top" and scope.dataset is not None:
             return [f"{scope.path}.check: {self.name} goes in the top-level checks list"]
         try:
-            params = self.compile(item, scope)
+            params = self.compile_item(item, scope)
         except CheckSettingError as exc:
             where = f"{scope.path}.{exc.field}" if exc.field else scope.path
             return [f"{where}: {exc.message}"]
@@ -273,7 +318,7 @@ class ElementCheck(CheckDefinition):
             else:
                 element[self.renames.get(key, key)] = value
         if self.inject_dataset:
-            element["dataset"] = scope.dataset
+            element["dataset"] = scope.reads
         if item.name is not None and "name" in self.element_model.model_fields:
             element["name"] = item.name
         return {**rule, self.list_param: [element]}
@@ -368,7 +413,7 @@ class InlineCheck(CheckDefinition):
             raise CheckSettingError(
                 f"{self.inline_key}.dataset", "the dataset is the one the check is placed on"
             )
-        element["dataset"] = scope.dataset
+        element["dataset"] = scope.reads
         for new, old in self.into_inline.items():
             if new in settings:
                 element[old] = settings.pop(new)
@@ -1219,7 +1264,7 @@ class PluginDefinition(CheckDefinition):
     def errors(self, item: CheckItem, scope: Scope, *, parameters: bool = True) -> list[str]:
         # Plugins may be placed on a dataset or at the top level.
         try:
-            params = self.compile(item, scope)
+            params = self.compile_item(item, scope)
             self.rule_cls.Params.model_validate(params)
         except CheckSettingError as exc:
             return [f"{scope.path}.{exc.field}: {exc.message}"]
@@ -1237,11 +1282,21 @@ class PluginDefinition(CheckDefinition):
         """A plugin takes ``where`` when its parameters declare it."""
         return "where" in self.rule_cls.Params.model_fields
 
+    @property
+    def filters_rows(self) -> bool:
+        """A plugin placed on a dataset reads the rows of its ``where`` through a hidden
+        view when its parameters name the dataset but declare no ``where`` (nor a
+        ``min_applicable_rows`` of their own)."""
+        fields = self.rule_cls.Params.model_fields
+        return not self.supports_where and "dataset" in fields and FILTER_SETTING not in fields
+
     def compile(self, item: CheckItem, scope: Scope) -> dict[str, Any]:
         params = copy.deepcopy(item.settings)
         if item.where is not None:
             if not self.supports_where:
-                raise CheckSettingError("where", unsupported_where(self.name))
+                raise CheckSettingError(
+                    "where", unsupported_where(self.name, top_level=scope.dataset is None)
+                )
             params["where"] = item.where
         if scope.dataset is not None and "dataset" in self.rule_cls.Params.model_fields:
             named = params.get("dataset", scope.dataset)
@@ -1251,7 +1306,7 @@ class PluginDefinition(CheckDefinition):
                     f"the item is placed on dataset {scope.dataset!r} but names dataset "
                     f"{named!r}; place it on {named!r} or leave 'dataset' out",
                 )
-            params["dataset"] = scope.dataset
+            params["dataset"] = scope.reads
         return params
 
     def decompile(self, params: Mapping[str, Any]) -> list[Decompiled]:
@@ -1375,12 +1430,30 @@ def derived_datasets(settings: QAVFSettings) -> dict[str, DerivedParams]:
     return derived
 
 
-def unsupported_where(check: str) -> str:
+_MIN_APPLICABLE_ROWS: FieldSpec = (
+    int,
+    Field(
+        default=0,
+        ge=0,
+        strict=True,
+        description="With ``where``: fewer matching rows than this make the check not "
+        "assessed (an empty filtered population is never assessed).",
+    ),
+)
+"""The ``min_applicable_rows`` setting of the checks filtered through a hidden view."""
+
+
+def unsupported_where(check: str, *, top_level: bool) -> str:
     """Why a check item cannot take ``where``, and what selects its rows instead."""
+    if top_level:
+        return (
+            f"'where' is not supported by the top-level {check} check: one condition is "
+            "ambiguous across the datasets it relates. Name a view of each dataset instead "
+            "(datasets.<dataset>.views.<view>, named as <dataset>.<view> in 'datasets')"
+        )
     return (
-        f"'where' is not supported by the {check} check; check a view "
-        "(datasets.<dataset>.views.<view>, named as <dataset>.<view> where a check "
-        "names datasets) or a dataset of the filtered rows instead"
+        f"'where' is not supported by the {check} check, whose parameters declare neither "
+        "'where' nor the 'dataset' it reads; check a dataset of the filtered rows instead"
     )
 
 
@@ -1392,8 +1465,10 @@ def _item_model(definition: CheckDefinition) -> type[BaseModel]:
     common = {
         name: field
         for name, field in _COMMON_ITEM_FIELDS.items()
-        if name != "where" or definition.supports_where
+        if name != "where" or definition.takes_where
     }
+    if definition.filters_rows:
+        common[FILTER_SETTING] = _MIN_APPLICABLE_ROWS
     model_name = "Check_" + "".join(ch if ch.isalnum() else "_" for ch in definition.name)
     return create_model(  # type: ignore[call-overload,no-any-return]
         model_name,

@@ -7,7 +7,7 @@ backend validates ``expression`` and ``sql`` items with it.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
@@ -103,6 +103,19 @@ class Scope:
     """The dataset a dataset-level item tests; ``None`` at the top level."""
     blocks: NamedBlocks = field(default_factory=NamedBlocks, compare=False)
     """The named series, metrics and views the item may refer to."""
+    relation: str | None = None
+    """The relation a dataset-level item reads when it is not the dataset itself: the
+    hidden view of the rows its ``where`` selects."""
+
+    @property
+    def reads(self) -> str | None:
+        """The relation a dataset-level item's check reads: its dataset, or the hidden
+        view of its filtered rows."""
+        return self.relation or self.dataset
+
+    def filtered(self, view: str) -> Scope:
+        """This scope reading ``view`` of its dataset."""
+        return replace(self, relation=view)
 
     def at(self, field: str | None) -> str:
         """The path of one of the item's settings."""
@@ -260,9 +273,44 @@ def name_errors(settings: QAVFSettings) -> list[str]:
     return problems
 
 
-def row_check_errors(settings: QAVFSettings) -> list[str]:
-    """Problems with ``expression``/``sql`` items, names and ``run.require``."""
+NATIVE_WHERE_CHECKS = frozenset({"expression"})
+"""Dataset checks that select the rows of their ``where`` themselves."""
+
+
+def filtered_items(settings: QAVFSettings) -> Iterator[PlacedItem]:
+    """Dataset check items whose ``where`` a hidden view of their dataset applies:
+    every one with ``where`` but an ``expression``, which filters its rows itself.
+
+    A plugin check whose parameters declare ``where`` filters natively as well; the
+    hidden view of its condition is declared but never read.
+    """
+    for placed in placed_items(settings):
+        item = placed.item
+        if (
+            placed.scope.dataset is not None
+            and item.where is not None
+            and item.check not in NATIVE_WHERE_CHECKS
+        ):
+            yield placed
+
+
+def filter_errors(settings: QAVFSettings) -> list[str]:
+    """The ``where`` conditions of filtered dataset items that SQL cannot parse."""
+    from qavf.settings import _check_where
+
     problems = []
+    for placed in filtered_items(settings):
+        try:
+            _check_where(str(placed.item.where))
+        except ValueError as exc:
+            problems.append(f"{placed.scope.at('where')}: {exc}")
+    return problems
+
+
+def row_check_errors(settings: QAVFSettings) -> list[str]:
+    """Problems with ``expression``/``sql`` items, filtered items' ``where``, names and
+    ``run.require``."""
+    problems = filter_errors(settings)
     for placed in placed_items(settings):
         validate = ROW_CHECKS.get(placed.item.check)
         # Like every other check, one switched off before any settings were given
@@ -276,6 +324,7 @@ def row_check_errors(settings: QAVFSettings) -> list[str]:
 
 __all__ = [
     "BLOCK_SECTIONS",
+    "NATIVE_WHERE_CHECKS",
     "ROW_CHECKS",
     "ROW_CHECK_SETTINGS",
     "CheckSettingError",
@@ -283,6 +332,8 @@ __all__ = [
     "PlacedItem",
     "Scope",
     "expression_errors",
+    "filter_errors",
+    "filtered_items",
     "list_name_errors",
     "name_errors",
     "placed_items",

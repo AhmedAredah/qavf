@@ -1,5 +1,6 @@
-"""``where`` is taken only by the checks that honour it, and a plugin check binds
-to the dataset it is placed on (review findings R6 and R11)."""
+"""``where`` is taken by every dataset check (natively, or through a hidden view of
+the dataset), and a plugin check binds to the dataset it is placed on (review
+findings R6 and R11)."""
 
 from __future__ import annotations
 
@@ -44,11 +45,27 @@ class _PlainRule(_AcmeRule):
     check_name: ClassVar[str] = "plain"
     Params: ClassVar[type[RuleParams]] = _PlainParams
 
+    def evaluate(self, ctx):
+        return Finding.ok(
+            f"{ctx.get(str(self.params.dataset)).height} row(s) of {self.params.dataset}"
+        )
+
+
+class _BareParams(RuleParams):
+    payload: Any = None
+
+
+class _BareRule(_AcmeRule):
+    rule_id: ClassVar[str] = "ACME-3"
+    check_name: ClassVar[str] = "bare"
+    Params: ClassVar[type[RuleParams]] = _BareParams
+
 
 def _registry():
     registry = discovered_rules(entry_points=False)
     registry.register(_AcmeRule)
     registry.register(_PlainRule)
+    registry.register(_BareRule)
     return registry
 
 
@@ -60,24 +77,34 @@ def _run(item: dict[str, Any]):
     return settings, QARunner(settings, registry=_registry()).run(frames=frames)
 
 
-@pytest.mark.parametrize("check", ["fresh", "outliers", "key_grid", "missing_periods"])
-def test_unsupported_where_points_at_views(check):
-    item = {"check": check, "where": "x > 0"}
-    with pytest.raises(ValueError, match=r"'where' is not supported by the \w+ check; check a"):
-        QAVFSettings.model_validate({"datasets": {"d": {"checks": [item]}}})
+@pytest.mark.parametrize(
+    "check", ["totals_match", "key_sets_match", "drift", "coverage", "batch_consistent"]
+)
+def test_top_level_where_points_at_views(check):
+    item = {"check": check, "datasets": ["d", "e"], "where": "x > 0"}
+    with pytest.raises(ValueError, match=r"top-level \w+ check: one condition is ambiguous"):
+        QAVFSettings.model_validate({"datasets": {"d": {}, "e": {}}, "checks": [item]})
 
 
-def test_only_checks_that_honour_where_advertise_it():
-    supported = {name for name, d in CATALOG.items() if d.configurable and d.supports_where}
-    assert supported == {"expression", "compare"}
+def test_every_dataset_check_advertises_where():
+    native = {name for name, d in CATALOG.items() if d.configurable and d.supports_where}
+    assert native == {"expression", "compare"}
+    for name, definition in CATALOG.items():
+        if definition.configurable:
+            dataset_scoped = definition.placement == "dataset"
+            assert definition.takes_where == (dataset_scoped or name == "compare"), name
     schema = config_json_schema(_registry(), build_source_registry(QAVFSettings()))
     definitions = schema["$defs"]
     assert "where" in definitions["ExpressionItem"]["properties"]
     assert "where" not in definitions["SqlItem"]["properties"]
     assert "where" in definitions["Check_compare"]["properties"]
-    assert "where" not in definitions["Check_fresh"]["properties"]
+    assert "where" not in definitions["Check_totals_match"]["properties"]
+    assert "where" in definitions["Check_fresh"]["properties"]
+    assert "min_applicable_rows" in definitions["Check_fresh"]["properties"]
+    assert "min_applicable_rows" not in definitions["Check_compare"]["properties"]
     assert "where" in definitions["Check_acme"]["properties"]
-    assert "where" not in definitions["Check_plain"]["properties"]
+    assert "where" in definitions["Check_plain"]["properties"]
+    assert "where" not in definitions["Check_bare"]["properties"]
 
 
 def test_a_plugin_declaring_where_receives_it():
@@ -86,9 +113,25 @@ def test_a_plugin_declaring_where_receives_it():
     assert result.message == "target a where x > 0"
 
 
-def test_a_plugin_without_where_rejects_it():
-    with pytest.raises(ConfigurationError, match="'where' is not supported by the plain check"):
-        _run({"check": "plain", "where": "x > 0"})
+def test_a_plugin_naming_its_dataset_reads_the_filtered_rows():
+    frames = {"a": pl.DataFrame({"x": [1, -1, 2]}), "b": pl.DataFrame({"x": [1]})}
+    settings = QAVFSettings.model_validate(
+        {
+            "plugins": {"entry_points": False},
+            "datasets": {"a": {"checks": [{"check": "plain", "where": "x > 0"}]}, "b": {}},
+        }
+    )
+    report = QARunner(settings, registry=_registry()).run(frames=frames)
+    (result,) = report.results_for("ACME-2")
+    assert result.message.startswith("2 row(s) of a Assessed 2 of 3 row(s) of a")
+    assert result.datasets == ["a"]
+    assert result.parameters["where"] == "x > 0"
+    assert "__where_" not in str(result.model_dump())
+
+
+def test_a_plugin_naming_no_dataset_rejects_where():
+    with pytest.raises(ConfigurationError, match="'where' is not supported by the bare check"):
+        _run({"check": "bare", "where": "x > 0"})
 
 
 def test_a_plugin_naming_another_dataset_than_its_placement_is_rejected():
