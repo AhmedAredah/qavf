@@ -284,7 +284,7 @@ def test_documented_comparison_configuration_validates():
     from qavf.checks.compiler import compile_checks
     from qavf.compare.spec import StepConfig
 
-    steps, configuration = _blocks("comparison.md", "yaml")
+    steps, configuration = _blocks("comparison.md", "yaml")[:2]
     settings = QAVFSettings.model_validate(yaml.safe_load(configuration))
     (compiled,) = compile_checks(settings)
     rule = compiled.rule()

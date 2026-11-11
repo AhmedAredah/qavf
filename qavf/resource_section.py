@@ -80,6 +80,15 @@ class ResourceProvenance:
     def __init__(self, places: Mapping[str, tuple[LimitPlace, ...]] | None = None) -> None:
         self._places = dict(places or {})
 
+    def __eq__(self, other: object) -> bool:
+        """Provenance describes how settings were written, not what they are: settings
+        with equal values compare equal however their limits were given (a settings
+        dump, which writes every engine field, reads back equal)."""
+        return isinstance(other, ResourceProvenance)
+
+    def __hash__(self) -> int:
+        return hash(ResourceProvenance)
+
     def places(self, engine_field: str) -> tuple[LimitPlace, ...]:
         """The places ``engine_field`` was given, the one it is attributed to first."""
         return self._places.get(engine_field, ())
@@ -96,6 +105,7 @@ class ResourceFold:
     ) -> tuple[dict[str, Any], ResourceProvenance]:
         """``raw`` with its engine settings completed, and where each limit came from.
 
+        An engine limit written as null is not given (the default, no limit).
         A section or engine mapping that is not valid is left for field validation
         to report at its own path.
 
@@ -145,7 +155,7 @@ class ResourceFold:
     ) -> None:
         for engine_field in dict.fromkeys(field for _, values, _ in layers for field in values):
             given: list[tuple[LimitPlace, Any]] = []
-            if engine_field in engine:
+            if engine.get(engine_field) is not None:
                 value = _normalized(engine_field, engine[engine_field])
                 if value is _INVALID:
                     continue
@@ -244,7 +254,7 @@ def _engine_places(engine: Any) -> dict[str, list[LimitPlace]]:
     return {
         engine_field: [_engine_place(engine_field)]
         for engine_field in ResourceLimits.ENGINE_FIELDS.values()
-        if engine_field in engine
+        if engine.get(engine_field) is not None
     }
 
 

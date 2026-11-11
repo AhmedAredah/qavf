@@ -124,7 +124,9 @@ class LimitExplanation(SnapshotModel):
     """``resources`` (the section), ``engine`` (an ``engine`` field), ``argument``
     (``resources=``) or ``default``."""
     written: tuple[str, ...] = ()
-    """Every place it was given; with several, they hold the same value."""
+    """The places it was given; with several, they hold the same value. An ``engine``
+    value the ``resources`` section also sets is reported as the section's, and an
+    ``engine`` limit written as null counts as not given."""
     origin: str | None = None
     """``file:line:column`` where it was written, when read from a file."""
 

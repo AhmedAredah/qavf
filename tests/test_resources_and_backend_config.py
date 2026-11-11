@@ -379,3 +379,12 @@ def test_the_comparison_spec_and_the_project_share_one_resources_model(tmp_path)
         field: getattr(project.engine, field) for field in limits.engine_overrides()
     } == limits.engine_overrides()
     assert QAVFSettings.model_fields["resources"].annotation == ResourceSpec | None
+
+
+def test_a_null_engine_limit_is_not_given():
+    settings = QAVFSettings.model_validate(
+        {"engine": {"memory_budget_bytes": None}, "resources": {"target_memory": "1GiB"}}
+    )
+    assert settings.engine.memory_budget_bytes == 1024**3
+    dumped = settings.model_dump()  # every engine field written, as a transport does
+    assert QAVFSettings.model_validate(dumped) == settings
