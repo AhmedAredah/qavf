@@ -51,9 +51,10 @@ class DatasetExplanation(SnapshotModel):
     staging: str | None = None
     """How the input is staged before checks read it, when it is copied in a stream:
     ``bounded_batch_copy`` (a borrowed DuckDB query copied into the native backend's
-    owned table one bounded Arrow batch at a time) or ``spill_backed_snapshot`` (a
-    member of a coherent database snapshot, streamed in bounded batches to owned
-    spill files inside the snapshot's transaction). ``None`` for other inputs."""
+    owned table one bounded Arrow batch at a time) or ``adaptive_snapshot`` (a
+    member of a coherent database snapshot, streamed in bounded batches inside the
+    snapshot's transaction and kept in memory while the group fits, else written
+    to owned spill files). ``None`` for other inputs."""
 
 
 class RuleExplanation(SnapshotModel):
@@ -158,10 +159,11 @@ class InputStaging:
             "The borrowed query is copied into an owned table in bounded Arrow batches; "
             "one batch crosses the connection at a time."
         ),
-        "spill_backed_snapshot": (
-            "Snapshot members are streamed in bounded batches to owned spill files inside "
-            "one transaction and published together after it commits; staging needs "
-            "spill space for the whole group, not memory for it."
+        "adaptive_snapshot": (
+            "Snapshot members are streamed in bounded batches inside one transaction and "
+            "published together after it commits. They stay in memory while the group "
+            "fits the cache and memory target; a larger group is written to owned spill "
+            "files instead, so it needs spill space for the whole group, not memory."
         ),
     }
 
@@ -177,7 +179,7 @@ class InputStaging:
         if isinstance(value, Query) and isinstance(value.connection, duckdb.DuckDBPyConnection):
             return "bounded_batch_copy" if self.backend == "duckdb" else None
         if value is None and self._snapshot_member(source):
-            return "spill_backed_snapshot"
+            return "adaptive_snapshot"
         return None
 
     def _snapshot_member(self, source: Mapping[str, Any]) -> bool:

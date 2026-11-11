@@ -213,17 +213,27 @@ staging the failing rows. Numbers vary by machine; run the script to compare a c
 
 A coherent database snapshot (`connections.<name>.snapshot: true`, Polars backend)
 reads every member inside one transaction. Each member streams as bounded Arrow
-batches (65,536 rows) into its own owned IPC spill file under the run's spill
-budget; nothing is published until the transaction commits, and then the group's
-files are published together as spilled cache entries. Staging therefore holds
-about one batch in memory at a time and the group is bounded by spill space, not
-by `memory_budget_bytes`. The row budget is exact (the query is limited to the
-budget plus one row), cancellation is checked between batches, a failed or
-cancelled attempt deletes its files, and a retry restarts the whole group. A
-plugin source that has no SQL relation (`snapshot_relation` returns `None`) is
-still read whole by `read`, but is written to its spill file before the next
-member is read. Checks that later read a member as a Polars frame still
-materialize that member.
+batches (65,536 rows), and nothing is published until the transaction commits.
+Staging is adaptive:
+
+- While the group's running decoded size stays within the memory allowance (the
+  frame cache limit, and `memory_budget_bytes` when set), members are kept in
+  memory and published together as ordinary cache entries, as before streaming:
+  a small snapshot pays no spill write or read.
+- The first batch that would exceed the allowance switches the attempt to spill:
+  the members already buffered are written to owned IPC spill files, and every
+  remaining batch streams straight to its member's file under the run's spill
+  budget. The files are published together as spilled cache entries, so a large
+  group holds about one batch in memory at a time and is bounded by spill space,
+  not by `memory_budget_bytes`.
+
+Either way the row budget is exact (the query is limited to the budget plus one
+row), cancellation is checked between batches, a failed or cancelled attempt
+deletes its files and drops its buffered members, and a retry restarts the whole
+group. A plugin source that has no SQL relation (`snapshot_relation` returns
+`None`) is still read whole by `read`, then kept or spilled by the same rule
+before the next member is read. Checks that later read a spilled member as a
+Polars frame still materialize that member.
 
 On the native backend, a `Query` on a borrowed DuckDB connection is copied into
 the owned table one bounded Arrow batch at a time: each batch is registered,
@@ -231,20 +241,28 @@ inserted and unregistered before the next is read, with the same exact row
 budget, cancellation and types as a complete copy. The caller's connection is
 only read. On the Polars backend the borrowed result is still read whole, since
 that frame is the retained dataset. `qavf explain` reports the two as
-`staging: spill_backed_snapshot` and `staging: bounded_batch_copy`.
+`staging: adaptive_snapshot` and `staging: bounded_batch_copy`.
 
 `scripts/benchmark_streaming.py` measures both in fresh processes (median of 2).
 On one Windows workstation that was busy with other work (three members of
-1,000,000 rows and 6 columns; a borrowed query of 3,000,000 rows):
+6 columns; a borrowed query of 3,000,000 rows), comparing reading each member
+whole, spilling every member, and adaptive staging (the snapshot rows were
+measured together in one later run, so they compare with each other rather than
+with the borrowed-query row):
+
+| Workload | Read whole | Always spill | Adaptive |
+|---|---|---|---|
+| Snapshot, 3 × 300,000 rows: wall time / peak RSS / spill | 5.6 s / 0.63 GB / 0 | 6.5 s / 0.74 GB / 144 MB | 5.6 s / 0.66 GB / 0 |
+| Snapshot, 3 × 1,000,000 rows: outcome / wall time / peak RSS / spill | not assessed (spill budget exhausted) / 4.8 s / 1.44 GB / 0 | passed / 7.6 s / 1.84 GB / 480 MB | passed / 6.9 s / 2.13 GB / 528 MB |
 
 | Workload | Before | After |
 |---|---|---|
-| Snapshot, 3 × 1,000,000 rows: outcome / wall time / peak RSS / spill | not assessed (spill budget exhausted) / 6.2 s / 1.43 GB / 0 | passed / 12.1 s / 1.91 GB / 480 MB |
-| Snapshot, 3 × 300,000 rows: wall time / peak RSS / spill | 7.1 s / 0.63 GB / 0 | 10.4 s / 0.74 GB / 144 MB |
 | Borrowed query, native, 3,000,000 rows: wall time / peak RSS | 7.4 s / 1.41 GB | 9.3 s / 1.03 GB |
 
-The snapshot's peak is now its checks reading members back, not staging; a group
-that fits in memory pays one spill write and read for that bound.
+A group that fits the allowance is back to the cost of reading it whole. A larger
+group buffers up to the allowance before it spills, so its peak includes that
+allowance; past it, the snapshot's peak is its checks reading members back, not
+staging.
 
 Scoped batch consumers keep readers, source identities and connection reservations
 alive until complete consumption. A retry creates fresh consumer state; an incomplete

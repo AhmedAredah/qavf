@@ -132,11 +132,14 @@ Reports written by earlier versions still load.
   caller's connection is only read, and types are unchanged. `qavf explain` reports
   it as `staging: bounded_batch_copy`.
 - A coherent database snapshot (`snapshot: true`) streams each member in bounded
-  batches to owned spill files inside its transaction and publishes the files
-  together after commit. A group is bounded by spill space, no longer by
-  `memory_budget_bytes`; a failed or cancelled attempt deletes its files and a
-  retry restarts the whole group. `qavf explain` reports `staging:
-  spill_backed_snapshot`.
+  batches inside its transaction and stages it adaptively: members stay in memory
+  while the group fits the frame cache and `memory_budget_bytes`, so a small
+  snapshot costs what reading it whole did; the first batch past that writes the
+  buffered members to owned spill files and streams the rest straight to spill.
+  The group is published together after commit, and a large group is bounded by
+  spill space, no longer by `memory_budget_bytes`; a failed or cancelled attempt
+  deletes its files and a retry restarts the whole group. `qavf explain` reports
+  `staging: adaptive_snapshot`.
 - `scripts/benchmark_streaming.py` measures both, before and after a change.
 
 ### Fixed

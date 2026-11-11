@@ -1682,8 +1682,9 @@ class DataContext:
         Permanent unavailable members remain individually unavailable; transient
         failures restart the entire transaction. Retry and identity decisions
         belong to the same coordinator as eager and native source execution.
-        Members are staged as owned spill files and published together as
-        spilled cache entries, so the group is bounded by spill space, not memory.
+        A group that fits the memory allowance is published from memory; a larger
+        one is staged as owned spill files and published together as spilled cache
+        entries, so the group is bounded by spill space, not memory.
         """
         with self._operations.guard(), self._key_lock(("snapshot", connection)):
             members = sorted(
@@ -1705,12 +1706,14 @@ class DataContext:
                     [self._catalog.sources[name] for name in members], attempts
                 )
                 self._check_cancelled()
-                self._frames.adopt(
-                    stage.spills(),
-                    functools.partial(self._publish_snapshot_metadata, connection, members, stage),
-                    self._lock,
+                publish_metadata = functools.partial(
+                    self._publish_snapshot_metadata, connection, members, stage
                 )
-                stage.detach()
+                if stage.spilled:
+                    self._frames.adopt(stage.spills(), publish_metadata, self._lock)
+                    stage.detach()
+                else:
+                    self._frames.publish(stage.frames(), publish_metadata, self._lock)
             except Exception as exc:
                 self._check_cancelled()
                 failure = redacted_error(
@@ -1737,10 +1740,12 @@ class DataContext:
             )
 
     def _snapshot_attempt(self, connection: str, members: list[str]) -> SnapshotStage:
-        """Read one transaction into owned spill files without publishing a cache entry.
+        """Read one transaction into memory or owned spill files without publishing.
 
-        Each member streams in bounded Arrow batches, so the attempt holds about one
-        batch in memory at a time. A failed or cancelled attempt deletes its files.
+        Each member streams in bounded Arrow batches. Members stay in memory while
+        the group fits within the cache limit and memory target; past that, the
+        attempt holds about one batch in memory at a time. A failed or cancelled
+        attempt deletes its files.
         """
         bindings: dict[str, ConnectionSpec] = {}
         secrets: dict[str, SecretSpec] = {}
@@ -1755,7 +1760,10 @@ class DataContext:
             # every published member still comes from one transaction.
             while True:
                 stage = SnapshotStage(
-                    self._frames.new_spill, self._catalog.prepare, datetime.now(UTC)
+                    self._frames.new_spill,
+                    self._catalog.prepare,
+                    datetime.now(UTC),
+                    self._snapshot_memory_bytes(),
                 )
                 stage.failures = failures
                 aborted = False
@@ -1817,6 +1825,11 @@ class DataContext:
                 stage.stage_batches(name, batches)
         except duckdb.Error as exc:
             raise read_error(exc) from exc
+
+    def _snapshot_memory_bytes(self) -> int:
+        """The decoded bytes a snapshot group may hold in memory before it spills."""
+        target = self._resources.memory_bytes
+        return self._frames.limit if target is None else min(self._frames.limit, target)
 
     @staticmethod
     def _admit_snapshot_rows(name: str, budget: int | None, rows: int) -> None:

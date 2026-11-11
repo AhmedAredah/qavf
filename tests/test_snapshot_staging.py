@@ -1,4 +1,4 @@
-"""Coherent database snapshots stream each member to owned spill files in bounded batches."""
+"""Coherent database snapshots stay in memory while they fit and spill to owned files after."""
 
 from __future__ import annotations
 
@@ -100,12 +100,28 @@ class UpdateAfterFirst:
             writer.close()
 
 
+class MemoryAllowance:
+    """Replace the snapshot's in-memory allowance with a fixed number of bytes."""
+
+    def __init__(self, allowance: int) -> None:
+        self.allowance = allowance
+
+    def __call__(self) -> int:
+        return self.allowance
+
+
+@pytest.fixture
+def spilling(monkeypatch):
+    """Snapshot groups spill from their first batch."""
+    monkeypatch.setattr(DataContext, "_snapshot_memory_bytes", MemoryAllowance(0))
+
+
 def _no_owned_files(ctx: DataContext) -> bool:
     usage = ctx.resource_usage()
     return usage["owned_spill_bytes"] == 0 and usage["owned_spill_files"] == 0
 
 
-def test_members_stage_to_spill_files_with_their_exact_types(database):
+def test_members_stage_to_spill_files_with_their_exact_types(database, spilling):
     with DataContext.from_settings(_settings(database)) as ctx:
         frame = ctx.get("orders")
         usage = ctx.resource_usage()
@@ -131,7 +147,7 @@ def test_a_concurrent_writer_between_members_is_not_seen(database, monkeypatch):
         assert check.execute("SELECT max(version) FROM orders").fetchone() == (2,)
 
 
-def test_row_budget_is_exact_across_batches(database):
+def test_row_budget_is_exact_across_batches(database, spilling):
     settings = _settings(database, row_budget=ROWS)
     with DataContext.from_settings(settings) as ctx:
         assert ctx.get("orders").height == ROWS
@@ -143,7 +159,7 @@ def test_row_budget_is_exact_across_batches(database):
         assert ctx.resource_usage()["frame_spill_write_count"] == 1
 
 
-def test_interrupted_stream_leaves_no_files(database, monkeypatch):
+def test_interrupted_stream_leaves_no_files(database, monkeypatch, spilling):
     stop = Interrupt(ResourceLimitError("validation execution was cancelled"))
     monkeypatch.setattr(DataContext, "_admit_snapshot_rows", staticmethod(stop))
     with DataContext.from_settings(_settings(database)) as ctx:
@@ -154,7 +170,7 @@ def test_interrupted_stream_leaves_no_files(database, monkeypatch):
         assert not any(ctx._frames.directory.iterdir())
 
 
-def test_a_retry_after_a_mid_stream_failure_restarts_the_group(database, monkeypatch):
+def test_a_retry_after_a_mid_stream_failure_restarts_the_group(database, monkeypatch, spilling):
     stop = Interrupt(SourceError("transient", retryable=True))
     monkeypatch.setattr(DataContext, "_admit_snapshot_rows", staticmethod(stop))
     with DataContext.from_settings(_settings(database, retries=1, retry_delay_s=0)) as ctx:
@@ -178,15 +194,15 @@ def test_cancellation_mid_stream_stops_the_run(database, monkeypatch):
     assert report.metadata.cancelled
 
 
-def test_explain_describes_spill_backed_staging(database):
+def test_explain_describes_adaptive_staging(database):
     config = _settings(database).model_dump(mode="json", exclude_unset=True)
     for spec in config["datasets"].values():
         spec["schema"] = {"columns": {"version": {"dtype": "int"}}}
     plan = explain(config=config, backend="polars")
-    assert {item.staging for item in plan.datasets} == {"spill_backed_snapshot"}
+    assert {item.staging for item in plan.datasets} == {"adaptive_snapshot"}
 
 
-def test_a_plugin_member_without_a_relation_is_spilled_whole(database, monkeypatch):
+def test_a_plugin_member_without_a_relation_is_spilled_whole(database, monkeypatch, spilling):
     monkeypatch.setattr(
         "qavf.sources.query.SQLSource.snapshot_relation", _no_relation, raising=True
     )
@@ -205,3 +221,58 @@ def test_polars_frame_matches_for_an_empty_member(database):
     with DataContext.from_settings(_settings(database)) as ctx:
         frame = ctx.get("small")
     assert frame.height == 0 and frame.schema == pl.Schema({"version": pl.Int32})
+
+
+def _reference(database, table: str) -> pl.DataFrame:
+    with duckdb.connect(str(database), read_only=True) as reference:
+        reference.execute("SET TimeZone = 'UTC'")
+        return polars_frame(reference.sql(f"SELECT * FROM {table}"))
+
+
+def test_a_group_that_fits_in_memory_writes_no_spill(database):
+    with DataContext.from_settings(_settings(database)) as ctx:
+        frame = ctx.get("orders")
+        usage = ctx.resource_usage()
+        assert usage["frame_spill_write_count"] == 0
+        assert usage["peak_frame_spill_bytes"] == 0
+        assert ctx.get("lines").height == ROWS and ctx.get("small").height == 1
+    expected = _reference(database, "orders")
+    assert frame.schema == expected.schema
+    assert frame.equals(expected)
+
+
+def test_a_group_that_outgrows_memory_spills_the_buffered_members_too(database, monkeypatch):
+    # Room for the first member and part of the second: the second overflows mid-stream.
+    with DataContext.from_settings(_settings(database)) as ctx:
+        member = ctx.get("lines").estimated_size()
+    monkeypatch.setattr(DataContext, "_snapshot_memory_bytes", MemoryAllowance(member * 3 // 2))
+    with DataContext.from_settings(_settings(database)) as ctx:
+        frames = {name: ctx.get(name) for name in ("orders", "lines", "small")}
+        assert ctx.resource_usage()["frame_spill_write_count"] == 3
+        assert {name: frame.height for name, frame in frames.items()} == {
+            "lines": ROWS,
+            "orders": ROWS,
+            "small": 1,
+        }
+    for name in ("orders", "lines"):
+        expected = _reference(database, name)
+        assert frames[name].schema == expected.schema
+        assert frames[name].equals(expected)
+
+
+def test_row_budget_is_exact_in_memory(database):
+    settings = _settings(database, row_budget=ROWS - 1)
+    with DataContext.from_settings(settings) as ctx:
+        assert not ctx.has("orders")
+        assert f"more than {ROWS - 1:,} rows" in str(ctx.load_error("orders"))
+        assert ctx.resource_usage()["frame_spill_write_count"] == 0
+
+
+def test_a_retry_in_memory_restarts_the_group(database, monkeypatch):
+    stop = Interrupt(SourceError("transient", retryable=True))
+    monkeypatch.setattr(DataContext, "_admit_snapshot_rows", staticmethod(stop))
+    with DataContext.from_settings(_settings(database, retries=1, retry_delay_s=0)) as ctx:
+        assert ctx.get("orders").height == ROWS
+        assert stop.raised == 1
+        assert ctx.resource_usage()["frame_spill_write_count"] == 0
+        assert _no_owned_files(ctx)
