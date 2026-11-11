@@ -5,9 +5,10 @@
 A check item names its check (`check: missing_periods`); the code (`TMP-004`)
 is its stable audit ID in reports. Besides the settings listed here, every item
 takes the common fields `name`, `severity`, `tags`, `enabled` and `description`.
-Only the checks listing `where` take it; for the others, check a view
-(`<dataset>.<view>`) or a dataset of the filtered rows. `qavf list-checks`
-prints the same catalog.
+The checks listing `where` take it: every check placed in a dataset's `checks`
+(which then assesses only the matching rows, with `min_applicable_rows`) and
+`compare`; the other top-level checks name a view (`<dataset>.<view>`) of each
+dataset instead. `qavf list-checks` prints the same catalog.
 
 | Check | Code | Goes in | Category | Default severity | Summary |
 |---|---|---|---|---|---|
@@ -54,7 +55,7 @@ Goes in top-level `checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `where` | `str \| None` | `None` | SQL condition: assess only the rows that match it. Only the checks that list ``where`` among their settings take it (``expression``, ``compare`` and plugins whose parameters declare it); for the others, check a view (``<dataset>.<view>``) or a dataset of the filtered rows. |
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
 | `datasets` | `list[str]` | **required** | The datasets related; the reference first (by default). |
 | `strategy` | `Literal['reference', 'sequential', 'all_pairs', 'consensus']` | `reference` | How the datasets are paired: the reference with each other (reference), each with the next (sequential), every pair (all_pairs) or each with the consensus of all (consensus). |
 | `reference` | `str \| None` | `None` | The authoritative dataset (default: the first); with consensus, the dataset whose value breaks ties under ties: reference. |
@@ -220,7 +221,7 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `where` | `str \| None` | `None` | SQL condition: assess only the rows that match it. Only the checks that list ``where`` among their settings take it (``expression``, ``compare`` and plugins whose parameters declare it); for the others, check a view (``<dataset>.<view>``) or a dataset of the filtered rows. |
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
 | `expr` | `str` | **required** | Condition every row satisfies, e.g. ``pm25 <= pm10``; it may query other datasets by name in subqueries. |
 | `null_as` | `Literal['pass', 'fail']` | `pass` | How a row whose expression evaluates to NULL counts (SQL CHECK semantics: pass). |
 | `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this makes the check not assessed. |
@@ -251,6 +252,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `column` | `str` | **required** | A date or datetime column, e.g. a timestamp or reporting date. |
 | `max_age` | `timedelta` | **required** | Largest acceptable age of the newest value, as an ISO 8601 duration (``P2D``, ``PT6H``) or seconds. |
 | `max_future_skew` | `timedelta` | `datetime.timedelta(0)` | Largest allowed timestamp lead over the reference clock; defaults to zero. |
@@ -327,6 +330,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `value` | `str` | **required** |  |
 | `group_by` | `tuple[str, ...]` | `[]` |  |
 | `total` | `int \| Decimal \| float` | `1.0` | What each group's shares must sum to (1.0 for fractions, 100 for percent). |
@@ -345,6 +350,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `dimensions` | `dict[str, Dimension]` | **required** |  |
 | `unexpected` | `bool` | `False` | Also report combinations present but not expected. |
 | `unique` | `bool` | `False` | Each combination must occur at most once. |
@@ -429,6 +436,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `path` | `str \| None` | `None` | Baseline file; relative paths resolve against the configuration file. |
 | `source` | `dict[str, Any] \| None` | `None` | Any source specification instead of ``path``, e.g. a baseline database table. |
 | `keys` | `tuple[str, ...]` | **required** |  |
@@ -466,6 +475,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `latitude` | `str` | `latitude` |  |
 | `longitude` | `str` | `longitude` |  |
 | `bbox` | `BoundingBox \| None` | `None` | Points outside this box are violations (e.g. the study area). |
@@ -523,6 +534,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `metric` | `Inline_metric_entity_outliers \| str` | **required** | The metric examined: the name of one the dataset defines under metrics (``other.name`` for another dataset's), or the definition itself. |
 | `method` | `OutlierMethod` | `modified_zscore` |  |
 | `threshold` | `float \| None` | `None` | Method threshold; the conventional default for the method when omitted. |
@@ -568,6 +581,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `metric` | `Inline_metric_group_comparison \| str` | **required** | The metric examined: the name of one the dataset defines under metrics (``other.name`` for another dataset's), or the definition itself. |
 | `groups` | `dict[str, tuple[Any, ...]]` | `{}` | ``group name -> entity ids`` (e.g. regions of counties). All entities form one group when empty; entities in no group are not compared. |
 | `max_ratio` | `float` | `2.0` | An entity is flagged when its metric is more than this factor above or below its group's median. |
@@ -652,6 +667,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `column` | `str` | **required** | Numeric column. |
 | `group_by` | `tuple[str, ...]` | `[]` | Columns to break the metric down by. |
 | `method` | `OutlierMethod \| None` | `None` | Overrides the rule-level method for this target. |
@@ -714,6 +731,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `series` | `Inline_series_change_rate \| str` | **required** | The series examined: the name of one the dataset defines under series (``other.name`` for another dataset's), or the definition itself. |
 | `max` | `float` | `0.25` | Largest accepted compound change per time unit, as a fraction (0.25 = 25 % per year when the time column holds years). |
 | `min_value` | `float` | `0.0` | Ignore steps where both values are at or below this magnitude. |
@@ -759,6 +778,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `series` | `Inline_series_trend \| str` | **required** | The series examined: the name of one the dataset defines under series (``other.name`` for another dataset's), or the definition itself. |
 | `expect` | `Literal['increasing', 'decreasing'] \| None` | `None` | Direction the series should move in; used by the trend-direction rule. |
 | `min_points` | `int` | `3` |  |
@@ -807,6 +828,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `series` | `Inline_series_trend_outliers \| str` | **required** | The series examined: the name of one the dataset defines under series (``other.name`` for another dataset's), or the definition itself. |
 | `min_points` | `int` | `5` | Fewest periods needed to fit and test a trend. |
 | `alpha` | `float` | `0.05` | Significance level of the corrected (Bonferroni by default) studentized-residual outlier test. |
@@ -856,6 +879,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `series` | `Inline_series_missing_periods \| str` | **required** | The series examined: the name of one the dataset defines under series (``other.name`` for another dataset's), or the definition itself. |
 | `expected` | `tuple[int \| Decimal \| float \| datetime \| date, ...] \| None` | `None` | Periods every group must have; the union of observed periods when omitted. For a bucketed series these are dates or datetimes (each names its bucket), and when omitted every bucket between the first and last observed one is expected. |
 | `max_expected_periods` | `int` | `1000000` | Largest calendar grid of a bucketed series; a longer one is not assessed. |
@@ -904,6 +929,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `series` | `Inline_series_stale_values \| str` | **required** | The series examined: the name of one the dataset defines under series (``other.name`` for another dataset's), or the definition itself. |
 | `max_repeats` | `int` | `3` | A run of this many (or more) consecutive periods with the same value is flagged: a stuck sensor, a value carried forward, an input that stopped updating. |
 | `atol` | `float` | `0.0` | Values within this absolute difference count as the same. |
@@ -952,6 +979,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `series` | `Inline_series_cumulative \| str` | **required** | The series examined: the name of one the dataset defines under series (``other.name`` for another dataset's), or the definition itself. |
 | `allow_reset_to_zero` | `bool` | `False` | Accept a drop to exactly zero (a counter that legitimately rolls over or is reset at the start of a reporting cycle); any other decrease is still flagged. |
 
@@ -997,6 +1026,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `series` | `Inline_series_seasonal \| str` | **required** | The series examined: the name of one the dataset defines under series (``other.name`` for another dataset's), or the definition itself. |
 | `season_length` | `int` | `12` | Periods per cycle: 12 for monthly data indexed 1..12 or as a running month number, 4 for quarters, 7 for days of the week. The season of a period is ``period mod season_length``; for a bucketed series the period is its local calendar position, so monthly buckets with 12 give calendar months and hourly buckets with 24 the local hour, unchanged by DST. |
 | `threshold` | `float` | `3.5` | Modified z-score (median/MAD) above which a value is anomalous for its season. |
@@ -1045,6 +1076,8 @@ Goes in `datasets.<name>.checks`.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
+| `where` | `str \| None` | `None` | SQL condition on the dataset's columns: assess only the rows that match it. Every check placed in a dataset's ``checks`` takes it (with ``min_applicable_rows``, the fewest matching rows it is assessed on; an empty filtered population is not assessed). Of the top-level checks only ``compare`` takes it; for the others, name a view (``<dataset>.<view>``) of each dataset. |
+| `min_applicable_rows` | `int` | `0` | With ``where``: fewer matching rows than this make the check not assessed (an empty filtered population is never assessed). |
 | `series` | `Inline_series_level_shift \| str` | **required** | The series examined: the name of one the dataset defines under series (``other.name`` for another dataset's), or the definition itself. |
 | `max_work` | `int` | `20000000` | Maximum observations processed across exact candidate splits for the whole rule. A group exceeding the remaining budget is explicitly unassessed; no approximate answer is substituted. Work across all configured groups and series is charged. |
 | `min_segment` | `int` | `4` | Fewest periods on each side of a candidate shift. |

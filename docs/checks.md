@@ -25,12 +25,33 @@ Only configured checks run. Every item takes these fields besides its own settin
 | `enabled` | `false` keeps a check configured but off; an item switched off before any settings are given may omit its required ones |
 | `description` | Shown in reports |
 
-`where` (a SQL condition: assess only the rows that match it) is taken only by
-`expression`, `compare` and plugin checks whose parameters declare it; any other
-check rejects it. To check a slice with those, check a view (`counts.recent`, where
-a check names datasets) or define a dataset of the filtered rows.
+`where` (a SQL condition on the dataset's columns: assess only the rows that match
+it) is taken by every check placed in a dataset's `checks`. `expression` and plugin
+checks whose parameters declare `where` apply it themselves; every other dataset
+check (`fresh`, `outliers`, the temporal and spatial checks, `shares`, `key_grid`,
+`coordinates`, `matches_baseline`, plugins whose parameters name their `dataset`)
+reads the matching rows exactly as it would read a view of them, and reports the
+same results. Items of one dataset with one condition share those rows.
 
-A filtered `expression` is assessed on the rows its `where` selects (a `NULL`
+```yaml
+datasets:
+  counts:
+    checks:
+      - {check: fresh, column: loaded_at, max_age: 1d, where: "region = 'north'"}
+      - {check: outliers, column: aadt, where: "region = 'north'", min_applicable_rows: 30}
+```
+
+Results name the dataset (`counts`), carry `where` among their parameters, add
+`Assessed 412 of 1,280 row(s) of counts matching 'where: …'` to the message and
+`population_rows`, `applicable_rows` and `excluded_rows` to the metrics. A filtered
+check never passes on nothing: when no row matches, or fewer than
+`min_applicable_rows`, it is not assessed (an incomplete run). `qavf explain` lists
+the condition under the check with the columns it reads. Among the top-level checks
+only `compare` takes `where`; a condition is ambiguous across the datasets the others
+relate, so they reject it: name a view of each dataset in `datasets` instead.
+Dataset and view names containing `.__where_` are reserved.
+
+Likewise a filtered `expression` is assessed on the rows its `where` selects (a `NULL`
 condition excludes the row): `1 row of 2 matching 'where: x > 0' in d violates
 'x < 10'`, with `population_rows`, `applicable_rows` and `excluded_rows` in its
 metrics. With `min_applicable_rows: N`, fewer than `N` matching rows leave it not

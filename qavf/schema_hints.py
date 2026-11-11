@@ -136,6 +136,7 @@ _CHECK: dict[str, Hint] = {
 """Fields every check item has; the check's own settings are hinted below or generically."""
 
 _CHECK_SETTINGS: dict[str, Hint] = {
+    "min_applicable_rows": ("Check", "Minimum rows matching where", True),
     "datasets": ("Datasets", "Datasets related", False),
     "strategy": ("Datasets", "Pairing strategy", False),
     "reference": ("Datasets", "Reference dataset", False),

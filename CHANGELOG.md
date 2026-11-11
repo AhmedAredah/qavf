@@ -141,6 +141,18 @@ Reports written by earlier versions still load.
   `QAVFSettings.origins` holds the index for settings loaded from a file, Python
   callers see the locations as the error's notes, and `AppliedOverride.line` (shown
   by `qavf explain`) is the line an override was written on.
+- **`where` on every dataset check.** Any item in a dataset's `checks` takes `where`
+  (and `min_applicable_rows`): `fresh`, `outliers`, the temporal and spatial checks,
+  `shares`, `key_grid`, `coordinates`, `matches_baseline` and plugins whose
+  parameters name their `dataset` read only the matching rows, with the results the
+  same check reports on a view of those rows. Results name the dataset, list `where`
+  among their parameters and report `population_rows`, `applicable_rows` and
+  `excluded_rows`; no matching row, or fewer than `min_applicable_rows`, leaves the
+  check not assessed. Items with one condition share one read of the rows, the
+  condition is parsed when the configuration loads (with its file and line), and
+  `qavf explain` shows it with the columns it reads. Top-level checks other than
+  `compare` reject `where`, pointing at views. Dataset and view names containing
+  `.__where_` are reserved. Polars backend.
 
 ### Changed
 
@@ -194,6 +206,9 @@ Reports written by earlier versions still load.
 
 ### Fixed
 
+- Settings narrowed by `--dataset`, `--only` or the tag options, or by a profile,
+  keep where each value was written, and a check error raised when the run is
+  planned (a plugin check's invalid setting) names its file and line.
 - A dataset's `source` settings and its named `series` and `metrics` are validated
   when the configuration loads, without reading data, used or not: `source: {type:
   file, headre: false}` or an unused `series: {s: {bad_key: 7}}` is a validation
@@ -281,9 +296,9 @@ Reports written by earlier versions still load.
 - `{check: expression, enabled: false}` and `{check: sql, enabled: false}` stubs are
   accepted like other disabled checks without settings.
 - `where` is documented, advertised in the JSON Schema and accepted only where it is
-  honoured (`expression`, `compare`, and plugin checks whose parameters declare it,
-  which now receive it); other checks reject it and point at views or a filtered
-  dataset.
+  honoured: every dataset check (see Added), `compare`, and plugin checks whose
+  parameters declare it, which now receive it; other top-level checks reject it and
+  point at views.
 - A plugin check placed on dataset `a` that names `dataset: b` is a configuration
   error; it had run on `b` while reporting on `a`. Plugin results name the dataset
   they are placed on, and compiling no longer changes the item's settings.
