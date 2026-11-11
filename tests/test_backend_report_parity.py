@@ -581,6 +581,71 @@ def _views_scenario(directory: Path) -> dict[str, Any]:
     }
 
 
+def _view_references_scenario(directory: Path) -> dict[str, Any]:
+    """Foreign keys reference views and across copies alike (CFG-08): a key present
+    in the parent but excluded by the view's where is orphaned."""
+    roads = _write(
+        directory,
+        "roads.csv",
+        "id,lanes,status,code\n1,2,open,A\n2,4,open,N/A\n3,0,closed,C\n4,2,open,A\n4,1,open,B\n",
+    )
+    crashes = _write(
+        directory, "crashes.csv", "road_id,code,status\n1,A,open\n3,C,open\n9,,x\n2,N/A,y\n"
+    )
+    for site, rows in {"a": ["1,1", "2,0"], "b": ["1,1"]}.items():
+        _write(directory, f"sites/{site}.csv", "\n".join(["id,x", *rows, ""]))
+    visits = _write(directory, "visits.csv", "site_id\n1\n2\n")
+    return {
+        "datasets": {
+            "roads": {
+                "path": roads,
+                "schema": {
+                    "columns": {
+                        "id": {"dtype": "int"},
+                        "lanes": {"dtype": "int"},
+                        "code": {"dtype": "str", "na_values": ["N/A"]},
+                    }
+                },
+                "views": {
+                    "active": {"where": "status = 'open'"},
+                    "ids": {"columns": ["id"], "where": "lanes > 0"},
+                },
+            },
+            "crashes": {
+                "path": crashes,
+                "schema": {"columns": {"code": {"dtype": "str", "na_values": ["N/A"]}}},
+                "foreign_keys": [
+                    {"columns": ["road_id"], "ref_dataset": "roads.active", "ref_columns": ["id"]},
+                    {"columns": ["code"], "ref_dataset": "roads.active"},
+                    {
+                        "columns": ["road_id"],
+                        "ref_dataset": "roads.ids",
+                        "ref_columns": ["id"],
+                        "cardinality": "many_to_one",
+                    },
+                    {"columns": ["status"], "ref_dataset": "roads.ids"},
+                ],
+            },
+            "sites": {
+                "path": (directory / "sites" / "{site}.csv").as_posix(),
+                "across": {"site": ["a", "b"]},
+                "views": {"positive": {"where": "x > 0"}},
+            },
+            "visits": {
+                "path": visits,
+                "foreign_keys": [
+                    {"columns": ["site_id"], "ref_dataset": "sites@a", "ref_columns": ["id"]},
+                    {
+                        "columns": ["site_id"],
+                        "ref_dataset": "sites@a.positive",
+                        "ref_columns": ["id"],
+                    },
+                ],
+            },
+        },
+    }
+
+
 def _scoped_expression_scenario(directory: Path) -> dict[str, Any]:
     """A filtered expression counts the rows its ``where`` selects (R4, R5, R8)."""
     rows = "x\n5\n20\n" + "-1\n" * 99
@@ -667,6 +732,7 @@ SCENARIOS = {
     "scoped_expression": _scoped_expression_scenario,
     "across": _across_scenario,
     "views": _views_scenario,
+    "view_references": _view_references_scenario,
     "item_identity": _item_identity_scenario,
     "named_checks": _named_checks_scenario,
     "columns": _columns_scenario,
@@ -901,3 +967,46 @@ def test_native_backend_refuses_a_snapshot_it_cannot_keep(tmp_path, monkeypatch)
     assert report.verdict() == "passed"
     notes = {dataset.name: dataset.notes.get("snapshot") for dataset in report.metadata.datasets}
     assert {note["connection"] for note in notes.values()} == {"live"}
+
+
+def test_backends_agree_on_overrides(tmp_path):
+    """Overrides patch the configuration before either backend plans it (CFG-09)."""
+    rows = _write(tmp_path, "rows.csv", "id,a\n1,1\n2,5\n2,7\n")
+    _write(
+        tmp_path,
+        "base.yaml",
+        "datasets:\n"
+        f"  rows:\n    path: '{rows}'\n"
+        "    schema: {columns: {id: {dtype: int}, a: {dtype: int, le: 4}}, primary_key: [id]}\n"
+        "    checks:\n"
+        "      - {check: expression, name: small, expr: 'a < 6', severity: ERROR}\n"
+        "checks:\n"
+        "  - {check: sql, name: big, sql: 'SELECT * FROM rows WHERE a > 6'}\n",
+    )
+    config = _write(
+        tmp_path,
+        "qa.yaml",
+        "include: [base.yaml]\n"
+        "overrides:\n"
+        "  checks:\n"
+        "    small: {severity: WARNING, expr: 'a < 7'}\n"
+        "    checks[0]: {severity: WARNING}\n"
+        "  datasets:\n"
+        "    rows: {schema: {columns: {a: {le: 6}}, primary_key: [id, a]}}\n",
+    )
+    native_report = validate(config=config, backend="duckdb")
+    full_report = validate(config=config, backend="polars")
+    problems = _differences(_normalized(native_report), _normalized(full_report))
+    assert not problems, "\n".join(problems)
+    failed = {
+        (r.rule_id, r.status.value, r.severity.value)
+        for r in native_report.results
+        if r.status.value not in ("PASS", "SKIPPED")
+    }
+    # a=7 breaks the overridden limit (le: 6) and the overridden expression (a < 7);
+    # the overridden key no longer repeats.
+    assert failed == {
+        ("INP-003", "FAIL", "ERROR"),
+        ("INP-006", "FAIL", "WARNING"),
+        ("INP-007", "FAIL", "WARNING"),
+    }

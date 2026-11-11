@@ -390,7 +390,9 @@ class NativeRunner:
                 out,
                 name,
                 ("INP-005",),
-                functools.partial(executor.foreign_keys, checks, self.unavailable),
+                functools.partial(
+                    executor.foreign_keys, checks, self.unavailable, self.settings.views()
+                ),
             )
             self._stage(out, name, ("INP-006",), executor.expressions)
         return checks
@@ -551,7 +553,7 @@ class NativeRunner:
             # SQL with unproven reads may query any loaded dataset: keep them all.
             query_inputs = bool(plan.fallback)
             parents = {
-                fk.ref_dataset
+                settings.referenced_dataset(fk.ref_dataset)
                 for name, spec in settings.datasets.items()
                 if out.enabled("INP-005", name)
                 for fk in spec.foreign_keys

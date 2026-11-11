@@ -84,6 +84,9 @@ class ValidationPlan(SnapshotModel):
     unresolved: tuple[str, ...] = ()
     projection_fallback: tuple[str, ...] = ()
     """Why the native backend reads every dataset in full as one component."""
+    overrides: tuple[str, ...] = ()
+    """Each applied ``overrides`` entry, in the order applied: the instance it
+    changed, the target as written, the settings it set and its file."""
     resources: dict[str, Any] = Field(default_factory=dict)
     profile: ProfileName | None = None
     data_read: bool = False
@@ -347,6 +350,7 @@ def explain(
         excluded=excluded,
         unresolved=tuple(unresolved),
         projection_fallback=native.fallback if native is not None else (),
+        overrides=tuple(applied.describe() for applied in settings.applied_overrides),
         complete=not unresolved,
         profile=profile,
         resources={

@@ -111,6 +111,7 @@ _ROOT: dict[str, Hint] = {
     "vars": ("Reuse", "Variables", True),
     "include": ("Reuse", "Included files", True),
     "defaults": ("Reuse", "Default check settings", True),
+    "overrides": ("Reuse", "Overrides", True),
     "datasets": ("Datasets", "Datasets", False),
     "connections": ("Connections", "Database connections", False),
     "secrets": ("Connections", "Cloud credentials", True),
@@ -328,6 +329,10 @@ HINTS: dict[str, dict[str, Hint]] = {
         "retries": ("Load policy", "Retries", False),
         "retry_delay_s": ("Load policy", "Retry delay (s)", False),
         "row_budget": ("Load policy", "Row budget", False),
+    },
+    "OverridesSpec": {
+        "checks": ("Overrides", "Check settings by name or instance id", False),
+        "datasets": ("Overrides", "Dataset settings by name", False),
     },
     "ReportSettings": {
         "title": ("Report", "Title", False),

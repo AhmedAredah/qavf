@@ -116,6 +116,8 @@ def _lazy_summary(
     batch: list[tuple[str, KeySelection]],
     aliases: list[tuple[str, ...]],
 ) -> pl.DataFrame:
+    """The native summary's counts and samples; a sample is ordered by every column,
+    nulls first, as the native one is, not by the plan's (engine-dependent) row order."""
     if relation.lazy is None:
         raise ValueError("a key relation requires an execution plan")
     reducers: list[pl.Expr] = []
@@ -126,7 +128,12 @@ def _lazy_summary(
             (
                 frequency.len().cast(pl.UInt64).alias(keys),
                 frequency.sum().cast(pl.UInt64).alias(rows),
-                pl.struct(pl.all()).filter(predicate).head(selection.limit).implode().alias(sample),
+                pl.struct(pl.all())
+                .filter(predicate)
+                .sort_by([pl.col(name).filter(predicate) for name in relation.schema])
+                .head(selection.limit)
+                .implode()
+                .alias(sample),
             )
         )
     return relation.collect(relation.lazy.select(reducers))

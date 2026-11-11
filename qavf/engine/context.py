@@ -447,6 +447,19 @@ class DataContext:
         """Dataset declarations owned by this context's catalog."""
         return self._catalog.specs
 
+    def contract_spec(self, name: str) -> DatasetSpec | None:
+        """The declaration whose contract ``name``'s values follow: its own, or for a
+        view (``roads.active``) its parent dataset's, as views keep the parent's contract."""
+        spec = self._catalog.specs.get(name)
+        if spec is not None or name not in self._catalog.views:
+            return spec
+        from qavf.engine.views import ViewSource
+
+        source = self._catalog.sources.get(name)
+        if not isinstance(source, ViewSource):
+            return None
+        return self._catalog.specs.get(source.params.dataset)
+
     # ------------------------------------------------------------------ access
     def source(self, name: str) -> DataSource | None:
         """The configured source of ``name``; ``None`` for in-memory inputs."""

@@ -275,7 +275,9 @@ class InputDemand:
         for name in list(demand):
             spec = self.settings.datasets.get(name)
             if spec is not None:
-                demand.update(fk.ref_dataset for fk in spec.foreign_keys)
+                demand.update(
+                    self.settings.referenced_dataset(fk.ref_dataset) for fk in spec.foreign_keys
+                )
         return frozenset(demand)
 
 

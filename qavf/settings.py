@@ -56,6 +56,7 @@ from qavf.configuration import (
 from qavf.configuration import expand_env as expand_env
 from qavf.engine.severity import Severity
 from qavf.number_grammar import AllowedValueDomain, NumberGrammar, Whitespace, converted_options
+from qavf.overrides import AppliedOverride, OverrideApplication
 from qavf.parameters import Count
 from qavf.scalars import normalize_scalar, normalize_scalar_sequence
 from qavf.text_types import TEXT_DTYPES, TextType, Word
@@ -865,6 +866,8 @@ class ForeignKeySpec(_Strict):
 
     columns: list[str] = Field(min_length=1)
     ref_dataset: str
+    """The referenced dataset: a dataset, an ``across`` copy (``counts@houston``) or a
+    view (``roads.active``), whose excluded rows' keys are then orphaned."""
     ref_columns: list[str] | None = Field(default=None, min_length=1)
     """Defaults to ``columns`` when the names match on both sides."""
     severity: Severity | None = None
@@ -1502,6 +1505,30 @@ class ReportSettings(_Strict):
     provenance notes disclose actual hash passes and bytes read."""
 
 
+class OverridesSpec(_Strict):
+    """Explicit patches of known datasets and check instances (``overrides``).
+
+    Applied after ``include``, ``vars``, ``defaults`` and ``across`` expansion and
+    before validation: mappings merge recursively, lists and scalars replace and
+    ``null`` is an error. An unknown target, or a check name several instances
+    share, is an error (see :mod:`qavf.overrides`).
+    """
+
+    checks: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Settings per check item, by its ``name`` or instance id
+    (``datasets.counts.checks[2]``, ``checks[0]``), e.g. ``{max: 0.2}``."""
+    datasets: dict[str, DatasetSpec] = Field(default_factory=dict)
+    """Settings per dataset or ``across`` copy (``counts@houston``), e.g.
+    ``{schema: {min_rows: 100}}``; only the settings given change."""
+
+
+class OverrideLayerSpec(OverridesSpec):
+    """One included file's ``overrides``, as include resolution passes them on."""
+
+    origin: str | None = None
+    """The file that declared them, relative to the root configuration."""
+
+
 class QAVFSettings(_Strict):
     """Root configuration object."""
 
@@ -1529,20 +1556,27 @@ class QAVFSettings(_Strict):
     report: ReportSettings = Field(default_factory=ReportSettings)
     extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Free-form settings for plugins, keyed by plugin name (e.g. ``moves: {version: MOVES4}``)."""
+    overrides: OverridesSpec | list[OverrideLayerSpec] | None = Field(default=None, exclude=True)
+    """Explicit patches of datasets and check instances, applied before validation
+    (``checks: {no missing years: {max: 0.2}}``, ``datasets: {counts: {schema:
+    {min_rows: 100}}}``); ``qavf explain`` lists what they changed."""
 
     source_path: Path | None = Field(default=None, exclude=True)
     """File this configuration was loaded from; set by :func:`load_settings`."""
 
     _selection: AppliedSelection | None = PrivateAttr(default=None)
     _included_paths: tuple[Path, ...] = PrivateAttr(default=())
+    _applied_overrides: tuple[AppliedOverride, ...] = PrivateAttr(default=())
 
-    @model_validator(mode="before")
+    @model_validator(mode="wrap")
     @classmethod
-    def _string_mapping_keys(cls, data: Any) -> Any:
+    def _resolved_reuse(cls, data: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+        """Resolve reuse before validation: vars, ``across``, defaults, then overrides,
+        whose record the validated settings keep."""
         validate_config_mapping_keys(data)
         reject_legacy(data)
         if not isinstance(data, dict):
-            return data
+            return handler(data)
         from qavf.checks.across import AcrossExpansion
         from qavf.checks.reuse import ItemPreparation
         from qavf.composition import VariableSubstitution
@@ -1554,7 +1588,12 @@ class QAVFSettings(_Strict):
             )
         # ``$${`` is a literal ``${`` once every reference is substituted.
         substituted = LiteralReferences.unescape(VariableSubstitution.apply(data))
-        return ItemPreparation.apply(AcrossExpansion.apply(substituted))
+        prepared = ItemPreparation.apply(AcrossExpansion.apply(substituted))
+        patched, applied = OverrideApplication.apply(prepared)
+        settings = handler(patched)
+        if applied:
+            settings._applied_overrides = applied
+        return settings
 
     @classmethod
     def path_parts(cls, raw: Mapping[str, Any]) -> tuple[tuple[str | None, type[BaseModel]], ...]:
@@ -1602,12 +1641,15 @@ class QAVFSettings(_Strict):
                         f"secrets {other!r} and {name!r} have the same {secret.type} scope; "
                         "each URL prefix must select one credential"
                     )
+        relations = RelationNamespace.of(self)
         for name, spec in self.datasets.items():
             for fk in spec.foreign_keys:
-                if fk.ref_dataset not in self.datasets:
+                referenced = relations.declared(fk.ref_dataset)
+                if referenced is None or referenced.kind not in ("dataset", "view"):
                     raise ValueError(
                         f"dataset {name!r}: foreign key references unknown dataset "
-                        f"{fk.ref_dataset!r}"
+                        f"{fk.ref_dataset!r} (a dataset, an across copy or a view "
+                        "<dataset>.<view>)"
                     )
             source = spec.source or {}
             connection = source.get("connection")
@@ -1631,7 +1673,6 @@ class QAVFSettings(_Strict):
             problems = _check_errors(self)
             if problems:
                 raise ValueError("invalid checks: " + "; ".join(problems))
-        RelationNamespace.of(self)
         return self
 
     @property
@@ -1667,12 +1708,24 @@ class QAVFSettings(_Strict):
         parents |= {name: spec.parents() for name, spec in self.derived_datasets().items()}
         return parents
 
+    def referenced_dataset(self, name: str) -> str:
+        """The dataset holding a referenced relation's rows: a view's parent dataset,
+        otherwise ``name`` itself (a foreign key's ``ref_dataset``)."""
+        view = self.views().get(name)
+        return view[0] if view is not None else name
+
     def knows_dataset(self, name: str) -> bool:
         """Whether ``name`` is a dataset, a view (``counts.recent``) of one, or a dataset
         derived by a check (a consensus, the pooled members)."""
         if name in self.datasets or name in self.views():
             return True
         return "~" in name and name in self.derived_datasets()
+
+    @property
+    def applied_overrides(self) -> tuple[AppliedOverride, ...]:
+        """Every override applied when these settings were validated, in order: its
+        target, the instance it resolved to, the settings it set and its file."""
+        return self._applied_overrides
 
     @property
     def included_paths(self) -> tuple[Path, ...]:

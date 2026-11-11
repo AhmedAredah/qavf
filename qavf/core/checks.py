@@ -7,6 +7,8 @@ full backend's shape and wording.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from qavf import input_rules as wording
 from qavf.applicability import AllOrNoneApplicability
 from qavf.core.columns import ColumnChecks
@@ -157,25 +159,40 @@ class DatasetChecks:
         row = qi(self.data.row_column)
         return f"{row} IN (SELECT {row} FROM {qi(self.expression_table)} WHERE ({where}) IS TRUE)"
 
-    def applicable_relation(self, fields):
-        """One side's canonical key rows without N/A values, and the N/A rows exempted."""
+    def applicable_relation(self, fields, where=None):
+        """One side's canonical key rows without N/A values, and the N/A rows exempted.
+
+        ``where`` (a view's condition, over the rows SQL reads as the dataset)
+        limits both to the rows it selects.
+        """
         predicates = [
             self.values[c].na
             for c in fields
             if c in self.values and self.schema.columns[c].na_values
         ]
-        if not predicates:
-            return f"SELECT * FROM {qi(self.typed)}", 0
-        na = " OR ".join(predicates)
         row = qi(self.data.row_column)
+        scope = (
+            ""
+            if where is None
+            else f"{row} IN (SELECT {row} FROM {qi(self.expression_table)} WHERE ({where}))"
+        )
+        if not predicates:
+            selected = f" WHERE {scope}" if scope else ""
+            return f"SELECT * FROM {qi(self.typed)}{selected}", 0
+        na = " OR ".join(predicates)
+        within = f" AND {scope}" if scope else ""
         exempt = self.con.execute(
-            f"SELECT count(*) FROM {qi(self.data.table)} WHERE {na}"
+            f"SELECT count(*) FROM {qi(self.data.table)} WHERE ({na}){within}"
         ).fetchone()[0]
         sql = (
             f"SELECT * FROM {qi(self.typed)} WHERE {row} NOT IN "
-            f"(SELECT {row} FROM {qi(self.data.table)} WHERE {na})"
+            f"(SELECT {row} FROM {qi(self.data.table)} WHERE {na}){within}"
         )
         return sql, exempt
+
+    def view(self, spec):
+        """The rows of view ``spec`` of this dataset, as a foreign key's parent side."""
+        return ViewRows(self, spec)
 
     # ------------------------------------------------------------------ rules
     def shape(self):
@@ -190,14 +207,19 @@ class DatasetChecks:
         if self.schema is not None and self.out.enabled("INP-004", self.data.name):
             KeyChecks(self).run()
 
-    def foreign_keys(self, datasets, unavailable=None):
+    def foreign_keys(self, datasets, unavailable=None, views=None):
+        """Check each foreign key against its loaded parent dataset or a view of one
+        (``views``: ``<dataset>.<view>`` -> (dataset, definition))."""
         if not self.out.enabled("INP-005", self.data.name):
             return
         for fk in self.spec.foreign_keys:
-            parent = datasets.get(fk.ref_dataset)
-            reason = (unavailable or {}).get(fk.ref_dataset)
+            dataset, view = (views or {}).get(fk.ref_dataset, (fk.ref_dataset, None))
+            parent = datasets.get(dataset)
+            reason = (unavailable or {}).get(dataset)
             if parent is None and reason is None:
-                reason = f"dataset {fk.ref_dataset!r} is not available"
+                reason = f"dataset {dataset!r} is not available"
+            if parent is not None and view is not None:
+                parent = parent.view(view)
             ReferenceCheck(self, fk, parent, reason).run()
 
     def expressions(self):
@@ -462,3 +484,33 @@ class DatasetChecks:
             else None
         )
         return count, total, records
+
+
+@dataclass(frozen=True, slots=True)
+class ViewColumns:
+    """The columns a view exposes, where a foreign key's parent side looks them up."""
+
+    columns: tuple[str, ...]
+
+
+class ViewRows:
+    """A view of a loaded dataset as the parent side of a foreign key.
+
+    The keys are the dataset's canonical key values, limited to the rows the view's
+    ``where`` selects (evaluated over the rows SQL reads as the dataset, as the
+    registered view is), and its columns are the view's ``columns`` (or all). N/A
+    keys are exempted within those rows only, as the Polars backend's view does.
+    """
+
+    def __init__(self, dataset, spec):
+        self.dataset = dataset
+        self.spec = spec
+        self.data = ViewColumns(tuple(spec.columns or dataset.data.columns))
+
+    def applicable_relation(self, fields):
+        """The view's canonical key rows without N/A values, and the N/A rows exempted."""
+        return self.dataset.applicable_relation(fields, self.spec.where)
+
+    def dtype(self, column):
+        """The canonical type of column, as its dataset declares it."""
+        return self.dataset.dtype(column)

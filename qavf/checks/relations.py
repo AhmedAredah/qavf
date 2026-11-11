@@ -86,5 +86,10 @@ class RelationNamespace:
     def __contains__(self, name: object) -> bool:
         return isinstance(name, str) and name.lower() in self._relations
 
+    def declared(self, name: str) -> Relation | None:
+        """The relation declared with exactly ``name`` (case included), if any."""
+        relation = self._relations.get(name.lower())
+        return relation if relation is not None and relation.name == name else None
+
 
 __all__ = ["DERIVED_MARK", "Relation", "RelationNamespace"]

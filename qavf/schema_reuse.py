@@ -5,6 +5,9 @@ of a configuration file may be written as a variable. A value range
 (``2016..2024`` or ``{from, to, step}``) is expanded only in check settings
 declared as lists (:class:`qavf.checks.reuse.TypedRanges`), so only those
 advertise it. A single string where a check lists ``datasets`` is one selector.
+A file's ``overrides`` is one mapping (``checks``, ``datasets``); the list of
+per-file layers that include resolution passes on is internal, so the editor
+schema does not offer it.
 
 This module imports no rule code: the full and the native (DuckDB) schemas both
 use it.
@@ -56,6 +59,9 @@ _CHECK_ITEMS = ("Check_", "Inline_")
 _NATIVE_ITEMS = ("ExpressionItem", "SqlItem")
 _ROOT_UNRESOLVED = frozenset({"include", "vars", "$schema"})
 """Top-level settings read before variables are substituted (or naming the schema)."""
+_OVERRIDES = "overrides"
+_AUTHORED_OVERRIDES = "OverridesSpec"
+_RESOLVED_OVERRIDES = "OverrideLayerSpec"
 
 
 class ReuseSchema:
@@ -67,6 +73,7 @@ class ReuseSchema:
         self.ranged = self._check_settings()
 
     def apply(self) -> dict[str, Any]:
+        self._authored_overrides()
         for name, definition in list(self.definitions.items()):
             if name not in REUSE_DEFINITIONS:
                 self._definition(name, definition)
@@ -76,6 +83,19 @@ class ReuseSchema:
             if field not in _ROOT_UNRESOLVED and _wrappable(spec):
                 properties[field] = _reusable(spec)
         return self.schema
+
+    def _authored_overrides(self) -> None:
+        """``overrides`` as a file declares it: one mapping, never the internal layers."""
+        properties = self.schema.get("properties", {})
+        spec = properties.get(_OVERRIDES)
+        if not isinstance(spec, dict) or _AUTHORED_OVERRIDES not in self.definitions:
+            return
+        outer = {key: spec[key] for key in _ANNOTATIONS if key in spec and key != "default"}
+        properties[_OVERRIDES] = {
+            **outer,
+            "anyOf": [{"$ref": f"#/$defs/{_AUTHORED_OVERRIDES}"}, {"type": "null"}],
+        }
+        self.definitions.pop(_RESOLVED_OVERRIDES, None)
 
     def _definition(self, name: str, definition: Mapping[str, Any]) -> None:
         properties = definition.get("properties")

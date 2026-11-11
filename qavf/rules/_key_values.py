@@ -43,7 +43,7 @@ class CanonicalKeyValues:
         self.ctx = ctx
         self.dataset = dataset
         self.columns = tuple(columns)
-        spec = ctx.specs.get(dataset)
+        spec = ctx.contract_spec(dataset)
         self.contracts = spec.schema_spec.columns if spec and spec.schema_spec else {}
 
     @property

@@ -134,7 +134,7 @@ class _NativePlanner:
             if not self.switches.enabled("INP-005", name):
                 continue
             for key in spec.foreign_keys:
-                parent = key.ref_dataset
+                parent = self.settings.referenced_dataset(key.ref_dataset)
                 if parent not in edges:
                     continue
                 edges[name].add(parent)
@@ -144,6 +144,14 @@ class _NativePlanner:
                     child_columns.update(key.columns)
                 if parent_columns is not None:
                     parent_columns.update(key.target_columns)
+                where = self._referenced_view_where(key.ref_dataset)
+                if where is not None and projections[parent] is not None:
+                    read_columns = self.reads.of(where, parent).columns
+                    if read_columns is None:
+                        projections[parent] = None
+                        reasons.setdefault(parent, "a referenced view's where may read any column")
+                    else:
+                        projections[parent].update(read_columns)
         read = [
             (name, parent, "a query input reads it")
             for name, values in self.source_dependencies.items()
@@ -181,6 +189,25 @@ class _NativePlanner:
         found = list(_conditions(spec.schema_spec)) if spec.schema_spec is not None else []
         if self.switches.enabled("INP-006", name):
             found += [check.violation_condition() for check in spec.expressions_of(name)]
+        found += self._referenced_view_predicates(name)
+        return found
+
+    def _referenced_view_where(self, relation):
+        """The ``where`` of view ``relation``, if a view with one (``None`` otherwise)."""
+        view = self.settings.views().get(relation)
+        return view[1].where if view is not None else None
+
+    def _referenced_view_predicates(self, name):
+        """The ``where`` of each view of ``name`` that an enabled foreign key references:
+        evaluated against ``name``'s rows to select the referenced keys."""
+        found = []
+        for child, spec in self.settings.datasets.items():
+            if not self.switches.enabled("INP-005", child):
+                continue
+            for key in spec.foreign_keys:
+                where = self._referenced_view_where(key.ref_dataset)
+                if where is not None and self.settings.referenced_dataset(key.ref_dataset) == name:
+                    found.append(where)
         return found
 
     def _contract_columns(self, name, spec):

@@ -122,6 +122,7 @@ datasets:
 | `views` | a dataset | A named slice (`where`, optional `columns`) with the parent's contract |
 | `defaults` | top level | Default settings per check name |
 | `include` | top level | Other YAML files merged first |
+| `overrides` | top level | Explicit patches of known datasets and check instances |
 | `vars` | top level | Named values, used as `${vars.name}` in any value |
 
 Datasets, their views (`<dataset>.<view>`), `across` copies (`<dataset>@<copy>`) and
@@ -186,9 +187,51 @@ both include `shared/base.yaml`) is merged once, so its datasets are not reporte
 as defined twice. Two different files that define one dataset or check name are
 still an error, and an include cycle is still an error.
 
+### Overrides
+
+Includes never silently replace a dataset or a check. To change one setting of a
+dataset or check another file defines (a production threshold, a team's severity)
+without copying it, name it under `overrides`:
+
+```yaml
+overrides:
+  checks:
+    no missing years: {severity: WARNING}       # a check item's name
+    datasets.counts.checks[1]: {max: 0.2}       # or its instance id
+  datasets:
+    counts: {schema: {min_rows: 1}}             # a dataset, or a copy: counts@houston
+```
+
+- Overrides apply after `include`, `vars`, `defaults` and `across` expansion, and
+  before validation, so they patch the configuration as it will run and the
+  result is validated like any other value.
+- Mappings merge recursively; lists and scalars replace (an overridden `checks`
+  list or `expected` list is the new list). `null` is an error: an override never
+  deletes a setting.
+- A target must exist. An unknown name is an error naming the closest match; a
+  check name that several instances share (each `across` copy repeats its
+  dataset's checks) is an error listing their instance ids, so override one by id
+  (`datasets.counts@houston.checks[0]`), the item location reports show as
+  `item_ids`.
+- Any file may declare `overrides`. Each file's overrides apply in include order, and the
+  root configuration's last, so the root has the final word. A file path an
+  included file's override sets is relative to that file.
+- `qavf explain` lists each applied override: the instance it changed, the
+  settings it set and the file it came from.
+
+### Views
+
 Views behave the same on both backends: each is the parent dataset's rows that
 match `where`, with `columns` (or all columns), and SQL in `sql` and `expression`
 checks reads it as `"<dataset>.<view>"`.
+
+A foreign key may reference a view or an `across` copy (or a copy's view) as its
+`ref_dataset`: `{columns: [road_id], ref_dataset: roads.active, ref_columns: [id]}`
+requires each `road_id` to be the `id` of an open road. The view keeps the
+parent's contract (its column types and N/A tokens), so a key the parent holds
+but the view's `where` excludes is orphaned, and match policy, cardinality and
+evidence are those of a physical parent. The parent dataset is loaded with the
+child on the native backend, with the columns the `where` reads.
 
 ## Selection and the run section
 

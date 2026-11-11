@@ -107,6 +107,22 @@ Reports written by earlier versions still load.
 - `include` entries expand `${ENV}` and `${ENV:-default}` before they are resolved
   (`include: ['${MODULE_DIR:-modules}/child.yaml']`); `${vars.name}` still cannot
   be used there, since includes are read before `vars` merge.
+- A foreign key's `ref_dataset` may name a view (`roads.active`) or an `across`
+  copy (or a copy's view), on both backends. The view keeps its parent's contract,
+  so a key the parent holds but the view's `where` excludes is orphaned; the
+  native backend loads the parent with the child, with the columns the `where`
+  reads.
+- `overrides:` patches known datasets and check instances without copying them:
+  `checks: {<check name or instance id>: {max: 0.2, severity: WARNING}}` and
+  `datasets: {counts: {schema: {min_rows: 100}}}` (an `across` copy is
+  `counts@houston`). They apply after include, vars, defaults and `across`
+  expansion and before validation; mappings merge, lists and scalars replace and
+  `null` is an error. An unknown target names the closest match and a name shared
+  by several instances asks for the instance id. Any file may declare them; they
+  apply in include order with the root's last. `QAVFSettings.applied_overrides`
+  records what each changed and from which file, and `qavf explain` lists them
+  (`ValidationPlan.overrides`). The editor schema accepts the section and gives it
+  UI hints.
 
 ### Changed
 
@@ -125,6 +141,11 @@ Reports written by earlier versions still load.
 - A file reached through more than one include path (a diamond) is merged once
   instead of failing as a duplicate dataset; different files defining one dataset
   or check name, and include cycles, are still errors.
+- On the Polars backend, a key sample (orphaned keys, repeated keys) evaluated as
+  a lazy plan is ordered by every column, nulls first, as the native backend's
+  is, instead of by the plan's engine-dependent row order. A check on a view
+  (`roads.active`) applies its parent's column contract (types and N/A tokens) to
+  key values.
 
 ### Performance
 

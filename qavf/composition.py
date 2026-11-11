@@ -11,7 +11,8 @@
   file defines itself (:class:`PathReferences`). ``include`` entries may use
   ``${ENV}`` / ``${ENV:-default}``, but not ``${vars.name}``: they are read before
   any file's ``vars`` merge. A file reached through more than one include path
-  (a diamond) is merged once.
+  (a diamond) is merged once. Each file's ``overrides`` are kept apart, as one
+  layer per file in include order with the root's last (:mod:`qavf.overrides`).
 * ``vars`` holds named values; ``${vars.name}`` in any string value refers to
   one. A value that is exactly a reference takes the variable's value (a list
   stays a list); inside a longer string it is spelled out. An unknown variable
@@ -29,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from qavf.config_paths import ConfigPaths, PathRole
 from qavf.configuration import ConfigurationGraph, expand_env
+from qavf.overrides import ORIGIN_KEY, OVERRIDES_KEY
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -55,6 +57,9 @@ class IncludeResolver:
         self._parse = parse
         self.included: list[Path] = []
         """Every file merged in so far (resolved), in the order they were read."""
+        self.override_layers: list[Any] = []
+        """Each file's ``overrides``, marked with its file, in the order they apply."""
+        self._root = Path()
 
     def resolve(self, raw: dict[str, Any], source: Path) -> dict[str, Any]:
         """``raw`` (the content of ``source``) with its included files merged in.
@@ -63,8 +68,15 @@ class IncludeResolver:
         file whose shared parts expand beyond the limit fails before any copy is made.
         """
         root = source.resolve()
+        self._root = root.parent
         ConfigurationGraph().check(raw)
-        return self._resolve(raw, root, (root,))
+        written = raw.get(OVERRIDES_KEY)
+        merged = self._resolve(raw, root, (root,))
+        if self.included and self.override_layers:
+            merged[OVERRIDES_KEY] = self.override_layers
+        elif written is not None:
+            merged[OVERRIDES_KEY] = written  # one file: its overrides as written
+        return merged
 
     def _resolve(
         self,
@@ -78,8 +90,10 @@ class IncludeResolver:
         ``owned`` names the variables an including file defines: they are its to
         set, so an included file's path that uses one is left for the merged value.
         """
+        own = raw.pop(OVERRIDES_KEY, None)
         entries = raw.pop(INCLUDE_KEY, None)
         if entries is None:
+            self._layer(own, source)
             return raw
         if isinstance(entries, str):
             entries = [entries]
@@ -105,7 +119,22 @@ class IncludeResolver:
             parsed = IncludedPaths(target.parent, chain[0].parent, references).rebase(content)
             included = self._resolve(parsed, target, (*chain, target), owned)
             merged = ConfigMerge(str(target)).merge(merged, included)
+        self._layer(own, source)
         return ConfigMerge(str(source)).merge(merged, raw)
+
+    def _layer(self, overrides: Any, source: Path) -> None:
+        """Keep one file's ``overrides`` as a layer marked with the file (relative to
+        the root configuration's directory when it can be)."""
+        if overrides is None:
+            return
+        if not isinstance(overrides, Mapping):
+            self.override_layers.append(overrides)  # reported when the layers are read
+            return
+        try:
+            origin = Path(os.path.relpath(source, self._root)).as_posix()
+        except ValueError:  # another drive (Windows): no relative form
+            origin = source.as_posix()
+        self.override_layers.append({**overrides, ORIGIN_KEY: origin})
 
     @staticmethod
     def _target(entry: str, source: Path) -> Path:
