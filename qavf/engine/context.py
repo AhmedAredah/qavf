@@ -12,12 +12,11 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any
 
 import duckdb
 import polars as pl
 
-from qavf.bounded_batches import BoundedBatches
 from qavf.duckdb_results import arrow_table, bind_relation, first_row, query_frame
 from qavf.engine.capabilities import ReaderCapabilities
 from qavf.engine.catalog import DatasetCatalog
@@ -30,7 +29,8 @@ from qavf.engine.connections import (
 from qavf.engine.relations import bind_scan
 from qavf.engine.resources import ResourceLimitError, RunResources, retained_size
 from qavf.engine.session import Invocation, KeyedLocks
-from qavf.engine.snapshot_staging import MemberPreparationError, SnapshotStage
+from qavf.engine.snapshot_coordinator import SnapshotCoordinator
+from qavf.engine.source_execution import LatestAttempt, SourceExecution
 from qavf.engine.sql import (
     BoundedSample,
     check_sql_columns,
@@ -55,15 +55,13 @@ from qavf.sources.base import (
     DataSource,
     SourceEnvironment,
     SourceError,
-    SourceIntegrityError,
     SourceNotFoundError,
     SourceRegistry,
 )
-from qavf.sources.collection import collect_result
 from qavf.sources.errors import redacted_error
 from qavf.sources.execution import SourceOperations
 from qavf.sources.frames import as_polars
-from qavf.sources.native import OwnedConnection, read_error
+from qavf.sources.native import OwnedConnection
 from qavf.sources.sql import (
     normalize_single_query,
     quote_identifier,
@@ -89,32 +87,6 @@ class DatasetNotAvailableError(KeyError):
     """Raised when a rule asks for a dataset the context cannot provide."""
 
 
-class _Closeable(Protocol):
-    def close(self) -> None: ...
-
-
-class _LatestAttempt[T: _Closeable]:
-    """Own one result per source attempt (an observation, a snapshot stage), closing
-    every earlier attempt first."""
-
-    def __init__(self, open_attempt: Callable[[], T]) -> None:
-        self._open_attempt = open_attempt
-        self._attempts: list[T] = []
-
-    def __call__(self) -> T:
-        """Discard earlier attempts and own a fresh one."""
-        self.close()
-        current = self._open_attempt()
-        self._attempts.append(current)
-        return current
-
-    def close(self) -> None:
-        """Release every attempt still owned."""
-        for previous in self._attempts:
-            previous.close()
-        self._attempts.clear()
-
-
 class _NativeStatement:
     """Consumer factory that runs one statement through a native session reader."""
 
@@ -127,29 +99,9 @@ class _NativeStatement:
         return operator.methodcaller(self._reader, self._statement)
 
 
-def _transaction_usable(con: Any) -> bool:
-    """Whether a snapshot transaction survived a failed member read."""
-    try:
-        con.execute("SELECT 1").fetchall()
-    except duckdb.Error:
-        return False
-    return True
-
-
-_PLANNING_ERRORS = (duckdb.BinderException, duckdb.CatalogException, duckdb.ParserException)
-
-
-def _failed_before_execution(exc: BaseException) -> bool:
-    """Whether a read failed while planning (binding, catalog lookup, parsing),
-    so no member data was produced or consumed."""
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        if isinstance(current, (*_PLANNING_ERRORS, SourceNotFoundError)):
-            return True
-        seen.add(id(current))
-        current = current.__cause__ or current.__context__
-    return False
+def _check_materialization(context: DataContext, name: str, frame: pl.DataFrame) -> None:
+    """``context``'s admission of a completed result, looked up when called."""
+    context._check_materialization(name, frame)
 
 
 class DataContext:
@@ -287,6 +239,24 @@ class DataContext:
             # while unrelated keys proceed. SourceOperations owns backend serialization.
             self._key_locks = KeyedLocks()
             self._local = threading.local()
+            self._source_execution = SourceExecution(
+                self._catalog,
+                self._operations,
+                self._lock,
+                self._resources,
+                functools.partial(_check_materialization, self),
+                hash_inputs,
+            )
+            self._snapshots = SnapshotCoordinator(
+                self._catalog,
+                self._resources,
+                self._operations,
+                self._sql_connections,
+                self._lock,
+                self._key_lock,
+                self._check_cancelled,
+                self._require_available,
+            )
             check_sql_names(
                 set(self.specs) | set(frames or {}) | set(self._catalog.sources), "dataset"
             )
@@ -552,14 +522,14 @@ class DataContext:
             if source is None:
                 raise DatasetNotAvailableError(f"dataset {name!r} is not configured")
             if (connection := source.snapshot_connection()) is not None:
-                self._load_snapshot(connection)
+                self._snapshots.load(connection)
                 cached = self._cached(name)
                 assert cached is not None  # the snapshot recorded a frame or a failure
                 return cached
             started = time.perf_counter()
             failure: SourceError | None = None
             try:
-                frame = self._catalog.prepare(name, self._load_with_retries(name, source))
+                frame = self._catalog.prepare(name, self._source_execution.load(name, source))
             except Exception as exc:
                 self._check_cancelled()
                 # Every loading problem, expected or not, becomes a recorded failure of
@@ -639,7 +609,7 @@ class DataContext:
             source is not None
             and source.snapshot_connection() is None
             and self._capabilities.native(
-                name, lambda: self._source_operation([name], lambda: source.scan() is not None)
+                name, lambda: self._source_execution.run([name], lambda: source.scan() is not None)
             )
         ):
             return "native_sql"
@@ -757,7 +727,7 @@ class DataContext:
             return dict(self._catalog.prepare(name, pl.DataFrame(schema=schema)).schema)
         if self._is_lazy(name):
             self._check_lazy_budget(name)
-            schema = self._source_operation(
+            schema = self._source_execution.run(
                 [name],
                 lambda: dict(self._prepare_lazy(name, self._lazy_snapshot(name)).collect_schema()),
             )
@@ -775,7 +745,7 @@ class DataContext:
         self._check_cancelled()
         if self._is_lazy(name):
             self._check_lazy_budget(name)
-            return self._source_operation(
+            return self._source_execution.run(
                 [name], lambda: self._prepare_lazy(name, self._lazy_snapshot(name))
             )
         self._resources.eager_fallbacks.add(name)
@@ -807,7 +777,7 @@ class DataContext:
             if name in self._typed_checked:
                 return name in self._typed_plans
             if name not in self._typed_plans:
-                plan = self._source_operation([name], source.scan_polars)
+                plan = self._source_execution.run([name], source.scan_polars)
                 self._typed_checked.add(name)
                 if plan is None:
                     return False
@@ -827,9 +797,9 @@ class DataContext:
             empty = pl.DataFrame(schema=schema)
             prepared = self._catalog.prepare(name, empty)
             rename = dict(zip(empty.columns, prepared.columns, strict=True))
-            admit = _LatestAttempt(functools.partial(observe_batches, self, source, rename))
+            admit = LatestAttempt(functools.partial(observe_batches, self, source, rename))
             try:
-                observed = self._source_operation([name], admit)
+                observed = self._source_execution.run([name], admit)
             except BaseException:
                 admit.close()
                 raise
@@ -869,34 +839,10 @@ class DataContext:
             self._check_materialization(", ".join(participants) or "lazy result", frame)
             return frame
 
-        result = self._source_operation(participants, collect)
+        result = self._source_execution.run(participants, collect)
         for name in participants:
             if name in self._typed_plans or name in self._lazy:
                 self._remember_lazy_dataset(name)
-        return result
-
-    def _source_operation[T](self, names: Iterable[str], operation: Callable[[], T]) -> T:
-        participants = {
-            name: self._catalog.sources[name] for name in names if name in self._catalog.sources
-        }
-        fingerprints: dict[str, dict[str, Any] | None] = {}
-
-        def verified() -> T:
-            # Establish content identity before the first read and share it with
-            # provenance. The enclosing scope verifies it again before return.
-            for source in participants.values():
-                source.prepare_identity(hash_contents=self._hash_inputs)
-            value = operation()
-            for name, source in participants.items():
-                if value is not None and not self._catalog.has_fingerprint(name):
-                    fingerprints[name] = self._fingerprint(name, source)
-            return value
-
-        result = self._operations.run(participants.values(), verified)
-        with self._lock:
-            self._catalog.mark_identity_used(participants)
-            for name, fingerprint in fingerprints.items():
-                self._catalog.record_fingerprint(name, fingerprint)
         return result
 
     def _remember_lazy_dataset(
@@ -910,7 +856,9 @@ class DataContext:
         with self._lock:
             self._catalog.record_lazy(name, schema)
             if source is not None and not self._catalog.has_fingerprint(name):
-                self._catalog.record_fingerprint(name, self._fingerprint(name, source))
+                self._catalog.record_fingerprint(
+                    name, self._source_execution.fingerprint(name, source)
+                )
 
     def _prepare_lazy(self, name: str, frame: pl.LazyFrame) -> pl.LazyFrame:
         if name in self._budget_observations:
@@ -997,7 +945,8 @@ class DataContext:
                     )
                     if not self._catalog.has_fingerprint(name):
                         self._catalog.record_fingerprint(
-                            name, self._fingerprint(name, self._catalog.sources[name])
+                            name,
+                            self._source_execution.fingerprint(name, self._catalog.sources[name]),
                         )
                     self._catalog.record_native_plan(name)
             else:
@@ -1040,11 +989,7 @@ class DataContext:
                 source = self._catalog.sources.get(name)
                 connection = source.snapshot_connection() if source is not None else None
                 if connection is not None:
-                    group = {
-                        key
-                        for key, item in self._catalog.sources.items()
-                        if item.snapshot_connection() == connection
-                    }
+                    group = set(self._snapshots.members(connection))
                     if not group <= self._release_requested:
                         eligible -= group
             observations = {
@@ -1383,7 +1328,7 @@ class DataContext:
             self._sql_connections,
             self._operations,
             self._catalog.prepare,
-            self._native_fingerprint,
+            self._source_execution.first_fingerprint,
             self._publish_native,
             self._hash_inputs,
         )
@@ -1415,12 +1360,6 @@ class DataContext:
                 else self.build_source(config)
             )
         return bound
-
-    def _native_fingerprint(self, name: str, source: DataSource) -> dict[str, Any] | None:
-        """Fingerprint a native participant unless one is already recorded."""
-        if not self._catalog.has_fingerprint(name):
-            return self._fingerprint(name, source)
-        return None
 
     def _publish_native(
         self,
@@ -1466,7 +1405,7 @@ class DataContext:
     def _load_ad_hoc(self, source: DataSource) -> pl.DataFrame:
         """Load an ad-hoc source eagerly, recording the fallback."""
         self._resources.eager_fallbacks.add("<ad-hoc>")
-        return self._load_with_retries("<ad-hoc>", source)
+        return self._source_execution.load("<ad-hoc>", source)
 
     def _native_ad_hoc_schema(self, source: DataSource, alias: str) -> dict[str, pl.DataType]:
         """Read an ad-hoc source's schema through a native session."""
@@ -1513,7 +1452,7 @@ class DataContext:
         """
         registry = self._source_registry or SourceRegistry().discover()
         source = registry.build(config, self.env)
-        return self._load_with_retries("<ad-hoc>", source)
+        return self._source_execution.load("<ad-hoc>", source)
 
     def source_fingerprint(self, config: Mapping[str, Any]) -> dict[str, Any] | None:
         """The fingerprint of an ad-hoc source, with a content digest where possible
@@ -1578,34 +1517,6 @@ class DataContext:
     def _add_thread_load_time(self, seconds: float) -> None:
         self._local.load_seconds = self.thread_load_seconds() + seconds
 
-    def _load_with_retries(self, name: str, source: DataSource) -> pl.DataFrame:
-        """Eager and native paths use the same identity, retry and cancellation policy."""
-        record_fingerprint = name in self._catalog.sources and not self._catalog.has_fingerprint(
-            name
-        )
-        fingerprint: dict[str, Any] | None = None
-
-        def collect() -> pl.DataFrame:
-            nonlocal fingerprint
-            source.prepare_identity(hash_contents=self._hash_inputs)
-            self._resources.eager_fallbacks.add(name)
-            result = collect_result(source.load(), source.params.row_budget)
-            self._check_materialization(name, result)
-            budget = getattr(source.params, "row_budget", None)
-            if budget is not None and result.height > budget:
-                raise SourceError(f"dataset {name!r} has more than {budget:,} rows (row_budget)")
-            if record_fingerprint:
-                fingerprint = self._fingerprint(name, source)
-            return result
-
-        result = self._operations.run([source], collect)
-        with self._lock:
-            if name in self._catalog.sources:
-                self._catalog.mark_identity_used([name])
-                if record_fingerprint:
-                    self._catalog.record_fingerprint(name, fingerprint)
-        return result
-
     def _check_row_budget(self, name: str, frame: pl.DataFrame) -> None:
         spec = self.specs.get(name)
         budget = spec.effective_load_policy().row_budget if spec is not None else None
@@ -1646,7 +1557,7 @@ class DataContext:
                 return observed
 
             try:
-                observed = self._source_operation([name], admit)
+                observed = self._source_execution.run([name], admit)
             except BaseException:
                 for previous in attempts:
                     previous.close()
@@ -1680,166 +1591,6 @@ class DataContext:
                 failures[name] = str(failure)
         return failures
 
-    def _load_snapshot(self, connection: str) -> None:
-        """Publish only a complete, policy-verified snapshot attempt.
-
-        Permanent unavailable members remain individually unavailable; transient
-        failures restart the entire transaction. Retry and identity decisions
-        belong to the same coordinator as eager and native source execution.
-        A group that fits the memory allowance is published from memory; a larger
-        one is staged as owned spill files and published together as spilled cache
-        entries, so the group is bounded by spill space, not memory.
-        """
-        with self._operations.guard(), self._key_lock(("snapshot", connection)):
-            members = sorted(
-                name
-                for name, source in self._catalog.sources.items()
-                if source.snapshot_connection() == connection
-            )
-            with self._lock:
-                if all(
-                    name in self._frames or self._catalog.failure(name) is not None
-                    for name in members
-                ):
-                    return
-            attempts = _LatestAttempt(
-                functools.partial(self._snapshot_attempt, connection, members)
-            )
-            try:
-                stage = self._operations.run(
-                    [self._catalog.sources[name] for name in members], attempts
-                )
-                self._check_cancelled()
-                publish_metadata = functools.partial(
-                    self._publish_snapshot_metadata, connection, members, stage
-                )
-                if stage.spilled:
-                    self._frames.adopt(stage.spills(), publish_metadata, self._lock)
-                    stage.detach()
-                else:
-                    self._frames.publish(stage.frames(), publish_metadata, self._lock)
-            except Exception as exc:
-                self._check_cancelled()
-                failure = redacted_error(
-                    SourceError(f"snapshot {connection!r} was not assessed: {exc}")
-                )
-                with self._lock:
-                    for name in members:
-                        self._catalog.record_failure(name, failure)
-            finally:
-                attempts.close()
-
-    def _publish_snapshot_metadata(
-        self, connection: str, members: list[str], stage: SnapshotStage
-    ) -> None:
-        """Record a snapshot attempt's member failures and shapes at publication."""
-        self._check_cancelled()
-        for name in stage.members:
-            self._require_available(name)
-        for name, failure in stage.failures.items():
-            self._catalog.record_failure(name, failure)
-        for name, member in stage.members.items():
-            self._catalog.record_snapshot(
-                name, member.schema, member.rows, connection, members, stage.started_at
-            )
-
-    def _snapshot_attempt(self, connection: str, members: list[str]) -> SnapshotStage:
-        """Read one transaction into memory or owned spill files without publishing.
-
-        Each member streams in bounded Arrow batches. Members stay in memory while
-        the group fits within the cache limit and memory target; past that, the
-        attempt holds about one batch in memory at a time. A failed or cancelled
-        attempt deletes its files.
-        """
-        bindings: dict[str, ConnectionSpec] = {}
-        secrets: dict[str, SecretSpec] = {}
-        for name in members:
-            merge_connection_binding(bindings, connection, self._catalog.sources[name].env)
-            merge_secret_bindings(secrets, self._catalog.sources[name].env)
-        failures: dict[str, SourceError] = {}
-        pending = list(members)
-        with self._sql_connections.temporary([connection], bindings, secrets) as con:
-            # A permanent member failure that aborts the transaction (DuckDB 2.0
-            # aborts on binder errors) restarts the read without that member, so
-            # every published member still comes from one transaction.
-            while True:
-                stage = SnapshotStage(
-                    self._frames.new_spill,
-                    self._catalog.prepare,
-                    datetime.now(UTC),
-                    self._snapshot_memory_bytes(),
-                )
-                stage.failures = failures
-                aborted = False
-                try:
-                    con.execute("BEGIN TRANSACTION")
-                    for name in pending:
-                        self._check_cancelled()
-                        try:
-                            self._stage_member(stage, con, name)
-                        except (ResourceLimitError, MemberPreparationError):
-                            raise
-                        except Exception as exc:
-                            error = exc if isinstance(exc, SourceError) else redacted_error(exc)
-                            if isinstance(error, SourceIntegrityError) or error.retryable:
-                                raise error from None
-                            failures[name] = redacted_error(
-                                error,
-                                SourceNotFoundError
-                                if isinstance(error, SourceNotFoundError)
-                                else SourceError,
-                            )
-                            if not _transaction_usable(con):
-                                # DuckDB 2.0 aborts on binder errors too; only a
-                                # failure before execution may restart without it.
-                                if not _failed_before_execution(exc):
-                                    raise failures.pop(name) from None
-                                aborted = True
-                                break
-                            continue
-                    if not aborted:
-                        con.execute("COMMIT")
-                        return stage
-                except BaseException as exc:
-                    with contextlib.suppress(duckdb.Error):
-                        con.rollback()
-                    stage.close()
-                    if isinstance(exc, MemberPreparationError):
-                        raise exc.error from None
-                    raise
-                with contextlib.suppress(duckdb.Error):
-                    con.rollback()
-                stage.close()
-                pending = [name for name in pending if name not in failures]
-
-    def _stage_member(self, stage: SnapshotStage, con: Any, name: str) -> None:
-        """Stream one member inside the snapshot transaction, admitting its row budget."""
-        source = self._catalog.sources[name]
-        budget = source.params.row_budget
-        try:
-            relation = source.snapshot_relation(con)
-            if relation is None:
-                frame = collect_result(source.read(con), budget)
-                self._admit_snapshot_rows(name, budget, frame.height)
-                self._check_cancelled()
-                stage.stage_frame(name, frame)
-                return
-            admit = functools.partial(self._admit_snapshot_rows, name, budget)
-            with BoundedBatches(relation, admit, self._check_cancelled) as batches:
-                stage.stage_batches(name, batches)
-        except duckdb.Error as exc:
-            raise read_error(exc) from exc
-
-    def _snapshot_memory_bytes(self) -> int:
-        """The decoded bytes a snapshot group may hold in memory before it spills."""
-        target = self._resources.memory_bytes
-        return self._frames.limit if target is None else min(self._frames.limit, target)
-
-    @staticmethod
-    def _admit_snapshot_rows(name: str, budget: int | None, rows: int) -> None:
-        if budget is not None and rows > budget:
-            raise SourceError(f"dataset {name!r} has more than {budget:,} rows (row_budget)")
-
     def _cached(self, name: str) -> pl.DataFrame | None:
         """The loaded frame (as a clone), ``None`` if not loaded; raises for a recorded failure."""
         with self._lock:
@@ -1866,18 +1617,6 @@ class DataContext:
 
     def _key_lock(self, key: Any) -> contextlib.AbstractContextManager[None]:
         return self._key_locks.hold(key, check_cancelled=self._check_cancelled)
-
-    def _fingerprint(self, name: str, source: DataSource) -> dict[str, Any] | None:
-        """The source's fingerprint; provenance must never break a run."""
-        try:
-            return source.fingerprint(hash_contents=self._hash_inputs)
-        except SourceIntegrityError:
-            raise
-        except Exception as exc:
-            logger.warning(
-                "Could not fingerprint dataset %r: %s", redact_text(name), exception_details(exc)
-            )
-            return None
 
 
 def stable_order(frame: pl.DataFrame) -> pl.DataFrame:

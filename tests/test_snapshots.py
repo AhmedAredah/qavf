@@ -9,6 +9,7 @@ import pytest
 from qavf.engine.context import DataContext
 from qavf.engine.runner import QARunner
 from qavf.engine.severity import Status
+from qavf.engine.snapshot_coordinator import SnapshotCoordinator
 from qavf.settings import QAVFSettings
 from qavf.sources import DatabaseSource
 from qavf.testing import checks_config, discovered_rules
@@ -63,7 +64,7 @@ def test_without_a_snapshot_a_concurrent_update_mixes_versions(database, monkeyp
 
 
 def test_a_snapshot_sees_one_coherent_version(database, monkeypatch) -> None:
-    real_stage = DataContext._stage_member
+    real_stage = SnapshotCoordinator.stage_member
     read: list[str] = []
 
     def stage_then_update(self, stage, con, name):
@@ -75,7 +76,7 @@ def test_a_snapshot_sees_one_coherent_version(database, monkeypatch) -> None:
             other = "lines" if name == "orders" else "orders"
             con.cursor().execute(f"UPDATE live.{other} SET version = 2")
 
-    monkeypatch.setattr(DataContext, "_stage_member", stage_then_update)
+    monkeypatch.setattr(SnapshotCoordinator, "stage_member", stage_then_update)
     ctx = DataContext.from_settings(_settings(database, snapshot=True))
     # Asking for one dataset reads the whole snapshot group.
     versions = (ctx.get("orders")["version"][0], ctx.get("lines")["version"][0])

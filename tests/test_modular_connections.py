@@ -25,7 +25,7 @@ def test_provenance_failure_after_native_binding_releases_its_view(monkeypatch, 
         raise SourceIntegrityError("identity changed during provenance")
 
     with DataContext(sources={"data": source}) as ctx:
-        monkeypatch.setattr(ctx, "_fingerprint", fail)
+        monkeypatch.setattr(ctx._source_execution, "fingerprint", fail)
         with pytest.raises(SourceIntegrityError, match="identity changed"):
             if sample:
                 ctx.sql_sample("SELECT * FROM data", 1)

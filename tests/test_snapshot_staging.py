@@ -11,6 +11,7 @@ from qavf.bounded_batches import BoundedBatches
 from qavf.duckdb_results import polars_frame
 from qavf.engine.context import DataContext
 from qavf.engine.resources import ResourceLimitError
+from qavf.engine.snapshot_coordinator import SnapshotCoordinator
 from qavf.run_control import CancellationToken
 from qavf.settings import QAVFSettings
 from qavf.sources.base import SourceError
@@ -60,7 +61,7 @@ class Interrupt:
 
     def __init__(self, error: BaseException, after: int = BoundedBatches.BATCH_ROWS) -> None:
         self.error, self.after, self.raised = error, after, 0
-        self.real = DataContext._admit_snapshot_rows
+        self.real = SnapshotCoordinator.admit_rows
 
     def __call__(self, name: str, budget: int | None, rows: int) -> None:
         if rows > self.after and not self.raised:
@@ -74,7 +75,7 @@ class CancelOnce:
 
     def __init__(self, token: CancellationToken) -> None:
         self.token = token
-        self.real = DataContext._admit_snapshot_rows
+        self.real = SnapshotCoordinator.admit_rows
 
     def __call__(self, name: str, budget: int | None, rows: int) -> None:
         if rows > BoundedBatches.BATCH_ROWS:
@@ -87,7 +88,7 @@ class UpdateAfterFirst:
 
     def __init__(self, ctx: DataContext) -> None:
         self.staged: list[str] = []
-        self.real = ctx._stage_member
+        self.real = ctx._snapshots.stage_member
 
     def __call__(self, stage, con, name) -> None:
         self.real(stage, con, name)
@@ -113,7 +114,7 @@ class MemoryAllowance:
 @pytest.fixture
 def spilling(monkeypatch):
     """Snapshot groups spill from their first batch."""
-    monkeypatch.setattr(DataContext, "_snapshot_memory_bytes", MemoryAllowance(0))
+    monkeypatch.setattr(SnapshotCoordinator, "memory_bytes", MemoryAllowance(0))
 
 
 def _no_owned_files(ctx: DataContext) -> bool:
@@ -139,7 +140,7 @@ def test_members_stage_to_spill_files_with_their_exact_types(database, spilling)
 def test_a_concurrent_writer_between_members_is_not_seen(database, monkeypatch):
     with DataContext.from_settings(_settings(database)) as ctx:
         writer = UpdateAfterFirst(ctx)
-        monkeypatch.setattr(ctx, "_stage_member", writer)
+        monkeypatch.setattr(ctx._snapshots, "stage_member", writer)
         versions = {name: set(ctx.get(name)["version"]) for name in ("orders", "lines", "small")}
     assert len(writer.staged) == 3
     assert versions == {"orders": {1}, "lines": {1}, "small": {1}}
@@ -161,7 +162,7 @@ def test_row_budget_is_exact_across_batches(database, spilling):
 
 def test_interrupted_stream_leaves_no_files(database, monkeypatch, spilling):
     stop = Interrupt(ResourceLimitError("validation execution was cancelled"))
-    monkeypatch.setattr(DataContext, "_admit_snapshot_rows", staticmethod(stop))
+    monkeypatch.setattr(SnapshotCoordinator, "admit_rows", staticmethod(stop))
     with DataContext.from_settings(_settings(database)) as ctx:
         assert not ctx.has("orders")
         assert "cancelled" in str(ctx.load_error("lines"))
@@ -172,7 +173,7 @@ def test_interrupted_stream_leaves_no_files(database, monkeypatch, spilling):
 
 def test_a_retry_after_a_mid_stream_failure_restarts_the_group(database, monkeypatch, spilling):
     stop = Interrupt(SourceError("transient", retryable=True))
-    monkeypatch.setattr(DataContext, "_admit_snapshot_rows", staticmethod(stop))
+    monkeypatch.setattr(SnapshotCoordinator, "admit_rows", staticmethod(stop))
     with DataContext.from_settings(_settings(database, retries=1, retry_delay_s=0)) as ctx:
         assert ctx.get("orders").height == ROWS
         assert stop.raised == 1
@@ -185,7 +186,7 @@ def test_a_retry_after_a_mid_stream_failure_restarts_the_group(database, monkeyp
 
 def test_cancellation_mid_stream_stops_the_run(database, monkeypatch):
     token = CancellationToken()
-    monkeypatch.setattr(DataContext, "_admit_snapshot_rows", staticmethod(CancelOnce(token)))
+    monkeypatch.setattr(SnapshotCoordinator, "admit_rows", staticmethod(CancelOnce(token)))
     schema = {"columns": {"version": {"dtype": "int"}}}
     config = _settings(database).model_dump(mode="json", exclude_unset=True)
     for spec in config["datasets"].values():
@@ -256,7 +257,7 @@ def test_a_group_that_outgrows_memory_spills_the_buffered_members_too(database, 
     # Room for the first member and part of the second: the second overflows mid-stream.
     with DataContext.from_settings(_settings(database)) as ctx:
         member = ctx.get("lines").estimated_size()
-    monkeypatch.setattr(DataContext, "_snapshot_memory_bytes", MemoryAllowance(member * 3 // 2))
+    monkeypatch.setattr(SnapshotCoordinator, "memory_bytes", MemoryAllowance(member * 3 // 2))
     with DataContext.from_settings(_settings(database)) as ctx:
         frames = {name: ctx.get(name) for name in ("orders", "lines", "small")}
         assert ctx.resource_usage()["frame_spill_write_count"] == 3
@@ -281,7 +282,7 @@ def test_row_budget_is_exact_in_memory(database):
 
 def test_a_retry_in_memory_restarts_the_group(database, monkeypatch):
     stop = Interrupt(SourceError("transient", retryable=True))
-    monkeypatch.setattr(DataContext, "_admit_snapshot_rows", staticmethod(stop))
+    monkeypatch.setattr(SnapshotCoordinator, "admit_rows", staticmethod(stop))
     with DataContext.from_settings(_settings(database, retries=1, retry_delay_s=0)) as ctx:
         assert ctx.get("orders").height == ROWS
         assert stop.raised == 1

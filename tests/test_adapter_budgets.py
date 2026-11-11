@@ -8,7 +8,7 @@ import pytest
 
 import qavf.inputs.adapters as adapters
 from qavf import Loader, Query, validate
-from qavf.engine.context import DataContext
+from qavf.engine.snapshot_coordinator import SnapshotCoordinator
 
 
 def _config(budget):
@@ -77,7 +77,7 @@ def test_snapshot_query_uses_same_budget_before_staging(tmp_path):
     with duckdb.connect(str(path)) as writer:
         writer.execute("CREATE TABLE readings AS SELECT range AS x FROM range(100000)")
     checked = []
-    original = DataContext._admit_snapshot_rows
+    original = SnapshotCoordinator.admit_rows
 
     def observe(name, budget, rows):
         checked.append(rows)
@@ -88,7 +88,7 @@ def test_snapshot_query_uses_same_budget_before_staging(tmp_path):
         "warehouse": {"type": "duckdb", "path": str(path), "snapshot": True},
     }
     # The staged stream stops one row past the budget, before any frame exists.
-    with patch.object(DataContext, "_admit_snapshot_rows", side_effect=observe):
+    with patch.object(SnapshotCoordinator, "admit_rows", side_effect=observe):
         report = validate(
             Query("SELECT * FROM warehouse.readings", connection="warehouse"),
             config=config,

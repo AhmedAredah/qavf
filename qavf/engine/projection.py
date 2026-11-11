@@ -42,7 +42,7 @@ def repeatable_scan(ctx: DataContext, name: str) -> bool:
         return False
     # FileSource pins its manifest and verifies stat/content identity at every
     # subsequent operation boundary; capability checks must establish it too.
-    return ctx._source_operation([name], lambda: True)
+    return ctx._source_execution.run([name], lambda: True)
 
 
 def project(ctx: DataContext, name: str, columns: Iterable[str]) -> pl.DataFrame:

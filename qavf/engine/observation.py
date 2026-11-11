@@ -452,7 +452,7 @@ def observe(
                 attempts.append(current)
                 return current
 
-            observation = ctx._source_operation([name], attempt)
+            observation = ctx._source_execution.run([name], attempt)
             ctx._remember_lazy_dataset(name)
         elif ctx.execution_kind(name) == "native_sql":
             observation = _native(ctx, name, columns)
@@ -501,7 +501,7 @@ def observe_source(
                 alias += "_"
             current = _native(ctx, alias, columns, source)
         else:
-            frame = ctx._load_with_retries("<observation>", source)
+            frame = ctx._source_execution.load("<observation>", source)
             if columns is not None:
                 frame = frame.select(selected_columns(columns))
             builder = _ObservationBuilder(ctx)
