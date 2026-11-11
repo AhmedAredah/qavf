@@ -25,6 +25,7 @@ from qavf.engine.cache_ownership import (
     retained_size,
 )
 from qavf.engine.cleanup import attempt_cleanup, raise_cleanup_errors
+from qavf.engine.derived_names import is_where_view
 from qavf.engine.owned_ipc import _OwnedIpcFrame, project_ipc, read_owned_ipc, reduce_ipc
 from qavf.engine.retention import RetainedBudget, RetainedLease
 from qavf.engine.session import KeyedLocks, RunSession
@@ -753,7 +754,10 @@ class RunResources:
             "frame_spill_promotions": self.frames.spill_promotions,
             "frame_spill_write_count": self.frames.spill_write_count,
             "frame_spill_write_bytes": self.frames.spill_write_bytes,
-            "eager_fallbacks": sorted(self.eager_fallbacks),
+            # A filtered item's hidden view is always eager; its parent is reported.
+            "eager_fallbacks": sorted(
+                name for name in self.eager_fallbacks if not is_where_view(name)
+            ),
             "memory_limit_scope": (
                 "tracked retained caches and post-collection target; not whole-process RSS"
             ),

@@ -1190,12 +1190,17 @@ def _rule_distribution(rule_type: type[Rule]) -> str | None:
 
 def _rule_info(rule: Rule) -> RuleInfo:
     module = type(rule).__module__
+    params = rule.params.model_dump(mode="python")
+    rows = rule.binding.rows if rule.binding is not None else None
+    if rows is not None:
+        # A filtered item reads a hidden view; reports show its dataset and condition.
+        params = {**rows.shown(params), **rows.parameters()}
     return RuleInfo(
         rule_id=rule.rule_id,
         check_name=rule.check_name,
         item_name=rule.binding.name if rule.binding else None,
         severity=rule.severity,
-        params=redact(rule.params.model_dump(mode="python")),
+        params=redact(params),
         module=module,
         distribution=_rule_distribution(type(rule)),
     )
