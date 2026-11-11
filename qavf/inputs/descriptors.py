@@ -155,8 +155,10 @@ class Query:
     """A parameterized read query, distinct from a string denoting a file path.
 
     ``connection`` is a configured connection name or a borrowed DuckDB
-    connection. Borrowed connections remain open and are materialized once at
-    the explicit load boundary; they cannot participate in native source scans.
+    connection. Borrowed connections remain open and are read once at the
+    explicit load boundary; the native backend copies the result into its owned
+    table in bounded Arrow batches, so the complete result never crosses the
+    boundary at once. They cannot participate in native source scans.
     Queries without borrowed connections retain a native scan descriptor.
     Parameter bindings are copied and frozen; nested values remain caller-owned
     and must not be mutated during validation.

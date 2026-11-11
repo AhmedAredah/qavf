@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field
 
@@ -48,6 +48,12 @@ class DatasetExplanation(SnapshotModel):
     """Why the native backend reads every column of this dataset."""
     component: tuple[str, ...] = ()
     """The datasets the native backend keeps loaded together with this one."""
+    staging: str | None = None
+    """How the input is staged before checks read it, when it is copied in a stream:
+    ``bounded_batch_copy`` (a borrowed DuckDB query copied into the native backend's
+    owned table one bounded Arrow batch at a time) or ``spill_backed_snapshot`` (a
+    member of a coherent database snapshot, streamed in bounded batches to owned
+    spill files inside the snapshot's transaction). ``None`` for other inputs."""
 
 
 class RuleExplanation(SnapshotModel):
@@ -144,6 +150,59 @@ def _known_checks_only(settings: QAVFSettings, known: set[str]) -> QAVFSettings:
     )
 
 
+class InputStaging:
+    """Name the streamed staging an input receives, from declarations alone."""
+
+    NOTES: ClassVar[Mapping[str, str]] = {
+        "bounded_batch_copy": (
+            "The borrowed query is copied into an owned table in bounded Arrow batches; "
+            "one batch crosses the connection at a time."
+        ),
+        "spill_backed_snapshot": (
+            "Snapshot members are streamed in bounded batches to owned spill files inside "
+            "one transaction and published together after it commits; staging needs "
+            "spill space for the whole group, not memory for it."
+        ),
+    }
+
+    def __init__(self, settings: QAVFSettings, backend: str) -> None:
+        self.settings = settings
+        self.backend = backend
+
+    def describe(self, value: Any, source: Mapping[str, Any]) -> str | None:
+        import duckdb
+
+        from qavf.inputs.descriptors import Query
+
+        if isinstance(value, Query) and isinstance(value.connection, duckdb.DuckDBPyConnection):
+            return "bounded_batch_copy" if self.backend == "duckdb" else None
+        if value is None and self._snapshot_member(source):
+            return "spill_backed_snapshot"
+        return None
+
+    def _snapshot_member(self, source: Mapping[str, Any]) -> bool:
+        from qavf.sources.sql import referenced_connections
+
+        connections = self.settings.connections
+        kind = source.get("type")
+        attached: list[str]
+        if kind == "database":
+            attached = [str(source.get("connection"))]
+        elif kind == "query":
+            listed = source.get("connections")
+            attached = (
+                [str(name) for name in listed]
+                if listed is not None
+                else referenced_connections(str(source.get("sql") or ""), connections)
+            )
+        else:
+            return False
+        if len(attached) != 1:
+            return False
+        spec = connections.get(attached[0])
+        return spec is not None and spec.snapshot
+
+
 def explain(
     data: ValidationInput = None,
     *,
@@ -204,6 +263,9 @@ def explain(
         notes = ["Schema and row count require execution; declared columns are not a projection."]
         if kind in {"Loader", "BatchSource", "LazyFrame"}:
             notes.append("A coherent owned observation may require memory or temporary disk.")
+        staging = InputStaging(settings, chosen).describe(inputs.get(name), source)
+        if staging is not None:
+            notes.append(InputStaging.NOTES[staging])
         descriptions.append(
             DatasetExplanation(
                 name=name,
@@ -211,6 +273,7 @@ def explain(
                 declared_columns=tuple(spec.schema_spec.columns) if spec.schema_spec else (),
                 row_budget=spec.effective_load_policy().row_budget,
                 notes=tuple(notes),
+                staging=staging,
                 **(native.describe(name) if native is not None else {}),
             )
         )

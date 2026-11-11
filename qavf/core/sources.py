@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import glob
 import os
 import re
@@ -14,6 +15,7 @@ from uuid import uuid4
 
 import duckdb
 
+from qavf.bounded_batches import BoundedBatches
 from qavf.core.admission import (
     FileIdentity,
     SourceNames,
@@ -23,7 +25,7 @@ from qavf.core.admission import (
     eager_columns,
     eager_rows,
 )
-from qavf.duckdb_results import arrow_table, settle
+from qavf.duckdb_results import settle
 from qavf.inputs.descriptors import BatchSource, File, Loader, Query
 from qavf.optional import unsupported
 from qavf.redaction import redact_text
@@ -288,12 +290,10 @@ class InputReader:
                     if self.projections.get(name) is not None:
                         fields = ", ".join(qi(source) for source, _ in projected.selected)
                         relation = relation.project(fields or "1 AS __qavf_empty_projection")
-                    eager = arrow_table(relation)
-                    self._check_budget(name, eager.num_rows, budget)
-                    settle(con)
-                    con.register(table + "_arrow", eager)
-                    owned.append(("registered", table + "_arrow"))
-                    sql = f"SELECT * FROM {qi(table + '_arrow')}"
+                    metadata["source"] = "query"
+                    return self._stream_borrowed(
+                        name, relation, spec, desc, table, owned, metadata, budget
+                    )
                 else:
                     settle(con)
                     rel = con.sql(query, params=parameters)
@@ -425,6 +425,59 @@ class InputReader:
         owned.remove(("registered", registration))
         metadata["source"] = "BatchSource"
         return self._result(name, table, projection, desc, rows, row_column, metadata, owned)
+
+    def _stream_borrowed(self, name, relation, spec, desc, table, owned, metadata, budget):
+        """Copy a borrowed query into the owned table one bounded Arrow batch at a time.
+
+        Only one batch crosses the connection boundary at once: each is registered,
+        inserted and unregistered before the next is read. The caller's connection is
+        only read; an early end (row budget, cancellation, failure) closes the reader
+        so it holds no unfinished result. ``desc`` is the query's own schema, which
+        the projection and reported types describe; stored types are those of the
+        Arrow bridge, as for a complete copy.
+        """
+        import pyarrow as pa
+
+        con = self.connection
+        registration = table + "_stream"
+        admit = functools.partial(self._admit_rows, name, budget)
+        with BoundedBatches(relation, admit, self._check_cancelled) as stream:
+            settle(con)
+            con.register(registration, stream.schema.empty_table())
+            owned.append(("registered", registration))
+            projection = self._projection(name, spec, desc)
+            row_column = evidence_row_name(projection.original_columns)
+            selected = "".join(f", {qi(a)} AS {qi(b)}" for a, b in projection.selected)
+            con.execute(
+                f"CREATE TEMP TABLE {qi(table)} AS SELECT 0::BIGINT AS {qi(row_column)}"
+                f"{selected} FROM {qi(registration)}"
+            )
+            owned.append(("TABLE", table))
+            settle(con)
+            con.unregister(registration)
+            rows = 0
+            for batch in stream:
+                settle(con)
+                con.register(registration, pa.Table.from_batches([batch]))
+                con.execute(
+                    f"INSERT INTO {qi(table)} SELECT row_number() OVER () - 1 + {rows} "
+                    f"AS {qi(row_column)}{selected} FROM {qi(registration)}"
+                )
+                settle(con)
+                con.unregister(registration)
+                rows += batch.num_rows
+            batches = stream.batches
+        owned.remove(("registered", registration))
+        metadata["transfer"] = {
+            "kind": "bounded_arrow_batches",
+            "batch_rows": BoundedBatches.BATCH_ROWS,
+            "batches": batches,
+        }
+        return self._result(name, table, projection, desc, rows, row_column, metadata, owned)
+
+    @classmethod
+    def _admit_rows(cls, name, budget, rows):
+        cls._check_budget(name, rows, budget)
 
     def _projection(self, name, spec, desc):
         return SourceProjection(
