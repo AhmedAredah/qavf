@@ -160,3 +160,27 @@ def test_both_schemas_accept_disabled_row_check_stubs(schema):
     }
     assert not _errors(schema, stubs)
     assert _errors(schema, {"datasets": {"d": {"checks": [{"check": "expression"}]}}})
+
+
+RESOURCES = """
+vars: {memory: 2GiB, spill: 20GiB, workers: 4, backend: duckdb}
+resources:
+  target_memory: ${vars.memory}
+  max_spill: ${vars.spill}
+  max_workers: ${vars.workers}
+  temp_dir: scratch
+engine:
+  backend: ${vars.backend}
+  cache_max_bytes: 256MiB
+overrides:
+  resources: {max_spill: 30GiB}
+"""
+
+
+@pytest.mark.parametrize("schema", [FULL, NATIVE], ids=["full", "native"])
+def test_both_schemas_accept_resources_with_sizes_and_variables(schema, tmp_path):
+    settings_from_text(RESOURCES, tmp_path / "qa.yaml")  # the runtime accepts it
+    assert not _errors(schema, yaml.safe_load(RESOURCES))
+    assert _errors(schema, {"resources": {"target_memory": True}})
+    assert _errors(schema, {"resources": {"memory": "2GiB"}})
+    assert _errors(schema, {"engine": {"backend": "spark"}})

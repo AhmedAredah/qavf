@@ -6,11 +6,38 @@ pip install 'qavf[polars]'   # full backend: advanced rules, comparisons, plugin
 pip install 'qavf[all]'      # every optional capability
 ```
 
-`validate(..., backend="auto")` is the default: it uses the full Polars backend
-when Polars is installed and the native DuckDB backend otherwise.
-`backend="duckdb"` selects the native backend even when Polars is installed, and
-`backend="polars"` requires the full one. The CLI `run`, `schema` and
-`list-checks` commands take the same choice as `--backend`.
+`auto` uses the full Polars backend when Polars is installed and the native
+DuckDB backend otherwise; `duckdb` selects the native backend even when Polars is
+installed, and `polars` requires the full one. Because `auto` depends on what is
+installed, the same configuration can run differently on two machines, so a
+configuration can pin its backend:
+
+```yaml
+engine:
+  backend: duckdb        # auto (default) | duckdb | polars
+```
+
+The backend is chosen in this order:
+
+1. an explicit request: `--backend` on `run`, `explain`, `schema` and
+   `list-checks`, or `validate(backend=...)`/`explain(backend=...)` in Python.
+   An explicit `auto` also overrides the configuration;
+2. the configuration's `engine.backend`, when it is not `auto`;
+3. `auto`.
+
+A pinned or requested `polars` without `qavf[polars]` fails when the
+configuration is loaded, before any data is read, with the usual
+optional-dependency error naming the setting (`engine.backend: polars
+(qavf.yaml:4:3) requires the optional Polars backend; install 'qavf[polars]'`).
+The chosen backend's own admission then applies: with `engine.backend: duckdb`
+a check only the full backend runs is a capability error, as with
+`--backend duckdb`.
+
+`qavf explain` prints the backend and where it came from (`Backend: duckdb
+(engine.backend: duckdb at qavf.yaml:4:3)`; `ValidationPlan.backend_source` is
+`cli`, `argument`, `config` or `auto`), `qavf resolve --origins` names it in its
+header (`backend` in JSON), and the run report records `metadata.backend` and
+`metadata.backend_source` (the HTML footer shows both).
 
 The native backend checks declared schemas, column limits, keys, foreign keys, row
 expressions, SQL assertions and N/A groups over CSV, Parquet, JSON, Arrow, pandas,

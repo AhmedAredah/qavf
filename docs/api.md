@@ -194,7 +194,11 @@ report = validate(
 ```
 
 Sizes accept integer bytes or decimal (`MB`, `GB`) and binary (`MiB`, `GiB`)
-units. `None` keeps the configuration's value. Zero cache, spill or evidence
+units. `None` keeps the configuration's value. A configuration's `resources:`
+section takes the same names and units; a limit given both there (or in its
+`engine` setting) and here must have the same value, otherwise `validate` raises
+an error naming each place ([resources](resources.md#in-a-configuration-resources)).
+Zero cache, spill or evidence
 limits are allowed; a total memory target must be positive. The memory target
 guides execution and retention; it is not a hard operating-system limit.
 Resource limits never authorize silently validating only a sample of the input.
@@ -309,9 +313,12 @@ not that data has been validated.
 `explain` takes the selection and backend arguments of `validate`: `backend=`,
 `only=`, `tags=`, `skip_tags=` and `datasets=`. The plan applies the same selection
 (`plan.selection`, with unselected items under `excluded`) and the same backend
-admission (`plan.backend`), so a check the chosen backend cannot run raises
+admission (`plan.backend`; `plan.backend_source` says whether it came from
+`backend=`, the configuration's `engine.backend` or `auto`, which is also what a
+call without `backend=` uses), so a check the chosen backend cannot run raises
 `OptionalDependencyError` here, as `validate` would, and an unknown check name or
-dataset raises `SelectionError`.
+dataset raises `SelectionError`. `plan.limits` lists every resource limit with
+its effective value and source (`resources`, `engine`, `argument` or `default`).
 
 ```python
 plan = explain(config="project.yaml", backend="duckdb", datasets="counts", tags="nightly")

@@ -170,8 +170,36 @@ Reports written by earlier versions still load.
 - An error raised for the whole configuration is located at the most specific
   configuration path its message names (`checks[1].inference.family`, not the
   `checks` list).
+- **`resources:` section.** Run-wide limits in readable units with the names of
+  `ResourceLimits` (`target_memory: 2GiB`, `max_spill: 20GiB`, `temp_dir`,
+  `max_workers`, `evidence_rows`, `wall_time`, ...); each sets its `engine` setting.
+  A limit given in more than one of `resources:`, `engine` and
+  `validate(resources=...)` must have the same value in each, otherwise loading
+  fails naming every place with its file and line. `include`, `vars` and
+  `overrides: {resources: {...}}` work on it, `qavf resolve --origins` shows its
+  origins, and the standalone comparison spec reads its `resources:` with the same
+  model (`ResourceSpec`). The `engine` byte settings accept the same sizes
+  (`engine.memory_budget_bytes: 2GiB`).
+- **`engine.backend: auto | duckdb | polars`** pins the backend, so a configuration
+  runs the same way whatever is installed. `--backend` and `validate(backend=...)`
+  (`explain` too) override it; a pinned `polars` without the extra fails at load.
+  `qavf explain` shows the backend and where it came from (`cli`, `argument`,
+  `config` or `auto`) and every resource limit with its source
+  (`ValidationPlan.backend_source`, `ValidationPlan.limits`; snapshot and
+  borrowed-query staging list the limits they work within); `qavf resolve
+  --origins` and the run report (`metadata.backend`, `metadata.backend_source`,
+  `metadata.resource_usage["limits"]`, the HTML footer) record them too.
+- Docs show how to run one comparison of a project:
+  `qavf run -c project.yaml --only "<compare item name>"` (or `--tags`).
 
 ### Changed
+
+- `validate(resources=...)` no longer silently overrides a limit the configuration
+  sets: a different value is an error, the same value is accepted. The `backend`
+  argument of `validate` and `explain`, and `--backend`, default to the
+  configuration's `engine.backend` (then `auto`) instead of `auto`.
+- A relative `engine.temp_directory` in an included file is rebased to that file,
+  like other relative paths.
 
 - `qavf init` writes a minimal starter (project, datasets with their inferred
   schemas, pointers to `explain`, `list-checks` and the docs) and never pins defaults

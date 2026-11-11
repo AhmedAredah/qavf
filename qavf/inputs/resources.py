@@ -335,10 +335,9 @@ class ResourceSpec(BaseModel):
         against ``base_dir`` when given."""
         values = {name: getattr(self, name) for name in self.model_fields_set}
         values = {name: value for name, value in values.items() if value is not None}
-        temp_dir = self.temp_dir
-        if base_dir is not None and temp_dir and temp_dir.strip():
-            if not Path(temp_dir).is_absolute():
-                values["temp_dir"] = base_dir / temp_dir
+        temp_dir = (self.temp_dir or "").strip() and self.temp_dir
+        if base_dir is not None and temp_dir and not Path(temp_dir).is_absolute():
+            values["temp_dir"] = base_dir / temp_dir
         return ResourceLimits(**values)
 
 

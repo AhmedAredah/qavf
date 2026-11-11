@@ -363,15 +363,21 @@ run:
   tags:                               # pass/fail policy per tag (families count too)
     nightly: {fail_on: WARNING}       # a severity, or never
 
+resources:                            # run-wide limits, the names and units of ResourceLimits
+  target_memory: 2GiB                 # sets engine.memory_budget_bytes; not an OS RSS cap
+  max_spill: 1GiB                     # sets engine.spill_max_bytes; one value per limit
+  # also cache_memory, max_spill_files, temp_dir, max_workers, native_threads,
+  # evidence_rows, evidence_bytes, report_bytes, isolate, wall_time, address_space,
+  # cpu_time, file_size (docs/resources.md)
+
 engine:
+  backend: auto                       # or duckdb / polars: pin it for the same run everywhere
   parallel: true
   max_workers: 4
   max_affected_records: 50
   max_evidence_bytes: 1048576         # per-result evidence/diagnostics; counts remain exact
   max_report_bytes: 16777216          # fail explicitly if essential outcomes cannot fit
-  memory_budget_bytes: null          # planning/post-collection target, not an OS RSS cap
   cache_max_bytes: 268435456          # tracked retained caches
-  spill_max_bytes: 1073741824         # explicit cap; omit for data/key-aware automatic planning
   temp_directory: null               # optional parent directory for run temporary files
   native_threads: null               # DuckDB thread allocation; Polars pool is process-global
   rule_timeout_s: null               # cooperative; cannot kill arbitrary plugin threads

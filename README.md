@@ -316,6 +316,17 @@ material and statistically significant (with p-values, effects and intervals; th
 missing mapped column makes the comparison not assessed, never a pass. In a configuration, `CMP-001` compares configured datasets. See
 [dataset comparison](https://github.com/AhmedAredah/qavf/blob/main/docs/comparison.md).
 
+A comparison configured in a project is a named check, so one command runs it
+alone with the project's datasets, credentials, resources and report settings:
+
+```bash
+qavf run -c project.yaml --only "counts 2024 vs 2025"   # by the check's name
+qavf run -c project.yaml --tags release                  # or by its tags
+```
+
+For two files without a project, `qavf compare-datasets before.csv after.csv -c
+spec.yaml` stays the shortcut.
+
 Spatially, the `assign_zones` step gives points the zone they fall in (a polygon
 layer from GeoParquet, GeoJSON or a shapefile, or grid cells), and the `spatial`
 level compares zones: one-sided and missing zones, measures per zone, rank and share
@@ -390,8 +401,13 @@ datasets with the default strategy report exactly as a single comparison. See
 | `qavf demo DIR` | Write a runnable demo project |
 
 `--help`, `--version`, `schema`, `list-checks` and native `run` work with the core
-installation. `run`, `explain`, `schema` and `list-checks` accept `--backend auto|duckdb|polars`;
-`auto` uses Polars when installed, otherwise DuckDB. Planning (`explain`), advanced profiling, comparison,
+installation. `run`, `explain`, `schema` and `list-checks` accept `--backend auto|duckdb|polars`,
+overriding the configuration's `engine.backend` (pin it so a configuration runs the
+same way on every machine); without either, `auto` uses Polars when installed,
+otherwise DuckDB. `explain`, `resolve --origins` and run reports name the backend and
+where it came from. Memory, disk and thread limits go in a `resources:` section with
+the names and units of `ResourceLimits` (`target_memory: 2GiB`, `max_spill: 20GiB`);
+see [resources](https://github.com/AhmedAredah/qavf/blob/main/docs/resources.md). Planning (`explain`), advanced profiling, comparison,
 scaffolding and demo commands require `qavf[polars]`. Inspect the import-light
 [capability catalog](docs/backend_capabilities.md) before selecting a backend.
 

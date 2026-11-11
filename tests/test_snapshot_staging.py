@@ -198,8 +198,19 @@ def test_explain_describes_adaptive_staging(database):
     config = _settings(database).model_dump(mode="json", exclude_unset=True)
     for spec in config["datasets"].values():
         spec["schema"] = {"columns": {"version": {"dtype": "int"}}}
+    config["resources"] = {"max_spill": "1GiB", "target_memory": "512MiB"}
     plan = explain(config=config, backend="polars")
     assert {item.staging for item in plan.datasets} == {"adaptive_snapshot"}
+    for item in plan.datasets:
+        assert item.staging_limits["max_spill"] == 1024**3
+        assert item.staging_limits["target_memory"] == 512 * 1024**2
+        assert set(item.staging_limits) == {
+            "cache_memory",
+            "target_memory",
+            "max_spill",
+            "temp_dir",
+            "batch_rows",
+        }
 
 
 def test_a_plugin_member_without_a_relation_is_spilled_whole(database, monkeypatch, spilling):

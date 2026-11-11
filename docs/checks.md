@@ -224,6 +224,7 @@ overrides:
     datasets.counts.checks[1]: {max: 0.2}       # or its instance id
   datasets:
     counts: {schema: {min_rows: 1}}             # a dataset, or a copy: counts@houston
+  resources: {max_spill: 30GiB}                 # the resources section as a whole
 ```
 
 - Overrides apply after `include`, `vars`, `defaults` and `across` expansion, and
@@ -232,6 +233,8 @@ overrides:
 - Mappings merge recursively; lists and scalars replace (an overridden `checks`
   list or `expected` list is the new list). `null` is an error: an override never
   deletes a setting.
+- `resources` patches the `resources:` section itself (it has no targets); it
+  may be absent before, and the limits it does not name stay as written.
 - A target must exist. An unknown name is an error naming the closest match; a
   check name that several instances share (each `across` copy repeats its
   dataset's checks) is an error listing their instance ids, so override one by id
@@ -279,6 +282,10 @@ selectors. Built-in checks carry their family as a tag (`input`, `temporal`,
 `--tags temporal` works without configuration. A `require` entry that matches
 nothing is a configuration error.
 
+A comparison configured in the project runs alone the same way: `qavf run -c
+project.yaml --only "counts 2024 vs 2025"` (see [running one
+comparison](comparison.md#run-one-comparison-of-a-project)).
+
 A `require` entry naming a check stands for every item with that name (in any
 dataset's list), and **each** of them must be assessed: one that is disabled,
 skipped, produced no result or could not run leaves the requirement unmet. A
@@ -286,6 +293,25 @@ dataset entry requires every check on that dataset and its schema contracts. A
 check may not be named like a dataset, so an entry is never ambiguous. A run-time
 selection narrows requirements: items it leaves out are not required, and entries
 matching no selected item are dropped.
+
+## Backend and resources
+
+```yaml
+engine:
+  backend: duckdb        # auto (default) | duckdb | polars; --backend overrides it
+resources:               # the names and units of ResourceLimits
+  target_memory: 2GiB
+  max_spill: 20GiB
+  temp_dir: scratch
+```
+
+`engine.backend` pins the backend so the configuration runs the same way on
+every machine (`auto` depends on whether Polars is installed); a pinned `polars`
+without `qavf[polars]` fails at load. `resources:` gives run-wide limits in
+readable units; each sets an `engine` setting, and a limit given both there and
+in `engine` (or as `validate(resources=...)`) must have the same value. `qavf
+explain` shows the backend and every limit with where it came from. See
+[backends](backends.md) and [resources](resources.md#in-a-configuration-resources).
 
 ## Inference families
 

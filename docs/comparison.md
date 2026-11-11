@@ -657,6 +657,51 @@ Each check becomes one result, `compare · v1, v2 · counts 2024 vs 2025 (CMP-00
 and the HTML/JSON reports work as for every rule. Datasets keep their sources,
 secrets, load policies and isolation settings.
 
+### Run one comparison of a project
+
+A comparison configured in a project is a named check item, so `qavf run` selects
+it by name with `--only` (or by tag with `--tags`). The run reads only the
+datasets it needs, uses the project's source catalog, credentials, `resources:`,
+`engine.backend` and output settings, and writes the usual reports:
+
+```yaml
+# project.yaml
+project: traffic counts
+datasets:
+  v1:
+    path: releases/2024/counts.csv
+    checks:
+      - {check: expression, name: counts are positive, expr: "aadt > 0"}
+  v2: {path: releases/2025/counts.csv}
+checks:
+  - check: compare
+    name: counts 2024 vs 2025
+    tags: [release]
+    datasets: [v1, v2]
+    keys: [site]
+    decision: material
+    rtol: 0.05
+    levels: [structure, coverage, records]
+resources:
+  target_memory: 2GiB
+```
+
+```bash
+qavf run -c project.yaml --only "counts 2024 vs 2025"
+qavf run -c project.yaml --tags release
+```
+
+Both commands run the comparison alone (`counts are positive` is not run) and
+exit 0 when it passes, 1 when it fails. `qavf explain -c project.yaml --only
+"counts 2024 vs 2025"` shows the same selection without reading data, and
+`validate(config="project.yaml", only="counts 2024 vs 2025")` is the Python form.
+There is no separate `compare --task` command: the check item's name is the task.
+
+For a one-off comparison of two files, the two-file shortcut stays:
+`qavf compare-datasets before.csv after.csv -c spec.yaml`, where `spec.yaml` holds
+the comparison options (`keys`, `levels`, ...) and, optionally, a `resources:`
+section read by the same model as a project's ([resources](resources.md)).
+
 ## Regression comparisons with renamed columns
 
 The keyed regression API takes the same mapping: `compare_frames`, `compare_outputs`

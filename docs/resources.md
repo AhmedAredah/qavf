@@ -30,9 +30,83 @@ report = validate(
 )
 ```
 
-Byte strings distinguish decimal `MB` from binary `MiB`. Explicit resource values
-override configuration values. Callers can inspect `report.metadata.resource_usage`
-and `report.metadata.query_plans` to see execution choices and tracked usage.
+Byte strings distinguish decimal `MB` from binary `MiB`. Callers can inspect
+`report.metadata.resource_usage` (its `limits` entry names each limit that was set
+and where it came from) and `report.metadata.query_plans` to see execution choices
+and tracked usage.
+
+### In a configuration: `resources:`
+
+A configuration states the same limits, by the same names and in the same units,
+in its top-level `resources:` section:
+
+```yaml
+resources:
+  target_memory: 2GiB
+  cache_memory: 256MiB
+  max_spill: 20GiB
+  temp_dir: scratch          # relative to the file that writes it
+  max_workers: 4
+  evidence_rows: 20
+  evidence_bytes: 64KiB
+  report_bytes: 16MiB
+  # also: max_spill_files, native_threads, isolate, wall_time (seconds),
+  # address_space, cpu_time (seconds), file_size
+```
+
+Each limit sets one `engine` setting (table below). The `engine` byte settings
+accept the same sizes (`engine.memory_budget_bytes: 2GiB`); booleans are still
+rejected. The standalone comparison spec (`qavf compare-datasets -c spec.yaml`)
+reads its `resources:` with the same model (`ResourceSpec`), so a project and a
+comparison spec share one vocabulary.
+
+| `resources:` / `ResourceLimits` | Engine setting |
+|---|---|
+| `target_memory` | `memory_budget_bytes` |
+| `cache_memory` | `cache_max_bytes` |
+| `max_spill` | `spill_max_bytes` |
+| `max_spill_files` | `max_spill_files` |
+| `temp_dir` | `temp_directory` |
+| `max_workers` | `max_workers` |
+| `native_threads` | `native_threads` |
+| `evidence_rows` | `max_affected_records` |
+| `evidence_bytes` | `max_evidence_bytes` |
+| `report_bytes` | `max_report_bytes` |
+| `isolate` | `execution_mode` (`isolated` or `in_process`) |
+| `wall_time` | `run_timeout_s` (also selects `isolated`) |
+| `address_space` | `process_address_space_bytes` (also selects `isolated`) |
+| `cpu_time` | `process_cpu_time_s` (also selects `isolated`) |
+| `file_size` | `process_file_bytes` (also selects `isolated`) |
+
+**Precedence: one value per limit.** A limit can be given in `resources:`, in its
+`engine` setting, or by the caller as `validate(resources=ResourceLimits(...))`
+(also `explain`). None of them silently wins: a limit given in more than one
+place must have the same value in each (`2GiB` and `2147483648` are the same
+value). A different value fails before any data is read, with an error naming
+every place and, for a configuration file, its line:
+
+```text
+resource limit engine.memory_budget_bytes is given different values:
+engine.memory_budget_bytes (qavf.yaml:9) gives 1073741824;
+resources.target_memory (qavf.yaml:3) gives 2147483648. Give each limit in one
+place (resources, engine or resources=), or the same value in each
+```
+
+A limit given nowhere keeps its default. `resources:` takes part in reuse like
+any section: included files merge into it (a relative `temp_dir` is rebased to
+the file that wrote it, as `engine.temp_directory` is), `${vars.name}` works in
+any value, and `overrides: {resources: {max_spill: 30GiB}}` patches it, leaving
+the other limits as written. (`defaults` apply to check items only.) `temp_dir`
+names a working directory, not an input, so report outputs are not checked
+against it.
+
+`qavf explain` lists every limit with its effective value and where it came from
+(`resources.target_memory at qavf.yaml:3:3`, an `engine` setting, `resources=`, or
+the default); `ValidationPlan.limits` carries the same rows, and a dataset staged
+as a snapshot or a borrowed query lists the limits its staging works within
+(`DatasetExplanation.staging_limits`). `qavf resolve --origins` shows the
+`resources:` section as written and each engine setting it set, pointing at the
+`resources` entry.
 
 | Setting | Enforced scope |
 |---|---|

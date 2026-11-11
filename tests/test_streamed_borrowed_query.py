@@ -147,3 +147,20 @@ def test_explain_names_the_bounded_copy(borrowed):
     )
     assert plan.datasets[0].staging == "bounded_batch_copy"
     assert plan.datasets[0].component  # The native description is still present.
+
+
+def test_explain_lists_the_limits_the_bounded_copy_works_within(borrowed):
+    from qavf import ResourceLimits
+
+    plan = explain(
+        {"data": Query("SELECT 1 AS x", connection=borrowed)},
+        config={"datasets": {"data": {}}, "resources": {"max_spill": "2GiB"}},
+        resources=ResourceLimits(target_memory="1GiB"),
+        backend="duckdb",
+    )
+    assert plan.datasets[0].staging_limits == {
+        "target_memory": 1024**3,
+        "max_spill": 2 * 1024**3,
+        "temp_dir": None,
+        "batch_rows": 65_536,
+    }
