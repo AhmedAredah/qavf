@@ -6,11 +6,39 @@ import contextlib
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 
 import duckdb
 
 from qavf.sources.base import DataSource, SourceError, SourceIntegrityError, SourceNotFoundError
 from qavf.sources.errors import redacted_error
+
+
+@dataclass(frozen=True, slots=True)
+class RetryPolicy:
+    """When a failed source attempt is tried again, shared by both backends.
+
+    Only a retry-safe source is retried, only for a :class:`SourceError` marked
+    retryable, never for a missing source or a changed identity, and at most
+    ``retries`` times, waiting ``delay_s`` doubled after every attempt.
+    """
+
+    retries: int
+    delay_s: float
+    safe: bool
+
+    def pause(self, error: BaseException, attempt: int) -> float | None:
+        """Seconds to wait before trying again after ``error`` ended attempt
+        ``attempt`` (counted from 0); ``None`` when ``error`` is final."""
+        if (
+            not self.safe
+            or attempt >= self.retries
+            or not isinstance(error, SourceError)
+            or not error.retryable
+            or isinstance(error, SourceNotFoundError | SourceIntegrityError)
+        ):
+            return None
+        return self.delay_s * 2**attempt
 
 
 class SourceOperations:
@@ -80,10 +108,12 @@ def execute_with_source_policy[T](
     Unknown failures and detected identity changes are never implicitly retried.
     """
     participants = tuple({id(source): source for source in sources}.values())
-    retries = min((source.params.retries for source in participants), default=0)
-    delay = max((source.params.retry_delay_s for source in participants), default=0.0)
-    safe = all(source.retry_safe for source in participants)
-    for attempt in range(retries + 1):
+    policy = RetryPolicy(
+        retries=min((source.params.retries for source in participants), default=0),
+        delay_s=max((source.params.retry_delay_s for source in participants), default=0.0),
+        safe=all(source.retry_safe for source in participants),
+    )
+    for attempt in range(policy.retries + 1):
         if check_cancelled is not None:
             check_cancelled()
         try:
@@ -99,14 +129,9 @@ def execute_with_source_policy[T](
             return result
         except (SourceError, duckdb.Error) as exc:
             error = exc if isinstance(exc, SourceError) else redacted_error(exc)
-            if (
-                attempt >= retries
-                or not safe
-                or isinstance(error, SourceNotFoundError | SourceIntegrityError)
-                or not error.retryable
-            ):
+            pause = policy.pause(error, attempt)
+            if pause is None:
                 raise _explained(error, participants) from None
-            pause = delay * 2**attempt
             if on_retry is not None:
                 on_retry(attempt + 1, pause, error)
             until = time.monotonic() + pause

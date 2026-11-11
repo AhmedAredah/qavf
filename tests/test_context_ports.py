@@ -138,3 +138,19 @@ def test_row_locator_needs_only_source_lookup():
 
     finding = Finding.unassessed("nothing", check="c", datasets=("d",))
     assert RowLocator(_NoSources()).locate(finding) is finding
+
+
+def test_one_retry_policy_decides_for_both_backends():
+    from qavf.sources.base import SourceError, SourceIntegrityError, SourceNotFoundError
+    from qavf.sources.execution import RetryPolicy
+
+    policy = RetryPolicy(retries=2, delay_s=0.5, safe=True)
+    transient = SourceError("timeout", retryable=True)
+    assert policy.pause(transient, 0) == 0.5
+    assert policy.pause(transient, 1) == 1.0
+    assert policy.pause(transient, 2) is None
+    assert policy.pause(SourceError("bad"), 0) is None
+    assert policy.pause(SourceNotFoundError("gone"), 0) is None
+    assert policy.pause(SourceIntegrityError("changed"), 0) is None
+    assert policy.pause(ValueError("unknown"), 0) is None
+    assert RetryPolicy(retries=2, delay_s=0.5, safe=False).pause(transient, 0) is None

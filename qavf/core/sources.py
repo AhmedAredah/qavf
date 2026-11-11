@@ -30,8 +30,9 @@ from qavf.inputs.descriptors import BatchSource, File, Loader, Query
 from qavf.optional import unsupported
 from qavf.redaction import redact_text
 from qavf.run_control import CANCELLED_MESSAGE
-from qavf.sources.base import SourceError, SourceIntegrityError, SourceNotFoundError
+from qavf.sources.base import SourceError, SourceNotFoundError
 from qavf.sources.errors import redacted_error, verify_postcondition
+from qavf.sources.execution import RetryPolicy
 from qavf.sources.formats import READERS, infer_format, is_remote
 from qavf.sources.local_files import discover_local_files
 from qavf.sources.sql import normalize_sql_paths
@@ -110,10 +111,13 @@ class InputReader:
             }
         )
         identity = self._identity(value)
-        retry_safe = isinstance(value, File | Query) or (
-            isinstance(value, Loader | BatchSource) and value.replayable and value.retry_safe
+        retry = RetryPolicy(
+            retries=policy.retries,
+            delay_s=policy.retry_delay_s,
+            safe=isinstance(value, File | Query)
+            or (isinstance(value, Loader | BatchSource) and value.replayable and value.retry_safe),
         )
-        for attempt in range(policy.retries + 1):
+        for attempt in range(retry.retries + 1):
             self._check_cancelled()
             owned: list[tuple[str, str]] = []
             attempt_identity = identity
@@ -133,15 +137,10 @@ class InputReader:
                     exc = redacted_error(exc)
                 if attempt_identity is not None:
                     verify_postcondition(attempt_identity.verify, exc)
-                if (
-                    not retry_safe
-                    or attempt >= policy.retries
-                    or not isinstance(exc, SourceError)
-                    or not exc.retryable
-                    or isinstance(exc, SourceIntegrityError | SourceNotFoundError)
-                ):
+                pause = retry.pause(exc, attempt)
+                if pause is None:
                     raise exc from None
-                self._pause(policy.retry_delay_s * 2**attempt)
+                self._pause(pause)
         raise AssertionError("unreachable retry state")
 
     def _identity(self, value):
