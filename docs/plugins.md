@@ -116,6 +116,7 @@ The ports can also be combined. `FindingReads` is `DatasetReads` plus
 ```python
 from qavf.engine.ports import DatasetReads
 
+
 def missing_columns(ctx: DatasetReads, dataset: str, wanted: list[str]) -> list[str]:
     return [c for c in wanted if c not in ctx.schema(dataset)]
 ```
