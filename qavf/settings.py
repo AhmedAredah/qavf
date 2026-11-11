@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     PrivateAttr,
@@ -55,15 +56,18 @@ from qavf.configuration import (
 )
 from qavf.configuration import expand_env as expand_env
 from qavf.engine.severity import Severity
+from qavf.inputs.resources import ResourceSpec, SizeText
 from qavf.number_grammar import AllowedValueDomain, NumberGrammar, Whitespace, converted_options
 from qavf.origins import ORIGINS_CONTEXT, OriginIndex, OriginNotes, ReuseOrigins
 from qavf.overrides import OVERRIDES_KEY, AppliedOverride, OverrideApplication
 from qavf.parameters import Count
+from qavf.resource_section import RESOURCES_CONTEXT, ResourceFold, ResourceProvenance
 from qavf.scalars import normalize_scalar, normalize_scalar_sequence
 from qavf.text_types import TEXT_DTYPES, TextType, Word
 from qavf.value_policy import TextNormalization
 
 if TYPE_CHECKING:
+    from qavf.backend_choice import BackendChoice
     from qavf.checks.selection import AppliedSelection
     from qavf.engine.derived import DerivedParams
     from qavf.sources.base import SourceEnvironment
@@ -71,6 +75,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DType = Literal["int", "float", "decimal", "str", "bool", "date", "datetime"]
+ByteCount = Annotated[int, Field(ge=0, strict=True), BeforeValidator(SizeText.parse), SizeText()]
+"""An engine byte setting: a byte count, or a size such as ``2GiB`` read by the same
+parser as the ``resources`` section."""
+PositiveByteCount = Annotated[
+    int, Field(ge=1, strict=True), BeforeValidator(SizeText.parse), SizeText()
+]
+"""A :data:`ByteCount` of at least one byte."""
+Backend = Literal["auto", "duckdb", "polars"]
 
 
 def _preserve_numeric_type(value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
@@ -1414,15 +1426,20 @@ def sql_assertion(item: CheckItem, item_id: str | None = None) -> SqlAssertion:
 class EngineSettings(_Strict):
     """Execution behaviour."""
 
+    backend: Backend = "auto"
+    """The validation backend: ``duckdb`` (the core), ``polars`` (needs ``qavf[polars]``)
+    or ``auto`` (Polars when installed, otherwise DuckDB). ``--backend`` and
+    ``validate(backend=...)`` override it; pin it so a configuration runs the same
+    way on every machine."""
     execution_mode: Literal["in_process", "isolated"] = "in_process"
     """Use a fresh supervised process (Linux, macOS, Windows) for transportable inputs."""
     run_timeout_s: float | None = Field(default=None, gt=0, strict=True)
     """Whole isolated worker wall time, including imports, discovery and serialization."""
-    process_address_space_bytes: int | None = Field(default=None, ge=1, strict=True)
+    process_address_space_bytes: PositiveByteCount | None = None
     """OS virtual address-space ceiling per isolated process; not a resident-memory cap."""
     process_cpu_time_s: int | None = Field(default=None, ge=1, strict=True)
     """OS CPU seconds per isolated process, summed over its threads."""
-    process_file_bytes: int | None = Field(default=None, ge=0, strict=True)
+    process_file_bytes: ByteCount | None = None
     """OS maximum size of any individual file written by the isolated worker."""
     parallel: bool = True
     max_workers: Count | None = Field(default=None, ge=1)
@@ -1436,21 +1453,21 @@ class EngineSettings(_Strict):
     duckdb_memory_limit: str | None = None
     """Buffer-manager limit per DuckDB connection, not a process RAM limit. Some
     operators allocate outside it or cannot spill; resource exhaustion is an error."""
-    memory_budget_bytes: int | None = Field(default=None, ge=1, strict=True)
+    memory_budget_bytes: PositiveByteCount | None = None
     """Run target for tracked materializations and cache state, not an OS-enforced
     process RSS cap. Caller-owned inputs and opaque plugin allocations may exceed it."""
-    cache_max_bytes: int = Field(default=268_435_456, ge=0, strict=True)
+    cache_max_bytes: ByteCount = 268_435_456
     """Maximum tracked retained cache bytes; zero disables optional caching."""
     max_spill_files: int = Field(default=4096, ge=1, strict=True)
     """Maximum live owned IPC files, including leases and failed cleanup."""
-    spill_max_bytes: int = Field(default=1_073_741_824, ge=0, strict=True)
+    spill_max_bytes: ByteCount = 1_073_741_824
     """Run temporary-storage budget. Zero disables spilling; insufficient storage
     makes affected checks unassessed rather than reducing validation coverage."""
-    temp_directory: Path | None = None
+    temp_directory: Annotated[Path, PathRole.DIRECTORY] | None = None
     """Parent of the run-owned temporary directory; relative to the configuration."""
-    max_report_bytes: int = Field(default=16_777_216, ge=1, strict=True)
+    max_report_bytes: PositiveByteCount = 16_777_216
     """Maximum encoded report size; essential outcomes exceeding it raise a resource error."""
-    max_evidence_bytes: int = Field(default=1_048_576, ge=0, strict=True)
+    max_evidence_bytes: ByteCount = 1_048_576
     """Maximum serialized evidence/diagnostic payload bytes per result. Truncation
     is disclosed and never changes exact violation counts or assessment status."""
     native_threads: int | None = Field(default=None, ge=1, strict=True)
@@ -1550,6 +1567,9 @@ class OverridesSpec(_Strict):
     datasets: dict[str, DatasetSpec] = Field(default_factory=dict)
     """Settings per dataset or ``across`` copy (``counts@houston``), e.g.
     ``{schema: {min_rows: 100}}``; only the settings given change."""
+    resources: ResourceSpec | None = None
+    """Limits of the ``resources`` section to set, e.g. ``{target_memory: 4GiB}``; the
+    other limits stay as written."""
 
 
 class OverrideLayerSpec(OverridesSpec):
@@ -1581,6 +1601,11 @@ class QAVFSettings(_Strict):
     ``key_sets_match``, ``batch_consistent``, ``coverage`` and ``drift``."""
     run: RunSettings = Field(default_factory=RunSettings)
     """Pass/fail policy: ``fail_on``, ``fail_on_incomplete`` and ``require``."""
+    resources: ResourceSpec | None = None
+    """Run-wide limits in readable units (``target_memory: 2GiB``, ``max_spill: 20GiB``),
+    the vocabulary of ``validate(resources=ResourceLimits(...))``. Each sets an
+    ``engine`` setting; a limit also written in ``engine`` or passed as ``resources=``
+    must have the same value there."""
     engine: EngineSettings = Field(default_factory=EngineSettings)
     plugins: PluginSettings = Field(default_factory=PluginSettings)
     report: ReportSettings = Field(default_factory=ReportSettings)
@@ -1598,6 +1623,8 @@ class QAVFSettings(_Strict):
     _included_paths: tuple[Path, ...] = PrivateAttr(default=())
     _applied_overrides: tuple[AppliedOverride, ...] = PrivateAttr(default=())
     _origins: OriginIndex | None = PrivateAttr(default=None)
+    _resource_provenance: ResourceProvenance = PrivateAttr(default_factory=ResourceProvenance)
+    _backend_choice: BackendChoice | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -1605,7 +1632,9 @@ class QAVFSettings(_Strict):
         cls, data: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
     ) -> Any:
         """Resolve reuse before validation: vars, ``across``, defaults, then overrides,
-        whose record the validated settings keep.
+        whose record the validated settings keep; then fold ``resources`` (and a
+        call's ``resources=``, ``RESOURCES_CONTEXT``) into the engine settings
+        (:class:`~qavf.resource_section.ResourceFold`).
 
         An origin index in the validation context (``ORIGINS_CONTEXT``, from a file
         read by :func:`load_settings`) is kept pointing at the written values through
@@ -1635,10 +1664,13 @@ class QAVFSettings(_Strict):
             following.across(substituted, expanded)
             following.defaults(expanded)
             applied = following.overrides(prepared.get(OVERRIDES_KEY), applied)
-        settings = handler(patched)
+        argument = info.context.get(RESOURCES_CONTEXT) if info.context else None
+        folded, provenance = ResourceFold(origins).apply(patched, argument)
+        settings = handler(folded)
         if applied:
             settings._applied_overrides = applied
         settings._origins = origins
+        settings._resource_provenance = provenance
         return settings
 
     @classmethod
@@ -1794,6 +1826,22 @@ class QAVFSettings(_Strict):
         """Every override applied when these settings were validated, in order: its
         target, the instance it resolved to, the settings it set and its file."""
         return self._applied_overrides
+
+    @property
+    def resource_provenance(self) -> ResourceProvenance:
+        """Where each engine resource limit was given: ``resources``, ``engine`` or a
+        call's ``resources=`` (:class:`~qavf.resource_section.ResourceProvenance`)."""
+        return self._resource_provenance
+
+    @property
+    def backend_choice(self) -> BackendChoice | None:
+        """The backend a run of these settings was resolved to use, once chosen
+        (:class:`~qavf.backend_choice.BackendChoice`)."""
+        return self._backend_choice
+
+    def apply_backend(self, choice: BackendChoice | None) -> None:
+        """Record the backend chosen for a run of these settings."""
+        self._backend_choice = choice
 
     @property
     def origins(self) -> OriginIndex | None:

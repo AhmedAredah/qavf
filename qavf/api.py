@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from qavf._input_types import ValidationInput
+    from qavf.backend_choice import BackendRequest
     from qavf.inputs.normalize import Configuration
     from qavf.inputs.resources import ResourceLimits
     from qavf.profiles import ProfileName
@@ -22,7 +23,7 @@ def validate(
     config: Configuration = None,
     resources: ResourceLimits | None = None,
     profile: ProfileName | None = None,
-    backend: str = "auto",
+    backend: str | BackendRequest | None = None,
     on_event: Callable[[RunEvent], None] | None = None,
     cancel: CancellationToken | None = None,
     only: str | Iterable[str] | None = None,
@@ -44,6 +45,15 @@ def validate(
     otherwise uses the DuckDB/Arrow core. ``"duckdb"`` explicitly selects that
     core; ``"polars"`` requires the optional extra. Unsupported configured core
     capabilities raise an actionable optional-dependency error before execution.
+    Without ``backend``, the configuration's ``engine.backend`` decides (``auto``
+    when it pins none); an explicit ``backend``, ``"auto"`` included, overrides it
+    (:mod:`qavf.backend_choice`). The report's ``metadata.backend`` and
+    ``metadata.backend_source`` record the outcome.
+
+    ``resources`` (:class:`~qavf.ResourceLimits`) and the configuration's
+    ``resources:`` section and ``engine`` limits combine: a limit given in more
+    than one of them must have the same value in each, otherwise this raises an
+    error naming every place (:mod:`qavf.resource_section`).
 
     ``on_event`` receives a :class:`~qavf.RunEvent` as each step starts and
     finishes; ``cancel`` is a :class:`~qavf.CancellationToken` whose ``cancel()``
@@ -57,11 +67,12 @@ def validate(
     an implicit tag; schema contracts carry ``input``. Selecting nothing is an error
     (:class:`~qavf.checks.selection.SelectionError`).
     """
+    from qavf.backend_choice import BackendChoice
     from qavf.checks.selection import Selection, narrow
-    from qavf.optional import resolve_backend
 
     selection = Selection.of(only=only, tags=tags, skip_tags=skip_tags, datasets=datasets)
-    if resolve_backend(backend) == "duckdb":
+    choice = BackendChoice.for_config(backend, config)
+    if choice.backend == "duckdb":
         from qavf.core.runner import validate_core
 
         return validate_core(
@@ -73,6 +84,7 @@ def validate(
             on_event=on_event,
             cancel=cancel,
             selection=selection,
+            backend=choice,
         )
     from qavf.engine.runner import QARunner
     from qavf.inputs.normalize import _adapt, prepare_configuration
@@ -87,6 +99,7 @@ def validate(
     if profile is not None:
         settings = apply_profile(settings, profile)
     settings = narrow(settings, selection)
+    settings.apply_backend(choice)
     frames = _adapt(inputs, settings)
     control = control_for(on_event, cancel, settings.engine.execution_mode)
     if control is None:

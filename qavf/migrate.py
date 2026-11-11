@@ -44,7 +44,16 @@ _LIST_DRIVEN = {"INP-006": "expression", "INP-007": "sql"}
 _POOLED_CORRECTIONS = {"STA-002": "bonferroni", "TMP-002": "none"}
 """QAVF 0.6 rules that corrected every comparison or series together, with their
 default correction: split into items, those items keep that family."""
-_TOP_ORDER = ("project", "datasets", "connections", "secrets", "checks", "run", "engine")
+_TOP_ORDER = (
+    "project",
+    "datasets",
+    "connections",
+    "secrets",
+    "checks",
+    "run",
+    "resources",
+    "engine",
+)
 
 
 class MigrationError(ValueError):

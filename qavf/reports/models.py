@@ -540,6 +540,12 @@ class RunMetadata(SnapshotModel):
     datasets: list[DatasetInfo] = Field(default_factory=list)
     parallel: bool = False
     max_workers: int = 1
+    backend: str | None = None
+    """The backend that ran the checks: ``duckdb`` or ``polars``."""
+    backend_source: str | None = None
+    """Where the backend came from: ``cli`` (``--backend``), ``argument``
+    (``backend=``), ``config`` (``engine.backend``) or ``auto``. The resource limits
+    and their sources are in ``resource_usage["limits"]``."""
     extensions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Plugin settings in effect (e.g. the MOVES version)."""
     fail_on: Severity = Severity.ERROR

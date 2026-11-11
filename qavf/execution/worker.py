@@ -28,6 +28,9 @@ _HARD_FIELDS = (
 
 def _local_settings(settings: QAVFSettings, directory: Path) -> QAVFSettings:
     raw = settings.model_dump(mode="python", by_alias=True)
+    # ``resources`` is already folded into ``engine``; the worker's own engine
+    # settings (no process limits, in process) replace what it set.
+    raw.pop("resources", None)
     raw["engine"].update({name: None for name in _HARD_FIELDS})
     # Startup pool size is process-global. Preserve an omitted per-connection
     # setting so the runner can still divide CPUs between concurrent rules.

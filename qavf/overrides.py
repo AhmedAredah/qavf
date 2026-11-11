@@ -9,13 +9,15 @@
       datasets:
         counts: {schema: {min_rows: 100}}
         counts@houston: {load_policy: {retries: 2}}          # an across copy
+      resources: {target_memory: 4GiB}                       # the resources section
 
 Overrides apply after ``include``, ``vars``, ``defaults`` and ``across`` expansion
 and before validation, so they patch the configuration as it will run. Mappings
 merge recursively; lists and scalars replace; ``null`` is an error, since an
 override never deletes a setting. A target must exist: an unknown one is an error
 naming the closest match, and a check name that several instances share is an
-error asking for the instance id. Each file's ``overrides`` apply in include
+error asking for the instance id. ``resources`` patches the ``resources`` section
+as a whole (it need not be written before). Each file's ``overrides`` apply in include
 order, the root configuration's last, and every applied override is recorded
 (:class:`AppliedOverride`).
 
@@ -37,6 +39,8 @@ ORIGIN_KEY = "origin"
 """The file a layer of overrides comes from, when files were included."""
 _SECTIONS = ("datasets", "checks")
 """Datasets apply first: a dataset override may replace a dataset's check list."""
+RESOURCES_SECTION = "resources"
+"""The section patched as a whole: its patch is the settings, not targets."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +48,7 @@ class AppliedOverride:
     """One override as applied: its target, the instance it resolved to and what it set."""
 
     section: str
-    """``datasets`` or ``checks``."""
+    """``datasets``, ``checks`` or ``resources``."""
     target: str
     """The target as written: a dataset name, a check name or an instance id."""
     instance: str
@@ -74,6 +78,8 @@ class OverrideLayer:
 
     origin: str | None
     sections: Mapping[str, Mapping[str, Mapping[str, Any]]]
+    resources: Mapping[str, Any] | None = None
+    """The patch of the ``resources`` section, when the layer has one."""
 
     @classmethod
     def parse(cls, raw: Any, origin: str | None = None) -> OverrideLayer:
@@ -82,15 +88,26 @@ class OverrideLayer:
         if isinstance(raw, BaseModel):
             raw = raw.model_dump(by_alias=True, exclude_unset=True)
         if not isinstance(raw, Mapping):
-            raise ValueError(f"{where} must be a mapping with 'checks' and/or 'datasets'")
+            raise ValueError(
+                f"{where} must be a mapping with 'checks', 'datasets' and/or 'resources'"
+            )
         layer = dict(raw)
         written = layer.pop(ORIGIN_KEY, None)
         origin = origin if origin is not None else written
+        resources = layer.pop(RESOURCES_SECTION, None)
         unknown = sorted(str(key) for key in layer if key not in _SECTIONS)
         if unknown:
             raise ValueError(
-                f"{where}: unknown section {unknown[0]!r}; overrides take 'checks' and 'datasets'"
+                f"{where}: unknown section {unknown[0]!r}; overrides take 'checks', "
+                "'datasets' and 'resources'"
             )
+        if resources is not None:
+            resources = _plain(resources)
+            if not isinstance(resources, Mapping) or not resources:
+                raise ValueError(
+                    f"{where}.{RESOURCES_SECTION} must be a non-empty mapping of resource limits"
+                )
+            _reject_null(resources, f"{where}.{RESOURCES_SECTION}")
         sections: dict[str, Mapping[str, Mapping[str, Any]]] = {}
         for section in _SECTIONS:
             patches = layer.get(section) or {}
@@ -102,7 +119,7 @@ class OverrideLayer:
                     raise ValueError(f"{location} must be a non-empty mapping of settings")
                 _reject_null(patch, location)
             sections[section] = patches
-        return cls(origin if isinstance(origin, str) else None, sections)
+        return cls(origin if isinstance(origin, str) else None, sections, resources)
 
     @classmethod
     def all_of(cls, raw: Any) -> list[OverrideLayer]:
@@ -209,6 +226,8 @@ class OverrideApplication:
         for target, patch in layer.sections["checks"].items():
             location = f"{where}.checks.{target}"
             self._check(layer.origin, instances.resolve(target, location), target, patch)
+        if layer.resources is not None:
+            self._resources(layer.origin, layer.resources)
 
     def _dataset(
         self, origin: str | None, where: str, target: str, patch: Mapping[str, Any]
@@ -221,6 +240,11 @@ class OverrideApplication:
         merge = OverridePatch()
         self.raw["datasets"] = {**datasets, target: merge.merge(datasets[target], patch)}
         self._record("datasets", target, f"datasets.{target}", merge.fields, origin)
+
+    def _resources(self, origin: str | None, patch: Mapping[str, Any]) -> None:
+        merge = OverridePatch()
+        self.raw[RESOURCES_SECTION] = merge.merge(self.raw.get(RESOURCES_SECTION), patch)
+        self._record(RESOURCES_SECTION, RESOURCES_SECTION, RESOURCES_SECTION, merge.fields, origin)
 
     def _check(
         self, origin: str | None, instance: str, target: str, patch: Mapping[str, Any]
@@ -288,6 +312,7 @@ def _closest(target: str, candidates: Iterable[str]) -> str:
 __all__ = [
     "ORIGIN_KEY",
     "OVERRIDES_KEY",
+    "RESOURCES_SECTION",
     "AppliedOverride",
     "CheckInstances",
     "OverrideApplication",

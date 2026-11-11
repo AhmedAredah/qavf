@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 import yaml
 
+from qavf.backend_choice import BackendChoice
 from qavf.origins import ConfigPath, Origin, OriginIndex, format_path
 from qavf.overrides import AppliedOverride
 from qavf.redaction import redact
@@ -47,6 +48,8 @@ class ResolvedConfig:
     """The root configuration file."""
     included: tuple[Path, ...] = ()
     """Every file ``include`` merged in."""
+    backend: BackendChoice | None = None
+    """The backend a run without ``--backend`` uses, and where it came from."""
 
     def render(self, fmt: ResolvedFormat = "yaml", *, origins: bool = False) -> str:
         """The configuration as YAML (origins as comments) or JSON (an ``origins`` map)."""
@@ -62,6 +65,7 @@ class ResolvedConfig:
             "configuration": self.configuration,
             "origins": {path: origin.describe() for path, origin in self.origins.items()},
             "overrides": [_override(applied) for applied in self.overrides],
+            "backend": self.backend.as_dict() if self.backend is not None else None,
         }
         return json.dumps(document, indent=2, ensure_ascii=False) + "\n"
 
@@ -74,6 +78,8 @@ class ResolvedConfig:
         header = []
         if self.source is not None:
             header.append(f"# Resolved from {self.source.name}; origins are file:line:column.")
+        if self.backend is not None:
+            header.append(f"# Backend: {self.backend.describe()}")
         if self.overrides:
             header.append(f"# Overrides applied ({len(self.overrides)}):")
             header.extend(f"#   {applied.describe()}" for applied in self.overrides)
@@ -96,12 +102,14 @@ def resolve(config: str | os.PathLike[str] | QAVFSettings | Mapping[str, Any]) -
     """The fully resolved configuration, without reading any data.
 
     ``config`` is a YAML/JSON file (origins are known), loaded settings, or a
-    configuration mapping (validated here; no origins).
+    configuration mapping (validated here; no origins). The result names the
+    backend a run without ``--backend`` uses (``engine.backend``, else auto).
 
     Raises:
         pydantic.ValidationError: for an invalid configuration; read from a file,
             the error carries where each invalid value was written.
         ValueError: for an unreadable configuration (with its file and line).
+        OptionalDependencyError: for ``engine.backend: polars`` without the extra.
     """
     if isinstance(config, QAVFSettings):
         settings = config
@@ -118,6 +126,7 @@ def resolve(config: str | os.PathLike[str] | QAVFSettings | Mapping[str, Any]) -
         overrides=settings.applied_overrides,
         source=settings.source_path,
         included=settings.included_paths,
+        backend=BackendChoice.for_settings(None, settings),
     )
 
 

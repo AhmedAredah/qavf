@@ -219,7 +219,7 @@ def declared_files(
         model = QAVFSettings
     found: list[str] = []
     for value, role in declared_paths(raw, model):
-        if not value or "://" in value:
+        if not value or "://" in value or role is PathRole.DIRECTORY:
             continue
         resolved = Path(value) if Path(value).is_absolute() else base_dir / value
         found.append(str(resolved))

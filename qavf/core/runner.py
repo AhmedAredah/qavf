@@ -629,6 +629,9 @@ class NativeRunner:
             ),
             results=results,
         )
+        from qavf.run_provenance import RunProvenance
+
+        report = RunProvenance(settings, "duckdb").stamp(report)
         report = _fit_report(report, settings.engine.max_report_bytes)
         if self.control is not None:
             self.control.finished(report)
@@ -651,8 +654,11 @@ def validate_core(
     on_event=None,
     cancel=None,
     selection=None,
+    backend=None,
 ):
     settings, inputs = prepare(data, schema, config, resources, profile, selection)
+    if backend is not None:
+        settings.apply_backend(backend)
     control = control_for(on_event, cancel, settings.engine.execution_mode)
     if settings.engine.execution_mode == "isolated":
         from qavf.core.execution import validate_isolated

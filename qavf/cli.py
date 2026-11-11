@@ -22,12 +22,13 @@ from typing import TYPE_CHECKING, Any, TextIO
 
 from qavf._version import __version__
 from qavf.engine.severity import Severity
-from qavf.optional import OptionalDependencyError, has_polars, require_polars
+from qavf.optional import OptionalDependencyError, require_polars
 from qavf.run_control import CancellationToken, RunControl, RunEvent
 
 if TYPE_CHECKING:
     import yaml
 
+    from qavf.backend_choice import BackendChoice
     from qavf.configuration import parse_config_text, read_config_mapping
     from qavf.engine.compilation import build_registry, build_source_registry
     from qavf.engine.runner import QARunner
@@ -94,12 +95,22 @@ def _use(*names: str) -> None:
             __getattr__(name)
 
 
-def _native(args: argparse.Namespace) -> bool:
-    backend = getattr(args, "backend", "auto")
-    if backend == "duckdb" or (backend == "auto" and not has_polars()):
-        return True
-    require_polars(f"qavf {args.command} --backend polars")
-    return False
+def _backend(args: argparse.Namespace, settings: QAVFSettings) -> BackendChoice:
+    """The backend a command uses: ``--backend``, else ``engine.backend``, else auto.
+
+    Raises:
+        OptionalDependencyError: for Polars requested or configured without the extra.
+    """
+    from qavf.backend_choice import BackendChoice, BackendRequest
+
+    requested = getattr(args, "backend", None)
+    request = BackendRequest(requested, "cli") if requested is not None else None
+    return BackendChoice.for_settings(request, settings)
+
+
+def _native(args: argparse.Namespace, settings: QAVFSettings) -> bool:
+    """Whether a command runs on the DuckDB core (:func:`_backend`)."""
+    return _backend(args, settings).backend == "duckdb"
 
 
 logger = logging.getLogger("qavf")
@@ -154,8 +165,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--backend",
         choices=["auto", "duckdb", "polars"],
-        default="auto",
-        help="validation backend (auto: Polars when installed, otherwise DuckDB)",
+        help="validation backend, overriding engine.backend (auto: Polars when installed, "
+        "otherwise DuckDB; default: engine.backend, else auto)",
     )
     run.add_argument(
         "--progress",
@@ -194,8 +205,8 @@ def _parser() -> argparse.ArgumentParser:
     explain.add_argument(
         "--backend",
         choices=["auto", "duckdb", "polars"],
-        default="auto",
-        help="check against this backend's capabilities (as run --backend)",
+        help="check against this backend's capabilities (as run --backend; "
+        "default: engine.backend, else auto)",
     )
     explain.add_argument("--format", choices=["text", "json"], default="text")
     explain.add_argument("-o", "--output", type=Path, help="file to write (default: stdout)")
@@ -268,7 +279,7 @@ def _parser() -> argparse.ArgumentParser:
     schema = commands.add_parser("schema", help="write the configuration JSON Schema")
     schema.add_argument("-o", "--output", type=Path, help="file to write (default: stdout)")
     schema.add_argument("-c", "--config", type=Path, help="configuration (for plugin discovery)")
-    schema.add_argument("--backend", choices=["auto", "duckdb", "polars"], default="auto")
+    schema.add_argument("--backend", choices=["auto", "duckdb", "polars"])
     schema.add_argument("--force", action="store_true", help="overwrite an existing file")
 
     profile = commands.add_parser("profile", help="print inferred QA limits for a data file")
@@ -279,7 +290,7 @@ def _parser() -> argparse.ArgumentParser:
     checks = commands.add_parser("list-checks", help="list the checks a configuration can use")
     checks.add_argument("-c", "--config", type=Path, help="configuration (for plugin discovery)")
     checks.add_argument("--format", choices=["table", "markdown", "json"], default="table")
-    checks.add_argument("--backend", choices=["auto", "duckdb", "polars"], default="auto")
+    checks.add_argument("--backend", choices=["auto", "duckdb", "polars"])
 
     migrate = commands.add_parser(
         "migrate", help="convert a QAVF 0.6 configuration (rules by code) to named checks"
@@ -490,14 +501,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
     token = CancellationToken()
     on_event = _ProgressLines() if args.progress else None
     control = RunControl(on_event, token) if in_process else None
+    settings.apply_backend(_backend(args, settings))
     try:
         with _interrupts(in_process, token):
-            if _native(args):
+            if _native(args, settings):
                 from qavf.api import validate
 
                 report = validate(
                     config=settings,
-                    backend="duckdb",
                     on_event=on_event,
                     cancel=token if in_process else None,
                     only=selection.only,
@@ -664,7 +675,7 @@ def _cmd_schema(args: argparse.Namespace) -> int:
         ProtectedInputs.of_settings(settings, args.config).check(args.output)
         if args.output.exists() and not args.force:
             raise ValueError(f"refusing to overwrite {args.output} (use --force)")
-    if _native(args):
+    if _native(args, settings):
         from qavf.cli_core import config_json_schema as core_schema
 
         schema = core_schema(settings)
@@ -694,6 +705,7 @@ class PlanText:
         selection = f", selection {plan.selection}" if plan.selection else ""
         lines = [
             f"Configuration valid: {self.config} (backend {plan.backend}{selection})",
+            f"Backend: {plan.backend_reason or plan.backend}",
             "",
             f"Datasets ({len(plan.datasets)}):",
         ]
@@ -714,6 +726,9 @@ class PlanText:
                     ", ".join(rule.where_columns) if rule.where_columns is not None else "unknown"
                 )
                 lines.append(f"    where: {rule.where} (reads: {reads})")
+        if plan.limits:
+            lines += ["", "Resource limits (name = value, where it was given):"]
+            lines += [f"  {limit.describe()}" for limit in plan.limits]
         if plan.families:
             lines += ["", f"Inference families ({len(plan.families)}):"]
             lines += [f"  {family.describe()}" for family in plan.families]
@@ -753,9 +768,11 @@ def _cmd_explain(args: argparse.Namespace) -> int:
         ProtectedInputs.of_settings(_settings(args.config), args.config).check(args.output)
         if args.output.exists() and not args.force:
             raise ValueError(f"refusing to overwrite {args.output} (use --force)")
+    from qavf.backend_choice import BackendRequest
+
     plan = explain(
         config=args.config,
-        backend=args.backend,
+        backend=BackendRequest(args.backend, "cli") if args.backend is not None else None,
         load_plugins=args.load_plugins,
         only=args.only or None,
         tags=args.tags or None,
@@ -805,7 +822,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
 
 def _cmd_list_checks(args: argparse.Namespace) -> int:
     settings = _settings(args.config)
-    if _native(args):
+    if _native(args, settings):
         from qavf.cli_core import core_checks
 
         checks = core_checks(settings)

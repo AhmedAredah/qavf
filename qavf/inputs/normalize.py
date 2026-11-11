@@ -17,7 +17,8 @@ from qavf.checks.across import AcrossExpansion
 from qavf.checks.legacy import reject_legacy
 from qavf.composition import VariableSubstitution
 from qavf.configuration import ConfigurationGraph, read_config_document
-from qavf.origins import ORIGINS_CONTEXT, OriginIndex, OriginNotes, ReuseOrigins
+from qavf.origins import OriginIndex, OriginNotes, ReuseOrigins
+from qavf.resource_section import validation_context
 from qavf.settings import (
     DatasetSpec,
     QAVFSettings,
@@ -433,19 +434,12 @@ def _prepared_configuration(
     for name, value in inputs.items():
         specs[name] = _replace_input(specs[name], value)
     raw["datasets"] = specs
-    if resources is not None:
-        if not isinstance(resources, ResourceLimits):
-            raise TypeError("resources must be ResourceLimits")
-        engine = raw.get("engine", {})
-        if hasattr(engine, "model_dump"):
-            engine = engine.model_dump()
-        if not isinstance(engine, Mapping):
-            raise TypeError("config.engine must be a mapping or EngineSettings")
-        raw["engine"] = {**engine, **resources.engine_overrides()}
-    context = {ORIGINS_CONTEXT: origins} if origins is not None else None
+    context = validation_context(origins, resources)
     settings = QAVFSettings.model_validate(graph.plain(raw), context=context)
     if source_path is not None:
         settings.source_path = source_path
+    if isinstance(config, QAVFSettings):
+        settings.apply_backend(config.backend_choice)
     for spec in settings.datasets.values():
         source = spec.source_config()
         if source is not None and source.get("type") == "file":

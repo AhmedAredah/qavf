@@ -11,7 +11,8 @@ from qavf.checks.placement import ROW_CHECKS, placed_items
 from qavf.configuration import read_config_document
 from qavf.inputs.descriptors import Dataset
 from qavf.optional import unsupported
-from qavf.origins import ORIGINS_CONTEXT, OriginNotes
+from qavf.origins import OriginNotes
+from qavf.resource_section import validation_context
 from qavf.settings import DatasetSpec, QAVFSettings, SchemaSpec
 
 
@@ -71,22 +72,18 @@ def prepare(data, schema, config, resources, profile, selection=None):
             configured[name] = current.model_copy(update=updates)
             inputs[name] = value.data
     raw["datasets"] = configured
-    if resources is not None:
-        engine = raw.get("engine", {})
-        original = (
-            engine.model_dump(exclude_unset=True) if hasattr(engine, "model_dump") else dict(engine)
-        )
-        raw["engine"] = {**original, **resources.engine_overrides()}
     if isinstance(config, QAVFSettings):
         origins = config.origins
     try:
-        context = {ORIGINS_CONTEXT: origins} if origins is not None else None
+        context = validation_context(origins, resources)
         settings = QAVFSettings.model_validate(raw, context=context)
     except ValueError as exc:
         if origins is not None:
             OriginNotes(origins).attach(exc)
         raise
     settings.source_path = source_path
+    if isinstance(config, QAVFSettings):
+        settings.apply_backend(config.backend_choice)
     if profile is not None:
         from qavf.profiles import apply_profile
 

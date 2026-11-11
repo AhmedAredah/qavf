@@ -48,7 +48,7 @@ _MAX_ALIAS_DEPTH = 32
 _PATH_PART = re.compile(r"\[(\d+)\]|([^.\[\]]+)")
 _MENTIONED_PATH = re.compile(
     r"(?<![\w.@-])(?:datasets|checks|connections|secrets|defaults|vars|run|engine|report|"
-    r"plugins|extensions|overrides|project)(?:\.[^\s:;,'\"()\[\]]+|\[\d+\])*"
+    r"plugins|extensions|overrides|project|resources)(?:\.[^\s:;,'\"()\[\]]+|\[\d+\])*"
 )
 
 
@@ -428,11 +428,13 @@ class ReuseOrigins:
         of its file when included files declared overrides too."""
         from qavf.overrides import ORIGIN_KEY, OVERRIDES_KEY
 
+        # A section patched as a whole (``resources``) has no target key below it.
+        target: ConfigPath = () if record.section == record.instance else (record.target,)
         if isinstance(written, list):
             for position, layer in enumerate(written):
                 if isinstance(layer, Mapping) and layer.get(ORIGIN_KEY) == record.origin:
-                    return (OVERRIDES_KEY, position, record.section, record.target)
-        return (OVERRIDES_KEY, record.section, record.target)
+                    return (OVERRIDES_KEY, position, record.section, *target)
+        return (OVERRIDES_KEY, record.section, *target)
 
 
 def _items(raw: Mapping[str, Any]) -> Iterator[tuple[ConfigPath, Mapping[str, Any]]]:

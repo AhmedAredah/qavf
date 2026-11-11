@@ -44,6 +44,10 @@ class PathRole(enum.Enum):
     """An accepted baseline file; its acceptance manifest is read with it."""
     SOURCE = "source"
     """A source specification mapping; its ``path``/``paths`` name its files."""
+    DIRECTORY = "directory"
+    """A local directory the run writes its own temporary files under. It is
+    rebased like a file path but names no input, so outputs are not checked
+    against it."""
 
 
 FilePath = Annotated[str, PathRole.FILE]

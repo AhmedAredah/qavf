@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field
 
+from qavf.backend_choice import BackendChoice, BackendRequest, BackendSource
+from qavf.bounded_batches import BoundedBatches
 from qavf.checks.families import FamilyPlans
 from qavf.checks.placement import placed_items
 from qavf.checks.selection import Selection, narrow
@@ -21,10 +23,10 @@ from qavf.engine.planning import build_plan
 from qavf.engine.registry import Rule, RuleRegistry, default_registry
 from qavf.inputs.normalize import Configuration, prepare_configuration
 from qavf.inputs.resources import ResourceLimits
-from qavf.optional import resolve_backend
 from qavf.plugins.transactions import visibility
 from qavf.profiles import ProfileName, apply_profile
 from qavf.redaction import exception_details
+from qavf.resource_section import EffectiveLimits
 from qavf.settings import QAVFSettings, SchemaSpec
 from qavf.snapshots import SnapshotModel
 from qavf.sources.base import SourceRegistry
@@ -57,6 +59,9 @@ class DatasetExplanation(SnapshotModel):
     member of a coherent database snapshot, streamed in bounded batches inside the
     snapshot's transaction and kept in memory while the group fits, else written
     to owned spill files). ``None`` for other inputs."""
+    staging_limits: dict[str, Any] = Field(default_factory=dict)
+    """The limits that bound the staging (``resources`` names: ``target_memory``,
+    ``max_spill``, ...) with their effective values, and ``batch_rows``."""
 
 
 class RuleExplanation(SnapshotModel):
@@ -106,6 +111,32 @@ class FamilyExplanation(SnapshotModel):
         return text
 
 
+class LimitExplanation(SnapshotModel):
+    """One effective resource limit, in the ``resources`` vocabulary, and its source."""
+
+    name: str
+    """The limit's name in ``resources:`` and :class:`~qavf.ResourceLimits`."""
+    setting: str
+    """The engine setting it sets (``engine.memory_budget_bytes``)."""
+    value: Any = None
+    """The effective value (bytes for sizes; ``None``: no limit)."""
+    source: str = "default"
+    """``resources`` (the section), ``engine`` (an ``engine`` field), ``argument``
+    (``resources=``) or ``default``."""
+    written: tuple[str, ...] = ()
+    """Every place it was given; with several, they hold the same value."""
+    origin: str | None = None
+    """``file:line:column`` where it was written, when read from a file."""
+
+    def describe(self) -> str:
+        """``target_memory (engine.memory_budget_bytes) = 2147483648
+        (resources.target_memory at project.yaml:4:3)``."""
+        where = ", ".join(self.written) or "default"
+        if self.origin:
+            where += f" at {self.origin}"
+        return f"{self.name} ({self.setting}) = {self.value} ({where})"
+
+
 class ValidationPlan(SnapshotModel):
     """Inspectable planning facts, with unknown costs explicitly left unknown."""
 
@@ -113,6 +144,11 @@ class ValidationPlan(SnapshotModel):
     rules: tuple[RuleExplanation, ...]
     backend: str = "polars"
     """The backend whose admission rules the plan was checked against."""
+    backend_source: BackendSource = "auto"
+    """Where the backend came from: ``cli`` (``--backend``), ``argument``
+    (``backend=``), ``config`` (``engine.backend``) or ``auto``."""
+    backend_reason: str | None = None
+    """The backend and how it was chosen, as one line."""
     selection: str | None = None
     """The selection the plan runs under (``None``: everything configured)."""
     excluded: dict[str, str] = Field(default_factory=dict)
@@ -126,6 +162,10 @@ class ValidationPlan(SnapshotModel):
     """Inference families: items whose tests are corrected together, with the members
     the selection runs."""
     resources: dict[str, Any] = Field(default_factory=dict)
+    """Effective engine resource settings by engine field name."""
+    limits: tuple[LimitExplanation, ...] = ()
+    """Every resource limit in the ``resources`` vocabulary, with its effective value
+    and where it came from (``resources``, ``engine``, ``resources=`` or default)."""
     profile: ProfileName | None = None
     data_read: bool = False
     complete: bool = True
@@ -208,9 +248,23 @@ class InputStaging:
         ),
     }
 
+    LIMITS: ClassVar[Mapping[str, tuple[str, ...]]] = {
+        "bounded_batch_copy": ("target_memory", "max_spill", "temp_dir"),
+        "adaptive_snapshot": ("cache_memory", "target_memory", "max_spill", "temp_dir"),
+    }
+    """The ``resources`` limits each staging works within."""
+
     def __init__(self, settings: QAVFSettings, backend: str) -> None:
         self.settings = settings
         self.backend = backend
+
+    def limits(self, staging: str, effective: Mapping[str, Any]) -> dict[str, Any]:
+        """The limits bounding ``staging`` with their values (``effective``: by name),
+        and the rows each streamed batch holds."""
+        return {
+            **{name: effective.get(name) for name in self.LIMITS[staging]},
+            "batch_rows": BoundedBatches.BATCH_ROWS,
+        }
 
     def describe(self, value: Any, source: Mapping[str, Any]) -> str | None:
         import duckdb
@@ -254,7 +308,7 @@ def explain(
     resources: ResourceLimits | None = None,
     profile: ProfileName | None = None,
     load_plugins: bool = False,
-    backend: str = "auto",
+    backend: str | BackendRequest | None = None,
     only: str | Iterable[str] | None = None,
     tags: str | Iterable[str] | None = None,
     skip_tags: str | Iterable[str] | None = None,
@@ -273,6 +327,9 @@ def explain(
     mean for :func:`~qavf.validate`: the plan applies the same selection and the
     same backend admission, so a check the chosen backend cannot run raises
     :class:`~qavf.optional.OptionalDependencyError` here, before any data is read.
+    Without ``backend`` the configuration's ``engine.backend`` decides; the plan
+    names the backend and where it came from, and every resource limit with its
+    source (``resources``, ``engine``, ``resources=`` or default).
 
     Raises:
         pydantic.ValidationError: for an invalid configuration (with field paths).
@@ -281,10 +338,14 @@ def explain(
     if not isinstance(load_plugins, bool):
         raise TypeError("load_plugins must be a boolean")
     selection = Selection.of(only=only, tags=tags, skip_tags=skip_tags, datasets=datasets)
-    chosen = resolve_backend(backend)
+    BackendRequest.of(backend)
     settings, inputs = prepare_configuration(
         data, schema=schema, config=config, resources=resources
     )
+    choice = BackendChoice.for_settings(backend, settings)
+    chosen = choice.backend
+    limits = tuple(LimitExplanation(**row) for row in EffectiveLimits(settings).rows())
+    effective = {limit.name: limit.value for limit in limits}
     if profile is not None:
         settings = apply_profile(settings, profile)
     settings = narrow(settings, selection)
@@ -306,7 +367,9 @@ def explain(
         notes = ["Schema and row count require execution; declared columns are not a projection."]
         if kind in {"Loader", "BatchSource", "LazyFrame"}:
             notes.append("A coherent owned observation may require memory or temporary disk.")
-        staging = InputStaging(settings, chosen).describe(inputs.get(name), source)
+        stager = InputStaging(settings, chosen)
+        staging = stager.describe(inputs.get(name), source)
+        staging_limits = stager.limits(staging, effective) if staging is not None else {}
         if staging is not None:
             notes.append(InputStaging.NOTES[staging])
         descriptions.append(
@@ -317,6 +380,7 @@ def explain(
                 row_budget=spec.effective_load_policy().row_budget,
                 notes=tuple(notes),
                 staging=staging,
+                staging_limits=staging_limits,
                 **(native.describe(name) if native is not None else {}),
             )
         )
@@ -383,11 +447,13 @@ def explain(
         if load_plugins:
             raise
         unresolved.append(f"Plan could not be fully compiled: {exception_details(exc)}")
-    limits = settings.engine
+    engine = settings.engine
     return ValidationPlan(
         datasets=tuple(descriptions),
         rules=tuple(rules),
         backend=chosen,
+        backend_source=choice.source,
+        backend_reason=choice.describe(),
         selection=selection.describe() if selection.active else None,
         excluded=excluded,
         unresolved=tuple(unresolved),
@@ -404,8 +470,9 @@ def explain(
         ),
         complete=not unresolved,
         profile=profile,
+        limits=limits,
         resources={
-            key: getattr(limits, key)
+            key: getattr(engine, key)
             for key in (
                 "memory_budget_bytes",
                 "cache_max_bytes",
@@ -434,6 +501,7 @@ def _family_methods(rules: Sequence[Rule]) -> dict[str, str]:
 __all__ = [
     "DatasetExplanation",
     "FamilyExplanation",
+    "LimitExplanation",
     "RuleExplanation",
     "ValidationPlan",
     "explain",

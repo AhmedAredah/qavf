@@ -352,7 +352,9 @@ class QARunner:
             ),
             results=self._with_requirements([result for batch in batches for result in batch]),
         )
-        report = self._fit_report_budget(report)
+        from qavf.run_provenance import RunProvenance
+
+        report = self._fit_report_budget(RunProvenance(self.settings, "polars").stamp(report))
         summary = report.summary
         logger.info(
             "QA finished in %.2fs: %d passed, %d failed, %d errored, %d skipped (highest: %s)",

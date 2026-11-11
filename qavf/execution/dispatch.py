@@ -29,9 +29,14 @@ def validate_isolated(
         raise ValueError("isolated Query input names must be configured datasets")
     data, _ = execute(settings, request_bytes(settings, inputs, {"backend": backend}))
     try:
-        return QAReport.model_validate_json(data)
+        report = QAReport.model_validate_json(data)
     except (ValueError, TypeError) as exc:
         raise ExecutionLimitError("isolated worker returned an invalid QA report") from exc
+    from qavf.run_provenance import RunProvenance
+
+    # The worker's settings were rebuilt: how the backend and limits were given
+    # is known here only.
+    return RunProvenance(settings, backend).stamp(report)
 
 
 def compare_isolated(
