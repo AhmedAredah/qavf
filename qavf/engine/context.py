@@ -6,7 +6,6 @@ import contextlib
 import functools
 import logging
 import operator
-import os
 import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -43,6 +42,7 @@ from qavf.engine.sql import (
 from qavf.ordered_sample import OrderedSample
 from qavf.redaction import exception_details, redact_text
 from qavf.reports.models import DatasetInfo
+from qavf.run_limits import RunLimits
 from qavf.settings import (
     ConnectionSpec,
     DatasetSpec,
@@ -326,7 +326,8 @@ class DataContext:
         from qavf.text_policies import requires_sql_functions
 
         check_policy(settings.engine)
-        if settings.engine.execution_mode == "isolated":
+        limits = RunLimits.of(settings)
+        if limits.execution_mode == "isolated":
             raise ValueError(
                 "isolated execution requires validate(), QARunner.run(), or compare_outputs()"
             )
@@ -340,24 +341,15 @@ class DataContext:
             secrets=settings.secrets,
             threads=threads,
             text_functions=requires_sql_functions(settings),
-            memory_limit=settings.engine.duckdb_memory_limit,
-            temp_directory=(
-                settings.resolve(settings.engine.temp_directory)
-                if settings.engine.temp_directory is not None
-                else None
-            ),
-            spill_limit_bytes=settings.engine.spill_max_bytes
-            // (2 * max(1, settings.engine.max_workers or 8)),
+            memory_limit=limits.duckdb_memory_limit,
+            temp_directory=limits.temp_directory,
+            spill_limit_bytes=limits.connection_spill_bytes(),
         )
         provided = set(frames or {})
-        workers = execution_workers or (
-            max(1, settings.engine.max_workers or min(8, os.cpu_count() or 1))
-            if settings.engine.parallel
-            else 1
-        )
+        workers = execution_workers or limits.requested_workers()
         from qavf.engine.thread_budget import memory_workers
 
-        workers = memory_workers(workers, settings.engine.memory_budget_bytes)
+        workers = memory_workers(workers, limits.memory_budget_bytes)
         from qavf.resource_plan import ResourcePlan
 
         resource_plan = ResourcePlan.for_context(settings, frames, requested_workers=workers)
@@ -373,7 +365,7 @@ class DataContext:
             env = replace(
                 env,
                 threads=connection_threads(
-                    settings.engine.native_threads, workers, memory_bytes=per_connection
+                    limits.native_threads, workers, memory_bytes=per_connection
                 ),
             )
         context = cls(
@@ -381,22 +373,18 @@ class DataContext:
             specs=settings.datasets,
             env=env,
             extensions=settings.extensions,
-            canonical_columns=settings.engine.resolved_canonical_columns(),
+            canonical_columns=limits.canonical_columns,
             assertions=settings.assertions,
             source_registry=registry,
             hash_inputs=settings.report.hash_inputs,
-            evidence_limit=settings.engine.max_affected_records,
-            evidence_bytes=settings.engine.max_evidence_bytes,
-            concurrent_loads=settings.engine.concurrent_loads,
-            cache_max_bytes=settings.engine.cache_max_bytes,
+            evidence_limit=limits.evidence_limit,
+            evidence_bytes=limits.evidence_bytes,
+            concurrent_loads=limits.concurrent_loads,
+            cache_max_bytes=limits.cache_max_bytes,
             spill_max_bytes=resource_plan.spill_bytes,
-            max_spill_files=settings.engine.max_spill_files,
+            max_spill_files=limits.max_spill_files,
             memory_budget_bytes=resource_plan.memory_bytes,
-            temp_directory=(
-                settings.resolve(settings.engine.temp_directory)
-                if settings.engine.temp_directory is not None
-                else None
-            ),
+            temp_directory=limits.temp_directory,
             connection_slots=2 * workers,
         )
         context._resources.plan = {

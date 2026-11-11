@@ -27,6 +27,7 @@ from qavf.ordered_sample import COUNT, OrderedSample
 from qavf.redaction import redact, redact_text
 from qavf.reports.models import DatasetInfo, QAReport, RunMetadata
 from qavf.run_control import CANCELLED_MESSAGE, control_for
+from qavf.run_limits import RunLimits
 from qavf.sources.base import SourceNotFoundError
 from qavf.sources.memory import reservation_is_stricter
 from qavf.sources.sql import quote_identifier as qi
@@ -501,11 +502,8 @@ class NativeRunner:
             "duckdb_version": duckdb.__version__,
             "resource_plan": resources.diagnostics(),
         }
-        parent = (
-            settings.resolve(settings.engine.temp_directory)
-            if settings.engine.temp_directory
-            else None
-        )
+        limits = RunLimits.of(settings)
+        parent = limits.temp_directory
         if parent is not None:
             parent.mkdir(parents=True, exist_ok=True)
         with (
@@ -521,13 +519,13 @@ class NativeRunner:
             if requires_sql_functions(settings):
                 register_sql_functions(con)
             threads = connection_threads(
-                settings.engine.native_threads, 1, memory_bytes=resources.memory_bytes
+                limits.native_threads, 1, memory_bytes=resources.memory_bytes
             )
             con.execute(f"SET threads={threads}")
-            if settings.engine.duckdb_memory_limit:
-                con.execute(f"SET memory_limit={lit(settings.engine.duckdb_memory_limit)}")
+            if limits.duckdb_memory_limit:
+                con.execute(f"SET memory_limit={lit(limits.duckdb_memory_limit)}")
             if resources.memory_bytes is not None and reservation_is_stricter(
-                settings.engine.duckdb_memory_limit, resources.memory_bytes
+                limits.duckdb_memory_limit, resources.memory_bytes
             ):
                 con.execute(f"SET memory_limit={lit(str(resources.memory_bytes) + 'B')}")
             con.execute(f"SET max_temp_directory_size={lit(str(resources.spill_bytes) + 'B')}")
