@@ -6,7 +6,15 @@ import re
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
-from pydantic import ConfigDict, Field, StringConstraints, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import InitErrorDetails
 
 from qavf.sources.base import SourceParams
 from qavf.sources.formats import GLOB_PATTERN, FileFormat, infer_format, is_remote, lossy_options
@@ -210,9 +218,22 @@ class SourceSettingsCheck:
         self.models = models
 
     def check(self, source: Mapping[str, Any]) -> None:
-        """Raise ``pydantic.ValidationError`` (field paths within ``source``) for
+        """Raise ``pydantic.ValidationError`` located at ``source.<setting>`` for
         invalid settings of a built-in source type."""
         kind = source.get("type")
         model = self.models.get(kind) if isinstance(kind, str) else None
-        if model is not None:
+        if model is None:
+            return
+        try:
             model.model_validate(dict(source))
+        except ValidationError as exc:
+            errors = [
+                InitErrorDetails(
+                    type=error["type"],
+                    loc=("source", *error["loc"]),
+                    input=error["input"],
+                    ctx=error.get("ctx", {}),
+                )
+                for error in exc.errors(include_url=False)
+            ]
+            raise ValidationError.from_exception_data(exc.title, errors) from None

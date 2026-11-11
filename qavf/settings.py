@@ -1036,17 +1036,6 @@ class DatasetSpec(_Strict):
     source's path or table. Each copy is a dataset of its own, ``<dataset>@<copy>``;
     ``<dataset>@*`` lists every copy."""
 
-    @field_validator("source", mode="after")
-    @classmethod
-    def _source_settings(cls, source: dict[str, Any] | None) -> dict[str, Any] | None:
-        """A built-in source type's settings are checked now, without reading anything
-        (a plugin's when the run is planned): see :class:`SourceSettingsCheck`."""
-        if source is not None:
-            from qavf.sources.parameters import SourceSettingsCheck
-
-            SourceSettingsCheck().check(source)
-        return source
-
     @model_validator(mode="after")
     def _named_blocks(self) -> DatasetSpec:
         """Every named ``series`` and ``metrics`` definition is valid, used or not.
@@ -1110,6 +1099,17 @@ class DatasetSpec(_Strict):
                 )
         if self.format is not None and self.path is None:
             raise ValueError("'format' goes with 'path'; put it inside 'source' otherwise")
+        return self
+
+    @model_validator(mode="after")
+    def _source_settings(self) -> DatasetSpec:
+        """A built-in source type's settings are checked now, without reading anything
+        (a plugin's when the run is planned): see :class:`SourceSettingsCheck`. It runs
+        after :meth:`_one_source`, so ``path`` beside ``source`` is reported as such."""
+        if self.source is not None:
+            from qavf.sources.parameters import SourceSettingsCheck
+
+            SourceSettingsCheck().check(self.source)
         return self
 
     def source_config(self) -> dict[str, Any] | None:

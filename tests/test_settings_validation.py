@@ -59,7 +59,8 @@ def test_case_colliding_connection_names_rejected():
 
 
 def test_duplicate_explicit_connections_rejected():
-    with pytest.raises(ValidationError, match="duplicate source connections"):
+    # The query source's own settings reject the repeat when the configuration loads.
+    with pytest.raises(ValidationError, match="connections must not repeat names"):
         QAVFSettings.model_validate(
             {
                 "connections": {"db": {"type": "duckdb", "path": "a.duckdb"}},

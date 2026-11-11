@@ -222,7 +222,7 @@ datasets:
   spelled_out:
     path: data/${vars.input_file}
   listed:
-    source: {type: file, paths: '${vars.files}'}
+    source: {type: file_listing, paths: '${vars.files}'}
 """
 
 
@@ -241,7 +241,7 @@ def test_a_path_through_the_file_s_own_variable_is_rebased_like_its_literal(
     )
     assert datasets["spelled_out"].path == "modules/data/roads.csv"
     assert datasets["listed"].source == {
-        "type": "file",
+        "type": "file_listing",
         "paths": ["modules/a.csv", "modules/b.csv"],
     }
     # Other uses of the variable keep its value as written.
