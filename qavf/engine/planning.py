@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from qavf.engine.derived_names import RowFilter
+    from qavf.engine.family_pass import FamilyStage
+    from qavf.engine.ports import WorkStorage
     from qavf.engine.registry import Rule
     from qavf.settings import QAVFSettings
 
@@ -120,6 +122,25 @@ class ExecutionPlan:
         return [entry.describe() for entry in self._rules.values()]
 
 
+class ReleaseSchedule:
+    """Releases each dataset of a run the context owns after its last planned consumer.
+
+    A measured member of an inference family keeps its datasets until it is judged
+    (:meth:`~qavf.engine.family_pass.FamilyStage.holds`); its judging invocation
+    completes it in the plan.
+    """
+
+    def __init__(self, plan: ExecutionPlan, families: FamilyStage | None) -> None:
+        self._plan = plan
+        self._families = families
+
+    def finished(self, rule: Rule, storage: WorkStorage) -> None:
+        """``rule``'s invocation stopped: release what no later consumer needs."""
+        if self._families is not None and self._families.holds(rule):
+            return
+        storage.release(self._plan.complete(rule.key))
+
+
 def _ancestors(datasets: Iterable[str], parents: Mapping[str, tuple[str, ...]]) -> frozenset[str]:
     """Every dataset ``datasets`` are read from, directly or through other derived ones."""
     found: set[str] = set()
@@ -208,4 +229,4 @@ def build_plan(
     return ExecutionPlan(dependencies)
 
 
-__all__ = ["DataRequirements", "ExecutionPlan", "FilteredReads", "build_plan"]
+__all__ = ["DataRequirements", "ExecutionPlan", "FilteredReads", "ReleaseSchedule", "build_plan"]

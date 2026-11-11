@@ -46,6 +46,7 @@ from qavf.engine.context import DataContext, DatasetNotAvailableError
 from qavf.engine.derived_names import shown_datasets, shown_value
 from qavf.engine.family_pass import FamilyStage
 from qavf.engine.filtered import FilteredPopulation, FilteredResult
+from qavf.engine.planning import ReleaseSchedule
 from qavf.engine.registry import Finding, Rule, RuleRegistry
 from qavf.engine.resources import ResourceLimitError, retained_size
 from qavf.engine.row_locator import RowLocator
@@ -155,6 +156,8 @@ class QARunner:
         """Check items left out of the plan (disabled), by item name, with the reason."""
         self._families: FamilyStage | None = None
         """The inference families of the run in progress."""
+        self._releases: ReleaseSchedule | None = None
+        """When the run in progress releases each dataset (a context it owns only)."""
 
     @property
     def registry(self) -> RuleRegistry:
@@ -275,7 +278,8 @@ class QARunner:
                 ownership.callback(self._end_families, families)
             execution_plan = build_plan(rules, self.settings, context.declared())
             if ctx is None:
-                context._execution_plan = execution_plan
+                releases = self._releases = ReleaseSchedule(execution_plan, families)
+                ownership.callback(self._end_releases, releases)
             context.reporting_snapshot()
             started = datetime.now(UTC)
             logger.info("Running %d rule(s) with %d worker(s)", len(rules), workers)
@@ -391,6 +395,10 @@ class QARunner:
         for index, results in zip(waiting, judged, strict=True):
             batches[index] = results
         return [families.annotate(rule, batch) for rule, batch in zip(rules, batches, strict=True)]
+
+    def _end_releases(self, releases: ReleaseSchedule) -> None:
+        if self._releases is releases:
+            self._releases = None
 
     def _end_families(self, families: FamilyStage) -> None:
         families.close()
@@ -771,9 +779,8 @@ class QARunner:
         finally:
             if began:
                 try:
-                    held = self._families is not None and self._families.holds(rule)
-                    if ctx._execution_plan is not None and not held:
-                        ctx.release(ctx._execution_plan.complete(rule.key))
+                    if self._releases is not None:
+                        self._releases.finished(rule, ctx)
                 except Exception as exc:
                     results.append(
                         self._result(

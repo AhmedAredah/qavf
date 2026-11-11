@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from qavf.engine.observation_plan import ObservationPlan
     from qavf.engine.observation_store import ObservationStorage
     from qavf.engine.source_read import SourceReadServices, SourceReadView
+    from qavf.engine.spill import SpillFile
     from qavf.engine.sql_read import NativeReadServices, SqlReadSession
     from qavf.engine.sqlite_store import Store
 
@@ -218,7 +219,6 @@ class DataContext:
             self._closed = False
             self._released: set[str] = set()
             self._release_requested: set[str] = set()
-            self._execution_plan: Any = None
             self._session = self._resources.session
             self._operations = SourceOperations(
                 concurrent=concurrent_loads, check_cancelled=self._check_cancelled
@@ -689,7 +689,7 @@ class DataContext:
 
         return Store(self._resources, label)
 
-    def spill_file(self, path: Path):
+    def spill_file(self, path: Path) -> SpillFile:
         """Own a caller-selected staging file under this run's shared disk quota.
 
         Close the returned owner (preferably with a ``with`` block). The caller

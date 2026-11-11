@@ -12,12 +12,12 @@ from qavf.rules._contracts import isolate_contract
 from qavf.rules.helpers import usable
 
 if TYPE_CHECKING:
-    from qavf.engine.context import DataContext
+    from qavf.engine.ports import DatasetReads
     from qavf.rules.statistical_checks import DriftComparison, OutlierTarget
 
 
 def outlier_targets(
-    ctx: DataContext, targets: Sequence[OutlierTarget], findings: list[Finding]
+    ctx: DatasetReads, targets: Sequence[OutlierTarget], findings: list[Finding]
 ) -> list[OutlierTarget]:
     admitted = []
     for target in targets:
@@ -43,7 +43,7 @@ def outlier_targets(
 
 
 def drift_comparisons(
-    ctx: DataContext, comparisons: Sequence[DriftComparison], findings: list[Finding]
+    ctx: DatasetReads, comparisons: Sequence[DriftComparison], findings: list[Finding]
 ) -> list[DriftComparison]:
     admitted = []
     for comparison in comparisons:

@@ -25,7 +25,7 @@ from typing import Any
 import polars as pl
 
 from qavf.compare.pairing import GroupPlan
-from qavf.engine.context import DataContext
+from qavf.engine.ports import LevelReads
 from qavf.engine.registry import Finding
 from qavf.redaction import redact_text
 
@@ -65,7 +65,7 @@ class GroupLevel:
             for member in self.plan.members
         ]
 
-    def evaluate(self, ctx: DataContext) -> list[Finding]:
+    def evaluate(self, ctx: LevelReads) -> list[Finding]:
         unavailable = [member for member in self.plan.members if not ctx.has(member)]
         if unavailable:
             return self.unassessed(f"dataset {unavailable[0]!r} is not available")
@@ -74,7 +74,7 @@ class GroupLevel:
         except Exception as exc:  # a level that raises is not assessed, like pair levels
             return self.unassessed(f"{type(exc).__name__}: {exc}")
 
-    def assess(self, ctx: DataContext) -> list[Finding]:
+    def assess(self, ctx: LevelReads) -> list[Finding]:
         raise NotImplementedError
 
 
@@ -83,7 +83,7 @@ class GroupCoverage(GroupLevel):
 
     level = "coverage"
 
-    def keys_of(self, ctx: DataContext, member: str) -> pl.DataFrame:
+    def keys_of(self, ctx: LevelReads, member: str) -> pl.DataFrame:
         keys = list(self.plan.keys)
         if self.plan.where is None:
             return ctx.project(member, keys).unique()
@@ -91,7 +91,7 @@ class GroupCoverage(GroupLevel):
         frame = ctx.project(member, columns).filter(pl.sql_expr(self.plan.where))
         return frame.select(keys).unique()
 
-    def assess(self, ctx: DataContext) -> list[Finding]:
+    def assess(self, ctx: LevelReads) -> list[Finding]:
         keys = list(self.plan.keys)
         if not keys:
             return self.unassessed("coverage needs the check's keys")
@@ -144,7 +144,7 @@ class GroupStructure(GroupLevel):
 
     level = "structure"
 
-    def assess(self, ctx: DataContext) -> list[Finding]:
+    def assess(self, ctx: LevelReads) -> list[Finding]:
         ignored = set(self.plan.ignore_columns)
         schemas = {
             member: {

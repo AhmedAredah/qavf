@@ -21,7 +21,7 @@ from qavf.engine.derived_names import RowFilter
 from qavf.input_rules import expression_scope, filtered_scope, filtered_too_few
 
 if TYPE_CHECKING:
-    from qavf.engine.context import DataContext
+    from qavf.engine.ports import DatasetReductions
     from qavf.reports.models import CheckIdentity, RuleResult
 
 
@@ -29,7 +29,7 @@ def _row_count(frame: pl.LazyFrame) -> pl.LazyFrame:
     return frame.select(pl.len().alias("rows"))
 
 
-def _rows_of(ctx: DataContext, name: str) -> int:
+def _rows_of(ctx: DatasetReductions, name: str) -> int:
     return int(ctx.reduce(name, _row_count).item())
 
 
@@ -42,7 +42,7 @@ class FilteredPopulation:
     applicable: int
 
     @classmethod
-    def count(cls, rows: RowFilter, ctx: DataContext) -> FilteredPopulation:
+    def count(cls, rows: RowFilter, ctx: DatasetReductions) -> FilteredPopulation:
         """Count the dataset's rows and the hidden view's."""
         return cls(rows, _rows_of(ctx, rows.dataset), _rows_of(ctx, rows.view))
 

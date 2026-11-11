@@ -20,6 +20,7 @@ from qavf.aggregation import exact_sum_expr as exact_sum_expr
 from qavf.aggregation import narrow_integer, numeric_expr
 from qavf.audit_codec import AuditSizeError, iter_audit_json
 from qavf.engine.context import DataContext, stable_order
+from qavf.engine.ports import DatasetReads
 from qavf.engine.registry import Finding, RuleParams
 from qavf.input_rules import absent_column_hint as absent_column_hint
 from qavf.input_rules import plural as plural
@@ -109,7 +110,7 @@ def missing_columns(frame: pl.DataFrame, columns: Iterable[str]) -> list[str]:
     return [column for column in columns if column not in present]
 
 
-def usable(ctx: DataContext, dataset: str, columns: Iterable[str]) -> str | None:
+def usable(ctx: DatasetReads, dataset: str, columns: Iterable[str]) -> str | None:
     """Explain why ``dataset`` cannot serve ``columns``; ``None`` when it can."""
     if not ctx.has(dataset):
         return f"dataset {dataset!r} not available ({ctx.unavailable_reason(dataset)})"

@@ -16,7 +16,7 @@ import polars as pl
 
 from qavf.compare.consensus import NO_CONSENSUS
 from qavf.compare.pairing import GroupPlan
-from qavf.engine.context import DataContext
+from qavf.engine.ports import FindingReads
 from qavf.engine.registry import Finding
 
 COMPARISON_IDENTITY = "_qavf_comparison_identity"
@@ -34,7 +34,7 @@ class GroupedFindings:
         """Datasets read besides the pairs' own (the consensus with its gaps)."""
         return frozenset([self.plan.consensus_dataset] if self.plan.consensus_dataset else [])
 
-    def finish(self, ctx: DataContext, findings: Sequence[Finding]) -> list[Finding]:
+    def finish(self, ctx: FindingReads, findings: Sequence[Finding]) -> list[Finding]:
         """``findings`` with member roles, plus the consensus report."""
         completed = [
             self.assign(finding) for summary in findings for finding in self.split(summary)
@@ -75,7 +75,7 @@ class GroupedFindings:
         role = self.plan.pair_role(pair, level if isinstance(level, str) else None)
         return dataclasses.replace(finding, group=role)
 
-    def consensus(self, ctx: DataContext, dataset: str) -> Finding:
+    def consensus(self, ctx: FindingReads, dataset: str) -> Finding:
         """The keys without a consensus value: not assessed for those keys."""
         label = f"{self.plan.name}: consensus"
         common = {

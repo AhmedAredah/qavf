@@ -22,7 +22,7 @@ from qavf.engine.registry import Finding
 from qavf.redaction import exception_details, redact_text
 
 if TYPE_CHECKING:
-    from qavf.engine.context import DataContext
+    from qavf.engine.ports import SourceLookup
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class FileIndex:
 class RowLocator:
     """Adds the file and the row within it to a finding's evidence, when it can."""
 
-    def __init__(self, ctx: DataContext) -> None:
+    def __init__(self, ctx: SourceLookup) -> None:
         self.ctx = ctx
 
     def locate(self, finding: Finding) -> Finding:
