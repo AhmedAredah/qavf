@@ -137,6 +137,7 @@ Reports written by earlier versions still load.
   `memory_budget_bytes`; a failed or cancelled attempt deletes its files and a
   retry restarts the whole group. `qavf explain` reports `staging:
   spill_backed_snapshot`.
+- `scripts/benchmark_streaming.py` measures both, before and after a change.
 
 ### Fixed
 
