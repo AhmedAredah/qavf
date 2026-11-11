@@ -56,7 +56,8 @@ class AppliedOverride:
 
     def describe(self) -> str:
         """One line for ``qavf explain``."""
-        written = "" if self.target == self.instance else f" ({self.target!r})"
+        named = self.target not in (self.instance, self.instance.removeprefix("datasets."))
+        written = f" ({self.target!r})" if named else ""
         source = f" from {self.origin}" if self.origin else ""
         return f"{self.instance}{written}: {', '.join(self.fields)}{source}"
 

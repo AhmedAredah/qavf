@@ -256,3 +256,21 @@ def test_the_editor_schema_accepts_one_overrides_mapping_only() -> None:
     assert list(validator.iter_errors({"overrides": {"rules": {}}}))
     assert list(validator.iter_errors({"overrides": [{"origin": "a.yaml", "checks": {}}]}))
     assert schema["properties"]["overrides"]["ui_group"] == "Reuse"
+
+
+def test_the_explain_command_prints_the_applied_overrides(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from qavf.cli import EXIT_OK, main
+
+    _write(
+        tmp_path / "base.yaml",
+        "datasets:\n  counts:\n    path: counts.csv\n    schema: {min_rows: 1}\n",
+    )
+    config = _write(
+        tmp_path / "qa.yaml",
+        "include: [base.yaml]\noverrides:\n  datasets:\n    counts: {schema: {min_rows: 5}}\n",
+    )
+    assert main(["explain", "-c", str(config)]) == EXIT_OK
+    text = capsys.readouterr().out
+    assert "Overrides applied (1):\n  datasets.counts: schema.min_rows from qa.yaml\n" in text
