@@ -222,7 +222,7 @@ def test_explain_lists_the_applied_overrides(tmp_path: Path) -> None:
         "    positive: {severity: WARNING}\n",
     )
     plan = explain(config=config)
-    assert plan.overrides == ("datasets.counts.checks[0] ('positive'): severity",)
+    assert plan.overrides == ("datasets.counts.checks[0] ('positive'): severity (line 8)",)
 
 
 def test_a_file_path_set_by_an_included_override_is_relative_to_that_file(
@@ -273,4 +273,4 @@ def test_the_explain_command_prints_the_applied_overrides(
     )
     assert main(["explain", "-c", str(config)]) == EXIT_OK
     text = capsys.readouterr().out
-    assert "Overrides applied (1):\n  datasets.counts: schema.min_rows from qa.yaml\n" in text
+    assert "Overrides applied (1):\n  datasets.counts: schema.min_rows from qa.yaml:4\n" in text

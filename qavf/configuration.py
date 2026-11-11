@@ -6,14 +6,16 @@ import json
 import os
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import BaseModel
 
-_ENV_REFERENCE = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+from qavf.origins import NodeOrigins, OriginIndex
+
+ENV_REFERENCE = re.compile(r"(?<!\$)\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 """``${NAME}`` or ``${NAME:-default}``; ``$${NAME}`` is the literal text ``${NAME}``."""
 ESCAPED_REFERENCE = "$${"
 """Written for a literal ``${`` that no ``${ENV}`` or ``${vars.name}`` substitution reads."""
@@ -122,7 +124,7 @@ def expand_env(value: Any, environ: Mapping[str, str] | None = None) -> Any:
 
     def expand(item: Any) -> Any:
         if isinstance(item, str):
-            return _ENV_REFERENCE.sub(substitute, item)
+            return ENV_REFERENCE.sub(substitute, item)
         if not isinstance(item, (dict, list)):
             return item
         identity = id(item)
@@ -158,6 +160,8 @@ class ConfigDocument:
     """The root configuration file (resolved)."""
     included: tuple[Path, ...] = ()
     """Every file merged in by ``include`` (resolved), in the order they were read."""
+    origins: OriginIndex = field(default_factory=OriginIndex, compare=False)
+    """Where each value was written (:mod:`qavf.origins`)."""
 
 
 def read_config_document(path: str | Path) -> ConfigDocument:
@@ -176,15 +180,18 @@ def resolve_config_document(text: str, source: Path) -> ConfigDocument:
     """Parse configuration text as the content of ``source`` and resolve its reuse.
 
     Included files merge first (relative to ``source``), then ``${vars.name}``
-    and ``${ENV}`` references are substituted.
+    and ``${ENV}`` references are substituted. The document's
+    :attr:`~ConfigDocument.origins` record where each value was written.
     """
-    from qavf.composition import IncludeResolver, VariableSubstitution
+    from qavf.composition import IncludeResolver, ReferenceNotes, VariableSubstitution
 
-    raw = parse_config_text(text, source, expand=False)
-    resolver = IncludeResolver(_parse_unexpanded)
-    merged = resolver.resolve(raw, source)
+    raw, origins = parse_located_config_text(text, source)
+    resolver = IncludeResolver(parse_located_config_text)
+    merged = resolver.resolve(raw, source, origins)
+    ReferenceNotes(resolver.origins).scan(merged)
     result: dict[str, Any] = expand_env(VariableSubstitution.apply(merged))
-    return ConfigDocument(result, source, tuple(resolver.included))
+    resolver.origins.relabel(source.parent)
+    return ConfigDocument(result, source, tuple(resolver.included), resolver.origins)
 
 
 def resolve_config_text(text: str, source: Path) -> dict[str, Any]:
@@ -192,8 +199,10 @@ def resolve_config_text(text: str, source: Path) -> dict[str, Any]:
     return resolve_config_document(text, source).raw
 
 
-def _parse_unexpanded(text: str, source: Path) -> dict[str, Any]:
-    return parse_config_text(text, source, expand=False)
+def parse_located_config_text(text: str, source: Path) -> tuple[dict[str, Any], OriginIndex]:
+    """:func:`parse_config_text` without expansion, with where each key and item was
+    written (``source`` names the file in the origins)."""
+    return _parse(text, source, located=True)
 
 
 def parse_config_text(text: str, source: Path, *, expand: bool = True) -> dict[str, Any]:
@@ -201,10 +210,31 @@ def parse_config_text(text: str, source: Path, *, expand: bool = True) -> dict[s
 
     ``expand=False`` keeps ``${NAME}`` references unexpanded (for rewriting a file).
     """
+    raw, _ = _parse(text, source, located=False)
+    if not expand:
+        return raw
+    result: dict[str, Any] = expand_env(raw)
+    return result
+
+
+def _load_yaml(text: str, source: Path, located: bool) -> tuple[Any, OriginIndex]:
+    """The YAML document and, when ``located``, where its keys and items are."""
+    loader = _UniqueKeyLoader(text)  # a SafeLoader subclass
+    try:
+        node = loader.get_single_node()
+        raw = loader.construct_document(node) if node is not None else None
+        origins = NodeOrigins(source.as_posix()).collect(node) if located else OriginIndex()
+    finally:
+        loader.dispose()
+    return raw, origins
+
+
+def _parse(text: str, source: Path, *, located: bool) -> tuple[dict[str, Any], OriginIndex]:
+    origins = OriginIndex()
     match source.suffix.lower():
         case ".yaml" | ".yml":
             try:
-                raw = yaml.load(text, Loader=_UniqueKeyLoader)  # a SafeLoader subclass
+                raw, origins = _load_yaml(text, source, located)
             except RecursionError as exc:
                 raise ValueError(f"{source}: YAML is nested too deeply") from exc
             except yaml.YAMLError as exc:
@@ -218,6 +248,8 @@ def parse_config_text(text: str, source: Path, *, expand: bool = True) -> dict[s
                 raise ValueError(
                     f"{source}: invalid JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})"
                 ) from exc
+            if located:
+                origins = NodeOrigins(source.as_posix()).json(text)
         case other:
             raise ValueError(f"unsupported configuration format {other!r}; use YAML or JSON")
     if raw is None:
@@ -225,10 +257,7 @@ def parse_config_text(text: str, source: Path, *, expand: bool = True) -> dict[s
     if not isinstance(raw, dict):
         raise ValueError(f"{source}: top level of the configuration must be a mapping")
     raw.pop("$schema", None)
-    if not expand:
-        return raw
-    result: dict[str, Any] = expand_env(raw)
-    return result
+    return raw, origins
 
 
 MAX_CONFIGURATION_VALUES = 1_000_000

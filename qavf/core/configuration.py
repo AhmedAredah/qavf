@@ -8,15 +8,17 @@ from pathlib import Path
 
 from qavf.checks.legacy import reject_legacy
 from qavf.checks.placement import ROW_CHECKS, placed_items
-from qavf.configuration import read_config_mapping as _read_config_mapping
+from qavf.configuration import read_config_document
 from qavf.inputs.descriptors import Dataset
 from qavf.optional import unsupported
+from qavf.origins import ORIGINS_CONTEXT, OriginNotes
 from qavf.settings import DatasetSpec, QAVFSettings, SchemaSpec
 
 
 def prepare(data, schema, config, resources, profile, selection=None):
     """Validate a complete configuration before opening caller inputs."""
     source_path = None
+    origins = None
     if isinstance(config, QAVFSettings):
         settings = config.model_copy(deep=True)
         source_path = settings.source_path
@@ -26,7 +28,8 @@ def prepare(data, schema, config, resources, profile, selection=None):
             if name != "source_path"
         }
     elif isinstance(config, str | os.PathLike):
-        raw, source_path = _read_config_mapping(Path(config))
+        document = read_config_document(Path(config))
+        raw, source_path, origins = document.raw, document.source, document.origins
         reject_legacy(raw, str(source_path))
     elif config is None or isinstance(config, Mapping):
         raw = dict(config or {})
@@ -74,7 +77,15 @@ def prepare(data, schema, config, resources, profile, selection=None):
             engine.model_dump(exclude_unset=True) if hasattr(engine, "model_dump") else dict(engine)
         )
         raw["engine"] = {**original, **resources.engine_overrides()}
-    settings = QAVFSettings.model_validate(raw)
+    if isinstance(config, QAVFSettings):
+        origins = config.origins
+    try:
+        context = {ORIGINS_CONTEXT: origins} if origins is not None else None
+        settings = QAVFSettings.model_validate(raw, context=context)
+    except ValueError as exc:
+        if origins is not None:
+            OriginNotes(origins).attach(exc)
+        raise
     settings.source_path = source_path
     if profile is not None:
         from qavf.profiles import apply_profile

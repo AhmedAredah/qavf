@@ -56,7 +56,8 @@ from qavf.configuration import (
 from qavf.configuration import expand_env as expand_env
 from qavf.engine.severity import Severity
 from qavf.number_grammar import AllowedValueDomain, NumberGrammar, Whitespace, converted_options
-from qavf.overrides import AppliedOverride, OverrideApplication
+from qavf.origins import ORIGINS_CONTEXT, OriginIndex, OriginNotes, ReuseOrigins
+from qavf.overrides import OVERRIDES_KEY, AppliedOverride, OverrideApplication
 from qavf.parameters import Count
 from qavf.scalars import normalize_scalar, normalize_scalar_sequence
 from qavf.text_types import TEXT_DTYPES, TextType, Word
@@ -1596,12 +1597,20 @@ class QAVFSettings(_Strict):
     _selection: AppliedSelection | None = PrivateAttr(default=None)
     _included_paths: tuple[Path, ...] = PrivateAttr(default=())
     _applied_overrides: tuple[AppliedOverride, ...] = PrivateAttr(default=())
+    _origins: OriginIndex | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
-    def _resolved_reuse(cls, data: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+    def _resolved_reuse(
+        cls, data: Any, handler: ValidatorFunctionWrapHandler, info: ValidationInfo
+    ) -> Any:
         """Resolve reuse before validation: vars, ``across``, defaults, then overrides,
-        whose record the validated settings keep."""
+        whose record the validated settings keep.
+
+        An origin index in the validation context (``ORIGINS_CONTEXT``, from a file
+        read by :func:`load_settings`) is kept pointing at the written values through
+        each step (:class:`~qavf.origins.ReuseOrigins`) and stays with the settings.
+        """
         validate_config_mapping_keys(data)
         reject_legacy(data)
         if not isinstance(data, dict):
@@ -1617,11 +1626,19 @@ class QAVFSettings(_Strict):
             )
         # ``$${`` is a literal ``${`` once every reference is substituted.
         substituted = LiteralReferences.unescape(VariableSubstitution.apply(data))
-        prepared = ItemPreparation.apply(AcrossExpansion.apply(substituted))
+        expanded = AcrossExpansion.apply(substituted)
+        prepared = ItemPreparation.apply(expanded)
         patched, applied = OverrideApplication.apply(prepared)
+        origins = OriginIndex.of(info.context)
+        if origins is not None:
+            following = ReuseOrigins(origins)
+            following.across(substituted, expanded)
+            following.defaults(expanded)
+            applied = following.overrides(prepared.get(OVERRIDES_KEY), applied)
         settings = handler(patched)
         if applied:
             settings._applied_overrides = applied
+        settings._origins = origins
         return settings
 
     @classmethod
@@ -1755,6 +1772,12 @@ class QAVFSettings(_Strict):
         """Every override applied when these settings were validated, in order: its
         target, the instance it resolved to, the settings it set and its file."""
         return self._applied_overrides
+
+    @property
+    def origins(self) -> OriginIndex | None:
+        """Where each value was written, when these settings were loaded from a file
+        (:mod:`qavf.origins`); ``None`` for settings validated from a mapping."""
+        return self._origins
 
     @property
     def included_paths(self) -> tuple[Path, ...]:
@@ -1893,7 +1916,21 @@ def _validated(document: ConfigDocument) -> QAVFSettings:
     raw, source = document.raw, document.source
     reject_legacy(raw, str(source))
     ConfigurationGraph().check(raw)
-    settings = QAVFSettings.model_validate(raw)
+    settings = validate_located(raw, document.origins)
     settings.source_path = source
     settings.record_includes(document.included)
     return settings
+
+
+def validate_located(raw: Mapping[str, Any], origins: OriginIndex) -> QAVFSettings:
+    """``QAVFSettings.model_validate(raw)``, keeping where each value was written.
+
+    An error raised carries ``origins`` (:class:`~qavf.origins.OriginIndex`), so
+    the command line and :func:`~qavf.redaction.exception_details` name the file
+    and line of each invalid value; a Python caller sees them as the error's notes.
+    """
+    try:
+        return QAVFSettings.model_validate(raw, context={ORIGINS_CONTEXT: origins})
+    except ValueError as exc:
+        OriginNotes(origins).attach(exc)
+        raise

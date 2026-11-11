@@ -53,12 +53,18 @@ class AppliedOverride:
     """The settings it set, as dotted paths within the target (``schema.min_rows``)."""
     origin: str | None = None
     """The file that declared it (``None``: the configuration itself, without includes)."""
+    line: int | None = None
+    """The line its target was written on, when the configuration was read from a file."""
 
     def describe(self) -> str:
         """One line for ``qavf explain``."""
         named = self.target not in (self.instance, self.instance.removeprefix("datasets."))
         written = f" ({self.target!r})" if named else ""
-        source = f" from {self.origin}" if self.origin else ""
+        line = f":{self.line}" if self.line is not None else ""
+        if self.origin:
+            source = f" from {self.origin}{line}"
+        else:
+            source = f" (line {self.line})" if self.line is not None else ""
         return f"{self.instance}{written}: {', '.join(self.fields)}{source}"
 
 

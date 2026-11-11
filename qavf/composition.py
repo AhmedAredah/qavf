@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from qavf.config_paths import ConfigPaths, PathRole
-from qavf.configuration import ConfigurationGraph, expand_env
+from qavf.configuration import ENV_REFERENCE, ConfigurationGraph, expand_env
+from qavf.origins import ConfigPath, OriginIndex
 from qavf.overrides import ORIGIN_KEY, OVERRIDES_KEY
 
 if TYPE_CHECKING:
@@ -46,8 +47,9 @@ _UNIQUE_SECTIONS = ("datasets",)
 _CONCATENATED_SECTIONS = ("checks",)
 """Top-level lists that collect the entries of every file."""
 
-Parser = Callable[[str, Path], dict[str, Any]]
-"""Parses one file's text (without expanding references) as the content of a path."""
+Parser = Callable[[str, Path], tuple[dict[str, Any], OriginIndex]]
+"""Parses one file's text (without expanding references) as the content of a path,
+with where each of its values was written."""
 
 
 class IncludeResolver:
@@ -59,48 +61,65 @@ class IncludeResolver:
         """Every file merged in so far (resolved), in the order they were read."""
         self.override_layers: list[Any] = []
         """Each file's ``overrides``, marked with its file, in the order they apply."""
+        self.origins = OriginIndex()
+        """Where each value of the merged configuration was written (after :meth:`resolve`)."""
+        self._override_origins: list[OriginIndex] = []
         self._root = Path()
 
-    def resolve(self, raw: dict[str, Any], source: Path) -> dict[str, Any]:
+    def resolve(
+        self, raw: dict[str, Any], source: Path, origins: OriginIndex | None = None
+    ) -> dict[str, Any]:
         """``raw`` (the content of ``source``) with its included files merged in.
 
         Each file is measured before it is merged (:class:`ConfigurationGraph`), so a
         file whose shared parts expand beyond the limit fails before any copy is made.
+        ``origins`` (where ``raw``'s values were written) is merged with the included
+        files' into :attr:`origins`.
         """
         root = source.resolve()
         self._root = root.parent
         ConfigurationGraph().check(raw)
         written = raw.get(OVERRIDES_KEY)
-        merged = self._resolve(raw, root, (root,))
+        merged, merged_origins = self._resolve(raw, origins or OriginIndex(), root, (root,))
         if self.included and self.override_layers:
             merged[OVERRIDES_KEY] = self.override_layers
+            for position, layer in enumerate(self._override_origins):
+                merged_origins.graft((OVERRIDES_KEY, position), layer)
         elif written is not None:
             merged[OVERRIDES_KEY] = written  # one file: its overrides as written
+            for layer in self._override_origins:
+                merged_origins.graft((OVERRIDES_KEY,), layer)
+        self.origins = merged_origins
         return merged
 
     def _resolve(
         self,
         raw: dict[str, Any],
+        origins: OriginIndex,
         source: Path,
         chain: tuple[Path, ...],
         owned: frozenset[str] = frozenset(),
-    ) -> dict[str, Any]:
-        """``raw`` (the content of ``source``) merged over its own included files.
+    ) -> tuple[dict[str, Any], OriginIndex]:
+        """``raw`` (the content of ``source``) merged over its own included files, and
+        where each merged value was written (``origins`` holds ``raw``'s).
 
         ``owned`` names the variables an including file defines: they are its to
         set, so an included file's path that uses one is left for the merged value.
         """
         own = raw.pop(OVERRIDES_KEY, None)
+        own_origins = origins.pop_subtree((OVERRIDES_KEY,))
         entries = raw.pop(INCLUDE_KEY, None)
+        origins.drop((INCLUDE_KEY,), keep_root=False)
         if entries is None:
-            self._layer(own, source)
-            return raw
+            self._layer(own, own_origins, source)
+            return raw, origins
         if isinstance(entries, str):
             entries = [entries]
         if not isinstance(entries, list) or not all(isinstance(e, str) for e in entries):
             raise ValueError(f"{source}: include must be a file path or a list of paths")
         owned = owned | _variable_names(raw.get(VARS_KEY))
         merged: dict[str, Any] = {}
+        merged_origins = OriginIndex()
         for entry in entries:
             target = self._target(entry, source)
             if target in chain:
@@ -113,20 +132,42 @@ class IncludeResolver:
             except OSError as exc:
                 raise ValueError(f"{source}: cannot include {entry!r}: {exc.strerror}") from None
             self.included.append(target)
-            content = self._parse(text, target)
+            content, content_origins = self._parse(text, target)
             ConfigurationGraph().check(content)
             references = PathReferences(content.get(VARS_KEY), owned)
             parsed = IncludedPaths(target.parent, chain[0].parent, references).rebase(content)
-            included = self._resolve(parsed, target, (*chain, target), owned)
-            merged = ConfigMerge(str(target)).merge(merged, included)
-        self._layer(own, source)
-        return ConfigMerge(str(source)).merge(merged, raw)
+            included, included_origins = self._resolve(
+                parsed, content_origins, target, (*chain, target), owned
+            )
+            merged = self._merged(target, merged, merged_origins, included, included_origins)
+        self._layer(own, own_origins, source)
+        return self._merged(source, merged, merged_origins, raw, origins), merged_origins
 
-    def _layer(self, overrides: Any, source: Path) -> None:
+    @staticmethod
+    def _merged(
+        source: Path,
+        base: dict[str, Any],
+        base_origins: OriginIndex,
+        override: dict[str, Any],
+        override_origins: OriginIndex,
+    ) -> dict[str, Any]:
+        """``override`` (from ``source``) merged over ``base``; ``base_origins`` takes
+        ``override_origins`` in, an appended list's entries shifted past ``base``'s."""
+        shifts: dict[ConfigPath, int] = {
+            (section,): len(base[section])
+            for section in _CONCATENATED_SECTIONS
+            if isinstance(base.get(section), list) and isinstance(override.get(section), list)
+        }
+        merged = ConfigMerge(str(source)).merge(base, override)
+        base_origins.update(override_origins, shifts)
+        return merged
+
+    def _layer(self, overrides: Any, origins: OriginIndex, source: Path) -> None:
         """Keep one file's ``overrides`` as a layer marked with the file (relative to
-        the root configuration's directory when it can be)."""
+        the root configuration's directory when it can be), with their origins."""
         if overrides is None:
             return
+        self._override_origins.append(origins)
         if not isinstance(overrides, Mapping):
             self.override_layers.append(overrides)  # reported when the layers are read
             return
@@ -437,6 +478,47 @@ class _SpelledOut:
         )
 
 
+class ReferenceNotes:
+    """Notes, in an origin index, the values ``${vars.name}`` and ``${ENV}`` references
+    supply (scanned before substitution).
+
+    A substituted value keeps the place its reference was written, noted "via
+    vars.limit" or "via ${HOST}"; a value that is exactly a variable reaches the
+    variable's own definition for its parts (a list or mapping variable).
+    """
+
+    def __init__(self, origins: OriginIndex) -> None:
+        self.origins = origins
+
+    def scan(self, raw: Mapping[str, Any]) -> None:
+        """Note every reference in ``raw``; each shared part is scanned once."""
+        seen: set[int] = set()
+        stack: list[tuple[Any, ConfigPath]] = [(raw, ())]
+        while stack:
+            value, path = stack.pop()
+            if isinstance(value, str):
+                self._text(value, path)
+            elif isinstance(value, dict) and id(value) not in seen:
+                seen.add(id(value))
+                stack.extend((child, (*path, key)) for key, child in value.items())
+            elif isinstance(value, list) and id(value) not in seen:
+                seen.add(id(value))
+                stack.extend((child, (*path, index)) for index, child in enumerate(value))
+
+    def _text(self, text: str, path: ConfigPath) -> None:
+        if "${" not in text:
+            return
+        notes = [f"via vars.{name}" for name in _VAR_REFERENCE.findall(text)]
+        notes += ["via ${" + match.group(1) + "}" for match in ENV_REFERENCE.finditer(text)]
+        if not notes:
+            return
+        self.origins.annotate(path, ", ".join(dict.fromkeys(notes)))
+        whole = _VAR_REFERENCE.fullmatch(text)
+        if whole is not None:
+            name = whole.group(1)
+            self.origins.alias(path, (VARS_KEY, name), f"via vars.{name}")
+
+
 def _variable_names(variables: Any) -> frozenset[str]:
     """The names a file's ``vars`` mapping defines."""
     if not isinstance(variables, Mapping):
@@ -466,5 +548,6 @@ __all__ = [
     "IncludeResolver",
     "IncludedPaths",
     "PathReferences",
+    "ReferenceNotes",
     "VariableSubstitution",
 ]

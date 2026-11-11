@@ -16,8 +16,8 @@ from pydantic_core import InitErrorDetails
 from qavf.checks.across import AcrossExpansion
 from qavf.checks.legacy import reject_legacy
 from qavf.composition import VariableSubstitution
-from qavf.configuration import ConfigurationGraph
-from qavf.configuration import read_config_mapping as _read_config_mapping
+from qavf.configuration import ConfigurationGraph, read_config_document
+from qavf.origins import ORIGINS_CONTEXT, OriginIndex, OriginNotes, ReuseOrigins
 from qavf.settings import (
     DatasetSpec,
     QAVFSettings,
@@ -78,28 +78,40 @@ def _check_configured_auxiliary_inputs(config: object) -> None:
             )
 
 
-def _configuration(config: Configuration) -> tuple[dict[str, Any], Path | None]:
+def _configuration(
+    config: Configuration,
+) -> tuple[dict[str, Any], Path | None, OriginIndex | None]:
+    """The raw configuration, its file and where its values were written (when known)."""
     if config is None:
-        return {}, None
+        return {}, None, None
     if isinstance(config, QAVFSettings):
         _check_configured_auxiliary_inputs(config)
         copied = config.model_copy(deep=True)
         # Keep nested model field sets: omission remains meaningful for policies
         # and disabled plugin parameters, including mutated parameter mappings.
-        return {
-            name: getattr(copied, name)
-            for name in QAVFSettings.model_fields
-            if name != "source_path"
-        }, copied.source_path
+        return (
+            {
+                name: getattr(copied, name)
+                for name in QAVFSettings.model_fields
+                if name != "source_path"
+            },
+            copied.source_path,
+            config.origins,
+        )
     if isinstance(config, str | os.PathLike):
-        raw, path = _read_config_mapping(Path(config))
-        reject_legacy(raw, str(path))
-        _check_configured_auxiliary_inputs(raw)
-        return raw, path
+        document = read_config_document(Path(config))
+        raw, path = document.raw, document.source
+        try:
+            reject_legacy(raw, str(path))
+            _check_configured_auxiliary_inputs(raw)
+        except ValueError as exc:
+            OriginNotes(document.origins).attach(exc)
+            raise
+        return raw, path, document.origins
     if isinstance(config, Mapping):
         reject_legacy(config)
         _check_configured_auxiliary_inputs(config)
-        return dict(config), None
+        return dict(config), None, None
     raise TypeError("config must be settings, a configuration mapping, or a YAML/JSON path")
 
 
@@ -351,13 +363,38 @@ def prepare_configuration(
     ownership; loaders, frame interchange protocols and source readers are not
     invoked here.
     """
-    raw, source_path = _configuration(config)
+    raw, source_path, origins = _configuration(config)
+    try:
+        return _prepared_configuration(
+            data, raw, source_path, origins, schema=schema, config=config, resources=resources
+        )
+    except ValueError as exc:  # pydantic's ValidationError too
+        if origins is not None:
+            OriginNotes(origins).attach(exc)
+        raise
+
+
+def _prepared_configuration(
+    data: object,
+    raw: dict[str, Any],
+    source_path: Path | None,
+    origins: OriginIndex | None,
+    *,
+    schema: SchemaSpec | Mapping[str, Any] | None,
+    config: Configuration,
+    resources: ResourceLimits | None,
+) -> tuple[QAVFSettings, dict[str, object]]:
+    """:func:`prepare_configuration` once the configuration is read; ``origins``
+    (where its values were written) follows ``across`` and reaches the settings."""
     validate_config_mapping_keys(raw)
     graph = ConfigurationGraph()
     graph.check(raw)
     # Datasets copied ``across`` sources become their copies before any dataset is
     # validated or matched with an input (variables first: ``across`` may use them).
-    raw = AcrossExpansion.apply(VariableSubstitution.apply(raw))
+    substituted = VariableSubstitution.apply(raw)
+    raw = AcrossExpansion.apply(substituted)
+    if origins is not None:
+        ReuseOrigins(origins).across(substituted, raw)
     configured = raw.get("datasets", {})
     if not isinstance(configured, Mapping):
         raise TypeError("config.datasets must be a mapping of named dataset specifications")
@@ -405,7 +442,8 @@ def prepare_configuration(
         if not isinstance(engine, Mapping):
             raise TypeError("config.engine must be a mapping or EngineSettings")
         raw["engine"] = {**engine, **resources.engine_overrides()}
-    settings = QAVFSettings.model_validate(graph.plain(raw))
+    context = {ORIGINS_CONTEXT: origins} if origins is not None else None
+    settings = QAVFSettings.model_validate(graph.plain(raw), context=context)
     if source_path is not None:
         settings.source_path = source_path
     for spec in settings.datasets.values():

@@ -200,17 +200,26 @@ def exception_details(exc: BaseException, *, location: bool = True) -> str:
     values and arbitrary validator contexts. Only a traceback's final filename and
     line number are included (none with ``location=False``, for user-facing usage
     and configuration errors); traceback source code and locals are never rendered.
+
+    An error raised while loading a configuration file carries where its values
+    were written (:class:`qavf.origins.OriginNotes`): each problem then names the
+    configuration file and line it is about, ``datasets.x.schema.min_rowz
+    (base.yaml:4): ...``.
     """
     from pydantic import ValidationError
 
+    from qavf.origins import OriginNotes
+
+    origins = OriginNotes.of(exc)
     if isinstance(exc, ValidationError):
         details = "; ".join(
-            f"{'.'.join(str(part) for part in error['loc']) or '<root>'}: "
+            f"{'.'.join(str(part) for part in error['loc']) or '<root>'}"
+            f"{origins.suffix(error['loc'], error['msg']) if origins else ''}: "
             f"{error['msg']} ({error['type']})"
             for error in exc.errors(include_input=False, include_context=False, include_url=False)
         )
     else:
-        details = str(exc)
+        details = str(exc) + (origins.suffix((), str(exc)) if origins else "")
     trace = exc.__traceback__ if location else None
     while trace is not None and trace.tb_next is not None:
         trace = trace.tb_next
