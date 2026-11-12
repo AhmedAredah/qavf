@@ -25,11 +25,23 @@ REPLACE_TOLERANCE_S = 2.0
 _FIRST_DELAY_S = 0.01
 _LONGEST_DELAY_S = 0.2
 
-# The module's own handles on the system calls, so tests replace them here
-# without affecting every other thread of the process.
-_rename = os.replace
-_clock = time.monotonic
-_pause = time.sleep
+
+def _rename(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+    """``os.replace``, looked up at each call.
+
+    The retry's own handle: tests replace this function to simulate a held target
+    without affecting renames made by other threads, while a test that patches
+    ``os.replace`` itself still reaches every QAVF rename.
+    """
+    os.replace(source, target)
+
+
+def _clock() -> float:
+    return time.monotonic()
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(seconds)
 
 
 class HeldTargetRetry:
