@@ -12,6 +12,7 @@ import jsonschema
 import pytest
 import yaml
 
+import qavf
 from qavf.cli_core import config_json_schema as native_json_schema
 from qavf.engine.runner import build_source_registry
 from qavf.scaffold import config_json_schema
@@ -83,7 +84,7 @@ def test_ranges_are_advertised_only_on_list_settings(check, accepted):
 
 
 def _documents() -> list[tuple[str, str]]:
-    found = [(str(p.relative_to(ROOT)), p.read_text(encoding="utf-8")) for p in _files()]
+    found = [(_name(p), p.read_text(encoding="utf-8")) for p in _files()]
     documents = []
     for name, text in found:
         if name.endswith((".yaml", ".yml")):
@@ -94,9 +95,18 @@ def _documents() -> list[tuple[str, str]]:
     return documents
 
 
+def _name(path: Path) -> str:
+    """The path relative to the checkout, or ``qavf/<file>`` for a packaged file."""
+    if path.is_relative_to(ROOT):
+        return str(path.relative_to(ROOT))
+    return f"qavf/{path.name}"
+
+
 def _files() -> list[Path]:
     files = sorted((ROOT / "config").glob("*.yaml"))
-    files.append(ROOT / "qavf" / "demo_config.yaml")
+    # The demo configuration ships inside the package: read it from the installed
+    # package, since installed-wheel verification has no source tree.
+    files.append(Path(qavf.__file__).resolve().parent / "demo_config.yaml")
     files.append(ROOT / "README.md")
     # The plugin guide's examples name source types and checks of plugins that
     # are not installed here.
