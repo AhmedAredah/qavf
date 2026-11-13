@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 
 from qavf.bounded_batches import BoundedBatches
+from qavf.engine.admission import AdmissionPolicy
 from qavf.engine.connections import merge_connection_binding, merge_secret_bindings
 from qavf.engine.resources import ResourceLimitError
 from qavf.engine.snapshot_staging import MemberPreparationError, SnapshotStage
@@ -244,8 +245,7 @@ class SnapshotCoordinator:
     @staticmethod
     def admit_rows(name: str, budget: int | None, rows: int) -> None:
         """Refuse a member past its row budget (``rows`` read so far)."""
-        if budget is not None and rows > budget:
-            raise SourceError(f"dataset {name!r} has more than {budget:,} rows (row_budget)")
+        AdmissionPolicy.admit_rows(name, budget, rows)
 
     def _publish_metadata(self, connection: str, members: list[str], stage: SnapshotStage) -> None:
         """Record a snapshot attempt's member failures and shapes at publication."""

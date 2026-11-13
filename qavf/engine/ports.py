@@ -278,6 +278,11 @@ class RunReporting(Protocol):
 
 
 if TYPE_CHECKING:
+    from qavf.engine.admission import AdmissionPolicy
+
+    def _admission_is_the_evidence_policy(policy: AdmissionPolicy) -> EvidencePolicy:
+        """Checked by mypy only: the facade's evidence bounds come from its policy."""
+        return policy
 
     def _facade_satisfies_every_port(
         context: DataContext,

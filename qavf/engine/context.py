@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING, Any
 import duckdb
 import polars as pl
 
-from qavf.duckdb_results import arrow_table, bind_relation, first_row, query_frame
+from qavf.duckdb_results import arrow_table, bind_relation, query_frame
+from qavf.engine.admission import AdmissionPolicy
 from qavf.engine.capabilities import ReaderCapabilities
 from qavf.engine.catalog import DatasetCatalog
 from qavf.engine.cleanup import attempt_cleanup, raise_cleanup_errors
@@ -27,7 +28,7 @@ from qavf.engine.connections import (
     merge_secret_bindings,
 )
 from qavf.engine.relations import bind_scan
-from qavf.engine.resources import ResourceLimitError, RunResources, retained_size
+from qavf.engine.resources import RunResources
 from qavf.engine.session import Invocation, KeyedLocks
 from qavf.engine.snapshot_coordinator import SnapshotCoordinator
 from qavf.engine.source_execution import LatestAttempt, SourceExecution
@@ -231,8 +232,9 @@ class DataContext:
             self.assertions: list[SqlAssertion] = list(assertions)
             self._source_registry = source_registry
             self._hash_inputs = hash_inputs
-            self.evidence_limit = evidence_limit
-            self.evidence_bytes = evidence_bytes
+            self._admission = AdmissionPolicy(
+                self._resources, self._catalog.specs, evidence_limit, evidence_bytes
+            )
             self._frames = self._resources.frames
             self._pandas = self._resources.pandas
             self._memo = self._resources.memo
@@ -924,12 +926,7 @@ class DataContext:
                 plan = plans[name]
                 relation = bind_scan(con, self._catalog.sources[name], plan)
                 budget = getattr(self._catalog.sources[name].params, "row_budget", None)
-                if budget is not None:
-                    count_row = first_row(relation.limit(budget + 1).aggregate("count(*)"))
-                    if count_row is not None and count_row[0] > budget:
-                        raise SourceError(
-                            f"dataset {name!r} has more than {budget:,} rows (row_budget)"
-                        )
+                self._admission.admit_relation(name, relation, budget)
                 empty = relation.limit(0).pl()
                 prepared = self._catalog.prepare(name, empty)
                 check_sql_columns(name, prepared.columns)
@@ -1144,21 +1141,30 @@ class DataContext:
         with self._sql_connections.operation():
             yield self._sql_connection(query, datasets, normalize_missing=normalize_missing)
 
+    @property
+    def evidence_limit(self) -> int:
+        """Offending records a rule keeps per result (``engine.max_affected_records``)."""
+        return self._admission.evidence_limit
+
+    @evidence_limit.setter
+    def evidence_limit(self, value: int) -> None:
+        self._admission.evidence_limit = value
+
+    @property
+    def evidence_bytes(self) -> int:
+        """Bytes of evidence a rule keeps per result (``engine.max_evidence_bytes``)."""
+        return self._admission.evidence_bytes
+
+    @evidence_bytes.setter
+    def evidence_bytes(self, value: int) -> None:
+        self._admission.evidence_bytes = value
+
     def _check_materialization(self, name: str, frame: pl.DataFrame) -> None:
-        if self._resources.memory_bytes is None:
-            return
-        self._check_retained_bytes(name, retained_size(frame))
+        self._admission.check_materialization(name, frame)
 
     def _check_retained_bytes(self, name: str, size: int) -> None:
         """Admit a measured retained result, including incrementally built output."""
-        target = self._resources.memory_bytes
-        if target is None:
-            return
-        if size > target:
-            raise ResourceLimitError(
-                f"{name} materialized {size:,} bytes, exceeding memory_budget_bytes={target:,}; "
-                "use a projected scan or increase the target"
-            )
+        self._admission.check_retained_bytes(name, size)
 
     @property
     def _active(self) -> set[int]:
@@ -1530,52 +1536,38 @@ class DataContext:
         self._local.load_seconds = self.thread_load_seconds() + seconds
 
     def _check_row_budget(self, name: str, frame: pl.DataFrame) -> None:
-        spec = self.specs.get(name)
-        budget = spec.effective_load_policy().row_budget if spec is not None else None
-        if budget is not None and frame.height > budget:
-            raise SourceError(f"dataset {name!r} has more than {budget:,} rows (row_budget)")
+        self._admission.check_rows(name, frame)
 
     def _check_lazy_budget(self, name: str) -> None:
         if name in self._frames:
             # Eager materialization already checked the complete source result.
             # scan() can legitimately return that frame's lazy wrapper.
             return
-        spec = self.specs.get(name)
         source = self._catalog.sources.get(name)
         if source is not None and source.batch_schema() is not None:
             self._batch_observation(name, source)
             return
-        budget = (
-            source.params.row_budget
-            if source is not None
-            else (spec.effective_load_policy().row_budget if spec is not None else None)
-        )
+        budget = self._admission.source_row_budget(name, source)
         if budget is None or name in self._budget_observations:
             return
         with self._operations.guard(), self._key_lock(("row_budget", name)):
             if name in self._budget_observations:
                 return
-            from qavf.engine.observation import _lazy
-
-            attempts: list[Observation] = []
-
-            def admit() -> Observation:
-                for previous in attempts:
-                    previous.close()
-                attempts.clear()
-                plan = self._prepare_lazy(name, self._lazy_snapshot(name))
-                observed = _lazy(self, plan, None, budget)
-                attempts.append(observed)
-                return observed
-
+            attempts = LatestAttempt(functools.partial(self._budget_observation, name, budget))
             try:
-                observed = self._source_execution.run([name], admit)
+                observed = self._source_execution.run([name], attempts)
             except BaseException:
-                for previous in attempts:
-                    previous.close()
+                attempts.close()
                 raise
             with self._lock:
                 self._budget_observations[name] = observed
+
+    def _budget_observation(self, name: str, budget: int) -> Observation:
+        """One attempt at observing a lazy dataset within its row budget."""
+        from qavf.engine.observation import _lazy
+
+        plan = self._prepare_lazy(name, self._lazy_snapshot(name))
+        return _lazy(self, plan, None, budget)
 
     def verify_inputs(self) -> dict[str, str]:
         """Final consistency check for every source used by any execution mode."""

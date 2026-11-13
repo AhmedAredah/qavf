@@ -176,3 +176,24 @@ def _run_one_rule(ctx, started, release):
     started.set()
     release.wait(5)
     ctx.end_rule()
+
+
+def test_evidence_and_budgets_live_in_the_admission_policy():
+    import pytest
+
+    from qavf.engine.admission import AdmissionPolicy
+    from qavf.engine.resources import ResourceLimitError
+    from qavf.sources.base import SourceError
+
+    with DataContext(
+        frames={"d": pl.DataFrame({"x": [1]})}, evidence_limit=3, memory_budget_bytes=64
+    ) as ctx:
+        policy = ctx._admission
+        assert isinstance(policy, AdmissionPolicy)
+        assert (ctx.evidence_limit, policy.evidence_limit) == (3, 3)
+        ctx.evidence_limit = 4
+        assert policy.evidence_limit == 4
+        with pytest.raises(ResourceLimitError, match="memory_budget_bytes=64"):
+            ctx.check_materialization("big", pl.DataFrame({"x": list(range(100))}))
+    with pytest.raises(SourceError, match=r"more than 2 rows \(row_budget\)"):
+        AdmissionPolicy.admit_rows("d", 2, 3)
