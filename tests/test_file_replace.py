@@ -42,9 +42,19 @@ class NoSleep:
         self.delays.append(seconds)
 
 
+def _WINDOWS() -> bool:
+    return True
+
+
+def _ELSEWHERE() -> bool:
+    return False
+
+
 def _held(monkeypatch: pytest.MonkeyPatch, failures: int, platform: str = "win32") -> HeldTarget:
     held = HeldTarget(failures)
-    monkeypatch.setattr(file_replace.sys, "platform", platform)
+    monkeypatch.setattr(
+        file_replace, "_on_windows", _WINDOWS if platform == "win32" else _ELSEWHERE
+    )
     monkeypatch.setattr(file_replace, "_rename", held)
     return held
 
@@ -84,7 +94,7 @@ def test_a_held_target_fails_at_once_elsewhere(tmp_path, monkeypatch) -> None:
 
 
 def test_other_errors_are_not_retried(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(file_replace.sys, "platform", "win32")
+    monkeypatch.setattr(file_replace, "_on_windows", _WINDOWS)
     with pytest.raises(FileNotFoundError):
         replace_file(tmp_path / "missing", tmp_path / "old")
 

@@ -36,6 +36,12 @@ def _rename(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> N
     os.replace(source, target)
 
 
+def _on_windows() -> bool:
+    """Whether renames may meet a briefly held target (tests patch this, never
+    ``sys.platform``, which every other module of the process also reads)."""
+    return sys.platform == "win32"
+
+
 def _clock() -> float:
     return time.monotonic()
 
@@ -52,7 +58,7 @@ class HeldTargetRetry:
     """
 
     def __init__(self, tolerance_s: float = REPLACE_TOLERANCE_S) -> None:
-        self.tolerance_s = tolerance_s if sys.platform == "win32" else 0.0
+        self.tolerance_s = tolerance_s if _on_windows() else 0.0
 
     def replace(self, source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
         """``os.replace(source, target)``, retried while the target is briefly held."""

@@ -138,6 +138,10 @@ def _shared_replace() -> ModuleType:
     the source tree, also where QAVF itself is not installed, and share its one
     implementation of a Windows-tolerant atomic replace."""
     location = Path(__file__).resolve().parents[2] / "qavf" / "file_replace.py"
+    if not location.is_file():
+        # Installed-wheel verification copies the scripts without the source
+        # package; the installed QAVF then provides the same module.
+        return importlib.import_module("qavf.file_replace")
     spec = importlib.util.spec_from_file_location("_qavf_file_replace", location)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {location}")

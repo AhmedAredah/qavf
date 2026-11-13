@@ -467,6 +467,18 @@ class _HeldTarget:
         self.real(source, target)
 
 
+class _PlatformFlag:
+    def __init__(self, windows: bool) -> None:
+        self.windows = windows
+
+    def __call__(self) -> bool:
+        return self.windows
+
+
+def _windows_flag(platform: str) -> _PlatformFlag:
+    return _PlatformFlag(platform == "win32")
+
+
 @pytest.mark.parametrize("platform", ["win32", "linux"])
 def test_evidence_records_survive_a_briefly_held_target(tmp_path, monkeypatch, platform):
     """A scanner briefly holding a just-written record must not fail the gate on Windows."""
@@ -475,7 +487,7 @@ def test_evidence_records_survive_a_briefly_held_target(tmp_path, monkeypatch, p
     record = tmp_path / "evidence.json"
     provenance.write_json(record, {"status": "running"})
     held = _HeldTarget(failures=3)
-    monkeypatch.setattr(provenance.sys, "platform", platform)
+    monkeypatch.setattr(provenance._REPLACE, "_on_windows", _windows_flag(platform))
     monkeypatch.setattr(provenance._REPLACE, "_rename", held)
     if platform == "win32":
         provenance.write_json(record, {"status": "failed"})

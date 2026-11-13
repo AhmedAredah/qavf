@@ -72,7 +72,8 @@ def assert_exact_contract(report: QAReport, *, clean: bool) -> None:
         assert duplicate.metrics["surplus_rows"] == 1
     assert outcomes(report) == outcomes(reference)
     assert report.exit_code() == (0 if clean else 1)
-    assert all(result.status in {Status.PASS, Status.FAIL} for result in report.results)
+    # Rules with nothing configured (no foreign keys, no N/A groups) are SKIPPED.
+    assert all(result.status is not Status.ERROR for result in report.results)
 
 
 def assert_unavailable(report: QAReport) -> None:
