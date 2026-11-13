@@ -25,9 +25,10 @@ from qavf.engine.admission import AdmissionPolicy
 from qavf.engine.connections import merge_connection_binding, merge_secret_bindings
 from qavf.engine.resources import ResourceLimitError
 from qavf.engine.snapshot_staging import MemberPreparationError, SnapshotStage
+from qavf.engine.snapshot_transaction import SnapshotTransaction
 from qavf.engine.source_execution import LatestAttempt
 from qavf.settings import ConnectionSpec, SecretSpec
-from qavf.sources.base import SourceError, SourceIntegrityError, SourceNotFoundError
+from qavf.sources.base import SourceError
 from qavf.sources.collection import collect_result
 from qavf.sources.errors import redacted_error
 from qavf.sources.native import read_error
@@ -37,31 +38,6 @@ if TYPE_CHECKING:
     from qavf.engine.connections import SqlConnections
     from qavf.engine.resources import RunResources
     from qavf.sources.execution import SourceOperations
-
-
-def _transaction_usable(con: Any) -> bool:
-    """Whether a snapshot transaction survived a failed member read."""
-    try:
-        con.execute("SELECT 1").fetchall()
-    except duckdb.Error:
-        return False
-    return True
-
-
-_PLANNING_ERRORS = (duckdb.BinderException, duckdb.CatalogException, duckdb.ParserException)
-
-
-def _failed_before_execution(exc: BaseException) -> bool:
-    """Whether a read failed while planning (binding, catalog lookup, parsing),
-    so no member data was produced or consumed."""
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        if isinstance(current, (*_PLANNING_ERRORS, SourceNotFoundError)):
-            return True
-        seen.add(id(current))
-        current = current.__cause__ or current.__context__
-    return False
 
 
 class SnapshotCoordinator:
@@ -163,61 +139,29 @@ class SnapshotCoordinator:
         for name in members:
             merge_connection_binding(bindings, connection, self._catalog.sources[name].env)
             merge_secret_bindings(secrets, self._catalog.sources[name].env)
-        failures: dict[str, SourceError] = {}
-        pending = list(members)
         with self._connections.temporary([connection], bindings, secrets) as con:
-            # A permanent member failure that aborts the transaction (DuckDB 2.0
-            # aborts on binder errors) restarts the read without that member, so
-            # every published member still comes from one transaction.
-            while True:
-                stage = SnapshotStage(
-                    self._frames.new_spill,
-                    self._catalog.prepare,
-                    datetime.now(UTC),
-                    self.memory_bytes(),
-                )
-                stage.failures = failures
-                aborted = False
-                try:
-                    con.execute("BEGIN TRANSACTION")
-                    for name in pending:
-                        self._check_cancelled()
-                        try:
-                            self.stage_member(stage, con, name)
-                        except (ResourceLimitError, MemberPreparationError):
-                            raise
-                        except Exception as exc:
-                            error = exc if isinstance(exc, SourceError) else redacted_error(exc)
-                            if isinstance(error, SourceIntegrityError) or error.retryable:
-                                raise error from None
-                            failures[name] = redacted_error(
-                                error,
-                                SourceNotFoundError
-                                if isinstance(error, SourceNotFoundError)
-                                else SourceError,
-                            )
-                            if not _transaction_usable(con):
-                                # DuckDB 2.0 aborts on binder errors too; only a
-                                # failure before execution may restart without it.
-                                if not _failed_before_execution(exc):
-                                    raise failures.pop(name) from None
-                                aborted = True
-                                break
-                            continue
-                    if not aborted:
-                        con.execute("COMMIT")
-                        return stage
-                except BaseException as exc:
-                    with contextlib.suppress(duckdb.Error):
-                        con.rollback()
-                    stage.close()
-                    if isinstance(exc, MemberPreparationError):
-                        raise exc.error from None
-                    raise
-                with contextlib.suppress(duckdb.Error):
-                    con.rollback()
-                stage.close()
-                pending = [name for name in pending if name not in failures]
+            transaction = SnapshotTransaction(
+                con,
+                self.open_stage,
+                self.stage_member,
+                self._check_cancelled,
+                fatal=(ResourceLimitError, MemberPreparationError),
+            )
+            try:
+                return transaction.read(members)
+            except MemberPreparationError as exc:
+                raise exc.error from None
+
+    def open_stage(self, failures: dict[str, SourceError]) -> SnapshotStage:
+        """An empty stage for one attempt, recording member failures in ``failures``."""
+        stage = SnapshotStage(
+            self._frames.new_spill,
+            self._catalog.prepare,
+            datetime.now(UTC),
+            self.memory_bytes(),
+        )
+        stage.failures = failures
+        return stage
 
     def stage_member(self, stage: SnapshotStage, con: Any, name: str) -> None:
         """Stream one member inside the snapshot transaction, admitting its row budget."""

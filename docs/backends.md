@@ -81,10 +81,13 @@ generated.
 - Dataset views (`datasets.<d>.views`) are SQL views over the loaded dataset,
   `SELECT <columns or *> FROM "<d>" WHERE <where>`, so `sql` and `expression`
   checks read `"<d>.<view>"` with the same rows and columns as on the full backend.
-- `connections.<name>.snapshot: true` is refused before any input is read, with a
-  capability error: the native reader has no shared transaction, so related tables
-  could reflect different committed states. Select `backend="polars"`, which reads
-  every dataset of the connection in one transaction.
+- `connections.<name>.snapshot: true` reads every dataset of the connection in one
+  transaction on both backends. The native backend copies each member into its own
+  owned temporary table inside that transaction, plans the members as one
+  dependency component, and follows the same rules as the Polars backend: a
+  transient failure retries the whole group, a permanent failure makes only that
+  member unavailable, and a failed or cancelled attempt rolls back and drops what
+  it copied. The row budget stays exact per member.
 - A cancelled run starts no further source attempt, and a retry delay ends as soon
   as the run is cancelled.
 

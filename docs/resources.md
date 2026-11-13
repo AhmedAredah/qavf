@@ -285,10 +285,11 @@ staging the failing rows. Numbers vary by machine; run the script to compare a c
 
 ### Streamed snapshots and borrowed queries
 
-A coherent database snapshot (`connections.<name>.snapshot: true`, Polars backend)
-reads every member inside one transaction. Each member streams as bounded Arrow
-batches (65,536 rows), and nothing is published until the transaction commits.
-Staging is adaptive:
+A coherent database snapshot (`connections.<name>.snapshot: true`) reads every
+member inside one transaction (the native backend copies each member into an owned
+temporary table inside it). On the Polars backend each member streams as bounded
+Arrow batches (65,536 rows), and nothing is published until the transaction
+commits. Staging is adaptive:
 
 - While the group's running decoded size stays within the memory allowance (the
   frame cache limit, and `memory_budget_bytes` when set), members are kept in

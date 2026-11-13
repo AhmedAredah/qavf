@@ -59,6 +59,20 @@ class LoadedDataset:
     """Counts the rows of each file of a multi-file read, when evidence needs it."""
 
 
+@dataclass(frozen=True)
+class PreparedInput:
+    """One input ready to read: normalized, with its load and retry policies."""
+
+    name: str
+    value: Any
+    spec: Any
+    policy: Any
+    """The effective :class:`~qavf.settings.SourcePolicy`."""
+    retry: RetryPolicy
+    identity: Any = None
+    """The input's pinned identity (local files), else ``None``."""
+
+
 def evidence_row_name(columns: Sequence[str]) -> str:
     """The row-position column, named ``_row`` as evidence documents it.
 
@@ -86,12 +100,47 @@ class InputReader:
         if self.control is not None and self.control.cancelled:
             raise SourceError(CANCELLED_MESSAGE)
 
-    def _pause(self, seconds):
+    def check_cancelled(self):
+        """Raise once the run is cancelled."""
+        self._check_cancelled()
+
+    def pause(self, seconds):
         """Wait before a retry, returning as soon as the run is cancelled."""
         signal = None if self.control is None else self.control.token
         RetryWait(signal, self._check_cancelled)(seconds)
 
     def load(self, name, value, spec) -> LoadedDataset:
+        prepared = self.prepare(name, value, spec)
+        value, policy, retry = prepared.value, prepared.policy, prepared.retry
+        for attempt in range(retry.retries + 1):
+            self._check_cancelled()
+            owned: list[tuple[str, str]] = []
+            attempt_identity = prepared.identity
+            try:
+                current = value
+                if isinstance(value, Loader):
+                    current = self._normalize(value.function(**value.kwargs), spec)
+                    attempt_identity = self._identity(current)
+                loaded = self._load_once(name, current, spec, attempt_identity, owned, policy)
+                if attempt_identity is not None:
+                    attempt_identity.verify()
+                    self._identities[loaded.table] = attempt_identity
+                return loaded
+            except BaseException as exc:
+                self._drop(owned)
+                if isinstance(exc, duckdb.Error):
+                    exc = redacted_error(exc)
+                if attempt_identity is not None:
+                    verify_postcondition(attempt_identity.verify, exc)
+                pause = retry.pause(exc, attempt)
+                if pause is None:
+                    raise exc from None
+                self.pause(pause)
+        raise AssertionError("unreachable retry state")
+
+    def prepare(self, name, value, spec) -> PreparedInput:
+        """Normalize ``value`` (attaching a named connection it reads) and settle its
+        load and retry policies, without reading it."""
         from qavf.settings import SourcePolicy
 
         source_policy = (
@@ -113,31 +162,18 @@ class InputReader:
             safe=isinstance(value, File | Query)
             or (isinstance(value, Loader | BatchSource) and value.replayable and value.retry_safe),
         )
-        for attempt in range(retry.retries + 1):
-            self._check_cancelled()
-            owned: list[tuple[str, str]] = []
-            attempt_identity = identity
-            try:
-                current = value
-                if isinstance(value, Loader):
-                    current = self._normalize(value.function(**value.kwargs), spec)
-                    attempt_identity = self._identity(current)
-                loaded = self._load_once(name, current, spec, attempt_identity, owned, policy)
-                if attempt_identity is not None:
-                    attempt_identity.verify()
-                    self._identities[loaded.table] = attempt_identity
-                return loaded
-            except BaseException as exc:
-                self._drop(owned)
-                if isinstance(exc, duckdb.Error):
-                    exc = redacted_error(exc)
-                if attempt_identity is not None:
-                    verify_postcondition(attempt_identity.verify, exc)
-                pause = retry.pause(exc, attempt)
-                if pause is None:
-                    raise exc from None
-                self._pause(pause)
-        raise AssertionError("unreachable retry state")
+        return PreparedInput(name, value, spec, policy, retry, identity)
+
+    def read(self, prepared, owned) -> LoadedDataset:
+        """One attempt at reading a prepared query input into an owned table, recording
+        what it creates in ``owned`` (the caller drops it on failure)."""
+        return self._load_once(
+            prepared.name, prepared.value, prepared.spec, None, owned, prepared.policy
+        )
+
+    def drop(self, owned):
+        """Drop owned relations of a failed or unused read."""
+        self._drop(owned)
 
     def _identity(self, value):
         if isinstance(value, File) and not is_remote(os.fspath(value.path)):

@@ -928,13 +928,6 @@ def test_backends_agree_on_included_files_and_vars(tmp_path):
     assert {r.item_name for r in native_report.results_for("INP-007")} == {"a over 3"}
 
 
-class _NoReads:
-    """Stands in for the native input reader: constructing it means a read began."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        raise AssertionError("the native backend began reading inputs")
-
-
 def _snapshot_config(directory: Path) -> dict[str, Any]:
     import duckdb
 
@@ -955,18 +948,21 @@ def _snapshot_config(directory: Path) -> dict[str, Any]:
     }
 
 
-def test_native_backend_refuses_a_snapshot_it_cannot_keep(tmp_path, monkeypatch):
-    """EP-01: snapshot: true is refused before any read, never silently dropped."""
-    from qavf.optional import OptionalDependencyError
-
+def test_backends_read_a_snapshot_connection_in_one_transaction(tmp_path):
+    """EP-01: both backends keep snapshot: true, with identical results and notes."""
     config = _snapshot_config(tmp_path)
-    monkeypatch.setattr("qavf.core.runner.InputReader", _NoReads)
-    with pytest.raises(OptionalDependencyError, match=r"connections.live.snapshot.*polars"):
-        validate(config=config, backend="duckdb")
-    report = validate(config=config, backend="polars")
-    assert report.verdict() == "passed"
-    notes = {dataset.name: dataset.notes.get("snapshot") for dataset in report.metadata.datasets}
-    assert {note["connection"] for note in notes.values()} == {"live"}
+    native_report = validate(config=config, backend="duckdb")
+    full_report = validate(config=config, backend="polars")
+    problems = _differences(_normalized(native_report), _normalized(full_report))
+    assert not problems, "\n".join(problems)
+    for report in (native_report, full_report):
+        assert report.verdict() == "passed"
+        datasets = report.metadata.datasets
+        notes = [dataset.notes["snapshot"] for dataset in datasets]
+        assert [(note["connection"], note["datasets"]) for note in notes] == [
+            ("live", ["a", "b"])
+        ] * 2
+        assert len({dataset.loaded_at for dataset in datasets}) == 1
 
 
 def test_backends_agree_on_overrides(tmp_path):

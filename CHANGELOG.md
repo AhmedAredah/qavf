@@ -40,7 +40,7 @@ configuration once with `qavf migrate old.yaml -o new.yaml`; old reports still l
 ### Fixed
 
 - Reports no longer overwrite baselines, zone layers or crosswalks.
-- Native backend refuses `snapshot: true` instead of ignoring it.
+- The native backend supports `snapshot: true` (it had ignored it).
 - Comparison `rtol`/`atol` resolve independently; misspelled comparison columns are errors.
 - Wide decimals, nanosecond crosswalk ids and boolean counts are handled correctly.
 - File replacement on Windows retries when a scanner holds the file.

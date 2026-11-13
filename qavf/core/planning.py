@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from qavf.core.snapshots import snapshot_groups
 from qavf.sql_dependencies import PredicateDependencies
 
 
@@ -110,6 +111,7 @@ class _NativePlanner:
         self.names = list(settings.datasets)
         self.reads = PredicateDependencies(self.names)
         self.source_dependencies = _source_dependencies(self.names, inputs or {})
+        self.snapshots = snapshot_groups(settings, inputs or {})
         self.ordered = functools.partial(_dependency_order, self.names, self.source_dependencies)
 
     def plan(self):
@@ -169,6 +171,11 @@ class _NativePlanner:
             projections[parent] = None
             reasons.setdefault(parent, why)
             parents.add(parent)
+        # A snapshot connection's datasets are read in one transaction: one component.
+        for members in self.snapshots.values():
+            for name in members[1:]:
+                edges[members[0]].add(name)
+                edges[name].add(members[0])
         return NativePlan(projections, self._groups(edges), frozenset(parents), reasons)
 
     def _fallback(self):

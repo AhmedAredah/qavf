@@ -20,6 +20,7 @@ from qavf.core.checks import DatasetChecks
 from qavf.core.configuration import prepare
 from qavf.core.evidence import FileRows
 from qavf.core.results import ResultCollector
+from qavf.core.snapshots import NativeSnapshots
 from qavf.core.sources import InputReader
 from qavf.core.views import NativeViews
 from qavf.engine.severity import Severity, Status
@@ -222,6 +223,7 @@ class NativeRunner:
         self.unavailable = {}
         self.timings = {}
         self.views = None
+        self.snapshots: NativeSnapshots | None = None
 
     def _stage(self, out, name, rule_ids, execute):
         from qavf.core.execution import Deadline
@@ -300,7 +302,7 @@ class NativeRunner:
                 continue
             before = perf_counter()
             try:
-                loaded = reader.load(name, value, spec)
+                loaded = self._load(reader, name, value, spec)
                 self.loaded.append(loaded)
                 metadata = loaded.metadata
                 self.datasets.append(
@@ -399,7 +401,15 @@ class NativeRunner:
                 ),
             )
             self._stage(out, name, ("INP-006",), executor.expressions)
+        if self.snapshots is not None:
+            self.snapshots.release_untaken(names)
         return checks
+
+    def _load(self, reader, name, value, spec):
+        """Read ``name``: with its snapshot group when it reads through one."""
+        if self.snapshots is not None and self.snapshots.connection(name) is not None:
+            return self.snapshots.load(name)
+        return reader.load(name, value, spec)
 
     def _assertions(self, out):
         if not out.enabled("INP-007"):
@@ -551,6 +561,7 @@ class NativeRunner:
                 query_resolver=sources.resolve,
                 control=self.control,
             )
+            self.snapshots = NativeSnapshots(reader, settings, self.inputs)
             # SQL with unproven reads may query any loaded dataset: keep them all.
             query_inputs = bool(plan.fallback)
             parents = {

@@ -122,7 +122,9 @@ _BACKENDS = {
             ),
             Capability("max_spill_files", False),
             Capability(
-                "connection_snapshots", False, "Refused before reading; use the Polars backend."
+                "connection_snapshots",
+                True,
+                "One transaction per connection, copied into owned temporary tables.",
             ),
             Capability("plugins", False),
         ),

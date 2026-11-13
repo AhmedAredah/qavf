@@ -56,11 +56,9 @@ class SQLSource[P: SourceParams](DataSource[P]):
         return relation(con, budgeted(self._sql(), self.params.row_budget))
 
     def snapshot_connection(self) -> str | None:
-        attached = self._attachments()
-        if len(attached) != 1:
-            return None
-        spec = self.env.connections.get(attached[0])
-        return attached[0] if spec is not None and spec.snapshot else None
+        from qavf.engine.snapshot_transaction import snapshot_connection
+
+        return snapshot_connection(self._attachments(), self.env.connections)
 
 
 class QuerySource(SQLSource[QueryParams]):

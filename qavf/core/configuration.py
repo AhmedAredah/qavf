@@ -112,18 +112,6 @@ def _capabilities(settings):
     plugins = settings.plugins
     if plugins.modules or plugins.paths or plugins.required or plugins.packages != ["qavf.rules"]:
         unsupported("custom rule/source plugins")
-    for name, spec in settings.datasets.items():
-        source = spec.source_config() or {}
-        connection = source.get("connection")
-        if isinstance(connection, str) and getattr(
-            settings.connections.get(connection), "snapshot", False
-        ):
-            # The native reader has no shared transaction: related tables could come
-            # from different committed states, so the promise is refused, not dropped.
-            unsupported(
-                f"connections.{connection}.snapshot (dataset {name!r} read in one "
-                "transaction with the connection's other datasets)"
-            )
     engine = settings.engine
     if "max_spill_files" in engine.model_fields_set:
         unsupported("an explicit spill-file count limit")
