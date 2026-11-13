@@ -106,6 +106,7 @@ markers = [
     "regression: compares generated outputs with stored baselines",
     "assurance: generated, differential, and failure-boundary contracts",
     "integration: requires explicitly configured live services",
+    "real_disk: measures the machine's real free disk space instead of a fixed figure",
 ]
 xfail_strict = true
 

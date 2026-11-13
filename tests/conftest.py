@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import polars as pl
 import pytest
 
@@ -37,3 +39,23 @@ def small() -> dict[str, pl.DataFrame]:
             }
         ),
     }
+
+
+_STEADY_FREE_DISK = 512 * 1024**3
+
+
+def _steady_free_disk(_directory: Path) -> int:
+    return _STEADY_FREE_DISK
+
+
+@pytest.fixture(autouse=True)
+def steady_free_disk(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give automatic spill planning the same free disk on every machine.
+
+    Automatic spill budgets are sized from free disk space, so a nearly full test
+    machine made otherwise deterministic tests fail. Tests that measure the real
+    probe opt out with ``@pytest.mark.real_disk``; tests that need another figure
+    patch ``qavf.resource_plan._free_disk_bytes`` themselves.
+    """
+    if request.node.get_closest_marker("real_disk") is None:
+        monkeypatch.setattr("qavf.resource_plan._free_disk_bytes", _steady_free_disk)

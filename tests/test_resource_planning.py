@@ -252,6 +252,7 @@ def test_automatic_spill_is_capped_by_free_disk(monkeypatch):
     assert plan.spill_bytes == _scarce_disk(Path()) * 4 // 5
 
 
+@pytest.mark.real_disk
 def test_free_disk_probe_measures_nearest_existing_ancestor(tmp_path):
     from qavf.resource_plan import _free_disk_bytes
 
