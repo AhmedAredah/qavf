@@ -287,13 +287,25 @@ class _FixedPlan(QARunner):
         return list(self.fixed)
 
 
+def _rounded(value: Any) -> Any:
+    """``value`` with floats to 12 significant digits: a parallel reduction may sum
+    in another order between runs and change a statistic's last bit."""
+    if isinstance(value, float):
+        return float(f"{value:.12g}")
+    if isinstance(value, dict):
+        return {key: _rounded(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rounded(item) for item in value]
+    return value
+
+
 def _outcome(results: list[RuleResult], rule_id: str) -> list[dict[str, Any]]:
     """The results of ``rule_id`` without identity labels; evidence rows in any order
     (some rules sample unordered sets)."""
     outcome = []
     for result in results:
         if result.rule_id == rule_id:
-            dumped = result.model_dump(mode="json", exclude=IDENTITY_FIELDS)
+            dumped = _rounded(result.model_dump(mode="json", exclude=IDENTITY_FIELDS))
             dumped["affected_records"] = sorted(map(repr, dumped["affected_records"]))
             outcome.append(dumped)
     return outcome
