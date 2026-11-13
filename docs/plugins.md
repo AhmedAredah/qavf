@@ -106,7 +106,7 @@ a test only has to supply the methods the port names.
 | `SqlQueries` | `sql`, `sql_sample`, `consume_sql`, `referenced` |
 | `ObservationAccess` | `observe`, `projected_observations`, `observation_plan` |
 | `WorkStorage` | `memory_budget_bytes`, `check_materialization`, `check_retained_bytes`, `work_store`, `spill_file`, `release` |
-| `RuleSessions` | `begin_rule`, `end_rule`, `cancel_rule`, `cancel_active_rules`, `finish_worker`, `thread_load_seconds` |
+| `RuleSessions` | `begin_rule`, `end_rule`, `cancel_rule`, `cancel_active_rules`, `has_active_rules`, `wait_for_rules`, `finish_worker`, `thread_load_seconds` |
 | `EvidencePolicy` | `evidence_limit`, `evidence_bytes` |
 | `RunReporting` | `reporting_snapshot`, `resource_usage`, `verify_inputs` |
 
