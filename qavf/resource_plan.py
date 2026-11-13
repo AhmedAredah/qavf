@@ -20,6 +20,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from qavf.run_limits import RunLimits
+
 _MIB = 1024**2
 _BOUND_PLAN: ContextVar[Any] = ContextVar("qavf_resource_plan", default=None)
 
@@ -209,9 +211,16 @@ class ResourcePlan:
 
     @classmethod
     def build(
-        cls, settings: Any, frames: Mapping[str, Any] | None = None, *, requested_workers: int = 1
+        cls,
+        settings: Any,
+        frames: Mapping[str, Any] | None = None,
+        *,
+        requested_workers: int = 1,
+        limits: RunLimits | None = None,
     ) -> ResourcePlan:
-        engine = settings.engine
+        """Plan ``settings``' run from input metadata and its :class:`RunLimits`
+        (``limits``, read from ``settings`` when not given)."""
+        limits = limits or RunLimits.of(settings)
         workers = max(1, requested_workers)
         input_bytes = key_state = 0
         for name, spec in settings.datasets.items():
@@ -232,7 +241,7 @@ class ResourcePlan:
                 if columns:
                     width = sum(_column_width(schema.columns.get(c)) for c in columns)
                     key_state = max(key_state, estimate_rows * (width + 64))
-        memory = engine.memory_budget_bytes
+        memory = limits.memory_budget_bytes
         auto_memory = memory is None
         if auto_memory and (input_bytes or key_state):
             # CSV decoding and joins need meaningful per-handle headroom even
@@ -250,15 +259,11 @@ class ResourcePlan:
             # retained data. Reserve room for the largest key operator rather
             # than divide the budget among workers doing no substantive work.
             workers = min(workers, max(1, memory // (4 * key_state)))
-        automatic_spill = "spill_max_bytes" not in engine.model_fields_set
-        spill = engine.spill_max_bytes
+        automatic_spill = not limits.spill_given
+        spill = limits.spill_max_bytes
         if automatic_spill and (input_bytes or key_state):
             desired_spill = max(spill, 2 * (input_bytes + 2 * key_state))
-            directory = (
-                settings.resolve(engine.temp_directory)
-                if engine.temp_directory
-                else Path(tempfile.gettempdir())
-            )
+            directory = limits.temp_directory or Path(tempfile.gettempdir())
             try:
                 free = _free_disk_bytes(directory)
                 spill = max(0, min(desired_spill, free * 4 // 5))
@@ -291,13 +296,18 @@ class ResourcePlan:
 
     @classmethod
     def for_context(
-        cls, settings: Any, frames: Mapping[str, Any] | None = None, *, requested_workers: int = 1
+        cls,
+        settings: Any,
+        frames: Mapping[str, Any] | None = None,
+        *,
+        requested_workers: int = 1,
+        limits: RunLimits | None = None,
     ) -> ResourcePlan:
         """Reuse a runner's decision, or plan once for a directly created context."""
         bound = _BOUND_PLAN.get()
         if bound is not None and bound[0] is settings and bound[1] is frames:
             return cast(ResourcePlan, bound[2])
-        return cls.build(settings, frames, requested_workers=requested_workers)
+        return cls.build(settings, frames, requested_workers=requested_workers, limits=limits)
 
     def diagnostics(self) -> dict[str, Any]:
         return {

@@ -34,6 +34,10 @@ class RunLimits:
     duckdb_memory_limit: str | None
     cache_max_bytes: int
     spill_max_bytes: int
+    spill_given: bool
+    """Whether ``spill_max_bytes`` was given (in ``engine``, ``resources:`` or
+    ``resources=``, which the resource fold merges into ``engine``); when it was
+    not, the resource plan sizes spill space from the inputs."""
     max_spill_files: int
     temp_directory: Path | None
     """``engine.temp_directory`` resolved against the configuration's directory."""
@@ -57,6 +61,7 @@ class RunLimits:
             duckdb_memory_limit=engine.duckdb_memory_limit,
             cache_max_bytes=engine.cache_max_bytes,
             spill_max_bytes=engine.spill_max_bytes,
+            spill_given="spill_max_bytes" in engine.model_fields_set,
             max_spill_files=engine.max_spill_files,
             temp_directory=(
                 settings.resolve(engine.temp_directory)

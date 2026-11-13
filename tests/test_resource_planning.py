@@ -257,3 +257,18 @@ def test_free_disk_probe_measures_nearest_existing_ancestor(tmp_path):
 
     assert _free_disk_bytes(tmp_path / "not" / "created") > 0
     assert not (tmp_path / "not").exists()
+
+
+def test_plan_reads_its_limits_from_run_limits(ample_disk):
+    from dataclasses import replace
+
+    from qavf.run_limits import RunLimits
+
+    settings = configuration()
+    frames = {"d": SimpleNamespace(num_rows=10_000_000)}
+    limits = RunLimits.of(settings)
+    assert not limits.spill_given and RunLimits.of(configuration(spill_max_bytes=1)).spill_given
+    given = replace(limits, spill_given=True, spill_max_bytes=123, memory_budget_bytes=1024**3)
+    plan = ResourcePlan.build(settings, frames, limits=given)
+    assert (plan.spill_bytes, plan.automatic_spill) == (123, False)
+    assert (plan.memory_bytes, plan.automatic_memory) == (1024**3, False)

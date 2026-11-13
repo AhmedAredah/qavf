@@ -324,7 +324,9 @@ class DataContext:
         workers = memory_workers(workers, limits.memory_budget_bytes)
         from qavf.resource_plan import ResourcePlan
 
-        resource_plan = ResourcePlan.for_context(settings, frames, requested_workers=workers)
+        resource_plan = ResourcePlan.for_context(
+            settings, frames, requested_workers=workers, limits=limits
+        )
         workers = resource_plan.workers
         if threads is None:
             from qavf.engine.thread_budget import connection_threads
