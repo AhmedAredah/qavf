@@ -167,9 +167,17 @@ def _project_parquet(ctx: DataContext | None, path: Path, columns: list[str]) ->
         return _storage(project_input(owner, data, columns))
 
 
+def _is_extension(dtype: pl.DataType) -> bool:
+    """Whether ``dtype`` is an extension type. Polars 1.32 (the supported floor)
+    has no extension types or ``is_extension``; there GeoParquet geometry is
+    already plain WKB binary."""
+    probe = getattr(dtype, "is_extension", None)
+    return bool(probe()) if callable(probe) else False
+
+
 def _storage(frame: pl.DataFrame) -> pl.DataFrame:
     """Extension columns (GeoParquet's ``geoarrow.wkb``) as their storage (WKB binary)."""
-    extensions = [name for name, dtype in frame.schema.items() if dtype.is_extension()]
+    extensions = [name for name, dtype in frame.schema.items() if _is_extension(dtype)]
     return frame.with_columns(pl.col(c).to_physical() for c in extensions) if extensions else frame
 
 

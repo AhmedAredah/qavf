@@ -3,6 +3,7 @@
 from decimal import Decimal
 
 import polars as pl
+import pyarrow as pa
 import pytest
 
 from qavf import compare_datasets
@@ -13,8 +14,12 @@ LARGEST = 10**38 - 1
 
 
 def _decimals(values: list[int]) -> pl.DataFrame:
-    column = pl.Series(values, dtype=pl.Int128).cast(pl.Decimal(38, 0))
-    return pl.DataFrame({"k": list(range(len(values))), "x": column})
+    # Built through Arrow: Polars 1.32 (the supported floor) cannot cast an
+    # Int128 holding 38 digits to Decimal(38, 0).
+    column = pa.array([Decimal(value) for value in values], type=pa.decimal128(38, 0))
+    frame = pl.from_arrow(pa.table({"k": pa.array(range(len(values)), pa.int64()), "x": column}))
+    assert isinstance(frame, pl.DataFrame)
+    return frame
 
 
 @pytest.mark.parametrize("decision", ["material", "material_and_significant"])

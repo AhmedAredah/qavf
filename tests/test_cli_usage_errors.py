@@ -25,7 +25,9 @@ def _pair(tmp_path: Path) -> tuple[str, str]:
 def test_comparison_spec_accepts_a_resources_mapping(tmp_path: Path, capsys) -> None:
     baseline, candidate = _pair(tmp_path)
     spec = tmp_path / "spec.yaml"
-    spec.write_text("keys: [id]\nresources: {target_memory: 64MiB}\n", encoding="utf-8")
+    # Large enough for DuckDB 1.3.1 (the supported floor), whose smallest buffer
+    # needs more room than 2.x.
+    spec.write_text("keys: [id]\nresources: {target_memory: 512MiB}\n", encoding="utf-8")
     assert main(["compare-datasets", baseline, candidate, "-c", str(spec)]) == EXIT_OK
     assert "COMPARISON PASSED" in capsys.readouterr().out
 
