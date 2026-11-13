@@ -138,9 +138,9 @@ def test_timeout_report_does_not_wait_for_reduction_callback_or_release_its_inpu
             assert worker_done.wait(10)
             thread.join(10)
             deadline = time.monotonic() + 10
-            while ctx._active and time.monotonic() < deadline:
+            while ctx.has_active_rules() and time.monotonic() < deadline:
                 time.sleep(0.001)
-        assert not thread.is_alive() and not ctx._active
+        assert not thread.is_alive() and not ctx.has_active_rules()
         assert ctx.resource_usage()["retained_total_bytes"] == 0
         assert ctx.resource_usage()["owned_spill_bytes"] == 0
 
@@ -210,9 +210,9 @@ def test_timeout_report_snapshots_during_blocked_cache_admission(monkeypatch, ho
             release.set()
             thread.join(2)
             deadline = time.monotonic() + 2
-            while ctx._active and time.monotonic() < deadline:
+            while ctx.has_active_rules() and time.monotonic() < deadline:
                 time.sleep(0.001)
-        assert not thread.is_alive() and not ctx._active
+        assert not thread.is_alive() and not ctx.has_active_rules()
         assert "d" not in ctx._frames
         assert ctx._resources.retained_budget.used == ctx._resources.spill_budget.used == 0
 

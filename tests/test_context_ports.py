@@ -154,3 +154,25 @@ def test_one_retry_policy_decides_for_both_backends():
     assert policy.pause(SourceIntegrityError("changed"), 0) is None
     assert policy.pause(ValueError("unknown"), 0) is None
     assert RetryPolicy(retries=2, delay_s=0.5, safe=False).pause(transient, 0) is None
+
+
+def test_rule_sessions_expose_activity_without_private_flags():
+    import threading
+
+    with DataContext(frames={"d": pl.DataFrame({"x": [1]})}) as ctx:
+        assert not ctx.has_active_rules() and ctx.wait_for_rules(0)
+        started, release = threading.Event(), threading.Event()
+        worker = threading.Thread(target=_run_one_rule, args=(ctx, started, release))
+        worker.start()
+        assert started.wait(5)
+        assert ctx.has_active_rules() and not ctx.wait_for_rules(0.01)
+        release.set()
+        assert ctx.wait_for_rules(5) and not ctx.has_active_rules()
+        worker.join(5)
+
+
+def _run_one_rule(ctx, started, release):
+    ctx.begin_rule()
+    started.set()
+    release.wait(5)
+    ctx.end_rule()

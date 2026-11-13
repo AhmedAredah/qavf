@@ -1166,6 +1166,14 @@ class DataContext:
     def begin_rule(self, invocation: Invocation | None = None) -> Invocation:
         return self._session.begin(invocation)
 
+    def has_active_rules(self) -> bool:
+        """Whether any rule invocation is running now."""
+        return not self._session.idle()
+
+    def wait_for_rules(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for running rules to end; whether they did."""
+        return self._session.wait_idle(timeout)
+
     def end_rule(self) -> None:
         if self._session.end():
             self._close_owned()

@@ -350,7 +350,7 @@ def test_owned_context_deadline_does_not_race_a_blocked_native_close():
             report = result.result(timeout=2)
             assert report.get(_ReadsSQL.rule_id).status.value == "ERROR"
             ctx = contexts[0]
-            assert ctx._active
+            assert ctx.has_active_rules()
             assert len(ctx._resources.reservations) == 1
             assert ctx._resources.directory.exists()
         finally:
@@ -358,7 +358,7 @@ def test_owned_context_deadline_does_not_race_a_blocked_native_close():
             for worker in workers:
                 worker.join(3)
         assert all(not worker.is_alive() for worker in workers)
-        assert not ctx._active and not ctx._resources.reservations
+        assert not ctx.has_active_rules() and not ctx._resources.reservations
         assert not ctx._resources.directory.exists()
 
 
@@ -411,7 +411,7 @@ def test_cancelled_eager_source_cannot_start_query_after_idle_interrupt(monkeypa
                     connection.interrupt()
                 for worker in workers:
                     worker.join(3)
-        assert not ctx._active and not ctx._resources.reservations
+        assert not ctx.has_active_rules() and not ctx._resources.reservations
 
 
 @pytest.mark.parametrize("operation", ["execute", "executemany", "sql", "fetchone"])

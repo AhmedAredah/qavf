@@ -227,6 +227,14 @@ class RuleSessions(Protocol):
         """Cancel every running invocation."""
         ...
 
+    def has_active_rules(self) -> bool:
+        """Whether any invocation is running now."""
+        ...
+
+    def wait_for_rules(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for running invocations to end; whether they did."""
+        ...
+
     def finish_worker(self, owner: int | None = None) -> None:
         """Release the connections of a worker that has stopped."""
         ...

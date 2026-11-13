@@ -685,9 +685,7 @@ class QARunner:
             for invocation in cancel:
                 ctx.cancel_rule(invocation)
             if finished:
-                grace = time.monotonic() + self.settings.engine.timeout_grace_s
-                while ctx._active and time.monotonic() < grace:
-                    time.sleep(min(0.005, max(0.0, grace - time.monotonic())))
+                ctx.wait_for_rules(self.settings.engine.timeout_grace_s)
                 return [result for result in results if result is not None]
             with lock:
                 # Recheck under the notification lock: completion can race cancellation.

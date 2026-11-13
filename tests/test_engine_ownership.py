@@ -168,7 +168,7 @@ def test_timeout_does_not_poison_reused_context():
         finally:
             gate.set()
         deadline = time.monotonic() + 1
-        while ctx._active and time.monotonic() < deadline:
+        while ctx.has_active_rules() and time.monotonic() < deadline:
             time.sleep(0.001)
         for _ in range(3):
             assert execute.run(ctx).get("PROBE").status.value == "PASS"
@@ -389,7 +389,7 @@ def test_report_finalization_does_not_wait_on_overdue_source_identity_lock(tmp_p
         finally:
             gate.set()
             deadline = time.monotonic() + 1
-            while ctx._active and time.monotonic() < deadline:
+            while ctx.has_active_rules() and time.monotonic() < deadline:
                 time.sleep(0.001)
 
 

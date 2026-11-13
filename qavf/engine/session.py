@@ -28,7 +28,8 @@ class RunSession:
         self.active: dict[int, Invocation] = {}
         self.connections: dict[object, tuple[int, Any]] = {}
         self._closing = threading.RLock()
-        self._stopped = threading.Condition(self.lock)
+        self._changed = threading.Condition(self.lock)
+        """Notified when an invocation ends or is cancelled, or the run closes."""
 
     def check(self) -> None:
         from qavf.engine.resources import ResourceLimitError
@@ -45,8 +46,18 @@ class RunSession:
     def wait(self, timeout: float) -> bool:
         """Wait up to ``timeout`` seconds, returning as soon as the calling invocation
         is cancelled or the run closes; whether it was (a retry's cancellation signal)."""
-        with self._stopped:
-            return self._stopped.wait_for(self.stopped, max(0.0, timeout))
+        with self._changed:
+            return self._changed.wait_for(self.stopped, max(0.0, timeout))
+
+    def idle(self) -> bool:
+        """Whether no invocation is running."""
+        with self.lock:
+            return not self.active
+
+    def wait_idle(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds for every invocation to end; whether they did."""
+        with self._changed:
+            return self._changed.wait_for(self.idle, max(0.0, timeout))
 
     def begin(self, invocation: Invocation | None = None) -> Invocation:
         invocation = invocation or Invocation()
@@ -63,12 +74,13 @@ class RunSession:
     def end(self) -> bool:
         with self.lock:
             self.active.pop(threading.get_ident(), None)
+            self._changed.notify_all()
             return self.closed and not self.active
 
     def cancel(self, invocation: Invocation) -> None:
         with self.lock:
             invocation.cancelled.set()
-            self._stopped.notify_all()
+            self._changed.notify_all()
             connections = [
                 connection
                 for owner, connection in self.connections.values()
@@ -100,7 +112,7 @@ class RunSession:
     def request_close(self) -> bool:
         with self.lock:
             self.closed = True
-            self._stopped.notify_all()
+            self._changed.notify_all()
             return not self.active
 
     def close_worker_connections(self, owner: int) -> None:
