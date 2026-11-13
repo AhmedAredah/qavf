@@ -4,428 +4,46 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.7.0] - Unreleased
+## [0.7.0] - 2026-11-13
 
-Checks are configured by name, next to the data they test, and one check can relate
-any number of datasets. Rule codes remain only as stable audit IDs in reports.
+Checks are configured by name, next to the data they test. Convert a 0.6
+configuration once with `qavf migrate old.yaml -o new.yaml`; old reports still load.
 
 ### Breaking changes
 
-Configurations written for QAVF 0.6 are rejected with an error naming their first
-old setting. Convert each configuration once with `qavf migrate old.yaml -o new.yaml`
-(`--check` shows what would change; `--drop-disabled` leaves disabled rules out).
-Reports written by earlier versions still load.
-
-- **Checks are named items.** A dataset's `checks` list (checks of that dataset)
-  and a top-level `checks` list (checks relating datasets) replace
-  `rules: {TMP-001: ...}`: `{check: change_rate, series: aadt_by_site, max: 0.15}`.
-  Every item takes `name`, `severity`, `where`, `tags`, `enabled` and `description`.
-  Some settings are renamed (`max_change_rate` is `max`, `expected_trend` is
-  `expect`, `expected_periods` is `expected`); [docs/rules.md](docs/rules.md) lists
-  each check's settings.
-- Row expressions are `check: expression` items, SQL assertions top-level
-  `check: sql` items, baselines `matches_baseline` items and comparisons top-level
-  `compare` items; the `expressions` and `assertions` sections are removed, and
-  `Dataset(..., expressions=...)` is `Dataset(..., checks=...)`.
-- **Only configured checks run.** Schema contracts (columns, keys, foreign keys)
-  always run. `engine.run_unconfigured_rules`, `include_categories` and
-  `exclude_categories` are removed; use `--tags` and `--skip-tags`.
-- `engine.fail_on`, `fail_on_incomplete` and `require` move to a new `run` section;
-  `require` lists check or dataset names.
-- **Column statistics go under `stats`.** `stats: {mean: {between: [1000, 100000]}}`
-  replaces `mean: {ge: 1000, le: 100000}` beside the column's value limits, for
-  `min`, `max`, `mean`, `median`, `std`, `sum` and `distinct_count`.
-- **A column's conditional limits are `conditions`**, so `checks` always means
-  check items.
-- `qavf list-checks` replaces `list-rules`.
-- Plugins declare a `check_name` beside their `rule_id`; a missing name, or one
-  that clashes with another check, is a registration error.
-- Each check item is assessed on its own. A 0.6 rule configured with several
-  series or comparisons becomes one item each, so multiple-testing corrections
-  (trend, drift) now apply within each item rather than across all of
-  a rule's series; p-values adjusted across a whole rule can differ from 0.6.
-- Result labels read `missing_periods · counts · no missing years (TMP-004)`;
-  results keep `rule_id` and `check_id` and add `check_name` and `item_name`.
+- `checks:` items (`{check: change_rate, series: s, max: 0.15}`) replace
+  `rules: {TMP-001: ...}`, `expressions` and `assertions`. Only configured checks run.
+- `fail_on`, `fail_on_incomplete` and `require` move to a `run` section; column
+  statistics move under `stats`, and conditional limits are `conditions`.
+- `qavf list-checks` replaces `list-rules`; plugins declare a `check_name`.
+- Multiple-testing corrections apply per check item (use inference families to group them).
+- `validate(resources=...)` conflicting with the configuration is an error.
 
 ### Added
 
-- **Value ranges:** `between: [a, b]` (inclusive) on column value limits and on
-  each statistic in `stats`, which also accept `gt` and `lt`. Setting `between`
-  with `ge`, `le`, `gt` or `lt` on the same field is an error.
-- **Reuse.** A dataset's `series` and `metrics` define a time series or per-entity
-  metric once (`series: aadt_by_site`, `metric: crash_rate`; `other.name` reaches
-  another dataset's), with the normalizer as `per: counts.aadt`. `views` name a
-  slice (`where`, `columns`) usable as `counts.recent` wherever a dataset is named.
-  Top-level `defaults` give settings per check name, `vars` named values
-  (`${vars.years}`), and `include` merges shared files first; a dataset or named
-  check defined twice is an error. `2016..2024` or `{from, to, step}` expands to
-  every value.
-- **Run-time selection:** `qavf run --tags`, `--skip-tags`, `--only "<name>"` and
-  `--dataset`, and `validate(..., only=, tags=, skip_tags=, datasets=)`, on both
-  backends. Built-in checks carry their family as a tag.
-  `run.tags: {<tag>: {fail_on: <severity>|never}}` sets a pass/fail policy per tag.
-- **One dataset across many sources:** `across` copies a dataset, with its schema,
-  checks, series, metrics and views, once per source: a list of connection names,
-  a mapping of copy names to the source settings that differ (connection, path or
-  URL, secret, table), or `{city: [houston, dallas]}` filling `{city}` in a path or
-  table. Copies are named `counts@houston`; `counts@*` selects every copy in a
-  check's `datasets` (one string or in a list), `run.require` and `--dataset`.
-- **Many datasets in one check:** `compare`, `totals_match`, `key_sets_match` and
-  `drift` take any number of `datasets` and a `strategy` (`reference`, the default;
-  `sequential`; `all_pairs`, refused above `max_pairs`; `consensus`). Two datasets
-  with the default strategy report exactly as before.
-- **Consensus:** each member against a consensus built key by key, configurable as
-  `consensus: {numeric: median|mean|trimmed_mean, trim, categorical:
-  majority|plurality, min_agreement, ties: report|reference}`. A key without a
-  consensus value is reported as not assessed, never guessed. `drift` compares each
-  member with the pooled data.
-- **Whole-group levels:** with more than two members, `compare` assesses
-  `coverage` (a key × member presence matrix), `structure` and `distribution`
-  (each member against the pooled data) over all members at once.
-- **Group reports:** each result of such a check carries a `group` role
-  (`GroupRole`), and `report.groups` holds one `GroupReport` per check: a matrix of
-  members by levels, the pairs compared and a ranking of the members. The HTML
-  report shows them under "Datasets checked together". Results name the consensus
-  and pooled data by role and members by name.
-- [docs/checks.md](docs/checks.md) explains check items, column limits, reuse,
-  selection and many datasets; [docs/rules.md](docs/rules.md) lists the checks by
-  name with their settings.
-- The configuration JSON Schema hints every 0.7 section and setting for editors
-  (`ui_group`, `ui_title`, `ui_advanced`).
-- `qavf init` writes inferred ranges as `between` and shows the 0.7 forms in its
-  commented example; the demo and `config/qavf.full.yaml` use them, including one
-  dataset across three files compared by consensus.
-- Testing helpers: `qavf.testing.rule_results` and `run_rule` run one rule instance
-  with any parameters; `checks_config` converts rule-code mappings and `with_checks`
-  configures every rule of a test registry.
-- `qavf explain -c CONFIG` validates a configuration and prints its plan without
-  reading data (`--dataset`, `--tags`, `--skip-tags`, `--only`, `--backend`,
-  `--format text|json`, `-o`); it exits 2 naming the invalid field. `explain()`
-  takes `backend=`, `only=`, `tags=`, `skip_tags=` and `datasets=`, applying the same
-  selection and backend admission as `validate`.
-- `qavf init --full` writes the complete reference configuration.
-- `include` entries expand `${ENV}` and `${ENV:-default}` before they are resolved
-  (`include: ['${MODULE_DIR:-modules}/child.yaml']`); `${vars.name}` still cannot
-  be used there, since includes are read before `vars` merge.
-- A foreign key's `ref_dataset` may name a view (`roads.active`) or an `across`
-  copy (or a copy's view), on both backends. The view keeps its parent's contract,
-  so a key the parent holds but the view's `where` excludes is orphaned; the
-  native backend loads the parent with the child, with the columns the `where`
-  reads.
-- `overrides:` patches known datasets and check instances without copying them:
-  `checks: {<check name or instance id>: {max: 0.2, severity: WARNING}}` and
-  `datasets: {counts: {schema: {min_rows: 100}}}` (an `across` copy is
-  `counts@houston`). They apply after include, vars, defaults and `across`
-  expansion and before validation; mappings merge, lists and scalars replace and
-  `null` is an error. An unknown target names the closest match and a name shared
-  by several instances asks for the instance id. Any file may declare them; they
-  apply in include order with the root's last. `QAVFSettings.applied_overrides`
-  records what each changed and from which file, and `qavf explain` lists them
-  (`ValidationPlan.overrides`). The editor schema accepts the section and gives it
-  UI hints.
-
-- `qavf resolve -c CONFIG [--origins] [--format yaml|json] [-o FILE] [--force]`
-  and `qavf.resolve(config) -> ResolvedConfig` print the configuration a run would
-  use, after `include`, `vars`/`${ENV}`, `defaults`, `across` and `overrides`,
-  validated without reading data and with secrets redacted. With `--origins` each
-  value names the file, line and column it was written at and how it arrived ("via
-  vars.rows", "from defaults.change_rate", "from across copy counts@houston",
-  "override counts"), as YAML comments or a JSON `origins` map, and the applied
-  overrides are listed. The output is deterministic and reads back as the same
-  configuration; it exits 0 when valid and 2 with field paths and origins when not,
-  and `-o` never replaces an input.
-- Configuration errors name where the value was written, also in an included file:
-  `datasets.x.schema.min_rowz (team/base.yaml:4): Extra inputs are not permitted`.
-  Parsing records the location of every key and item (YAML and JSON), and include
-  merging, `vars`/`${ENV}` substitution, `defaults`, `across` and `overrides` keep it;
-  `QAVFSettings.origins` holds the index for settings loaded from a file, Python
-  callers see the locations as the error's notes, and `AppliedOverride.line` (shown
-  by `qavf explain`) is the line an override was written on.
-- **`where` on every dataset check.** Any item in a dataset's `checks` takes `where`
-  (and `min_applicable_rows`): `fresh`, `outliers`, the temporal and spatial checks,
-  `shares`, `key_grid`, `coordinates`, `matches_baseline` and plugins whose
-  parameters name their `dataset` read only the matching rows, with the results the
-  same check reports on a view of those rows. Results name the dataset, list `where`
-  among their parameters and report `population_rows`, `applicable_rows` and
-  `excluded_rows`; no matching row, or fewer than `min_applicable_rows`, leaves the
-  check not assessed; `defaults.<check>.min_applicable_rows` sets it for every item
-  of a filtered check (still only with `where`). Items with one condition share one
-  read of the rows, the condition is parsed when the configuration loads (with its file and line), and
-  `qavf explain` shows it with the columns it reads. Top-level checks other than
-  `compare` reject `where`, pointing at views. Dataset and view names containing
-  `.__where_` are reserved. Polars backend.
-- **Inference families.** `drift`, `trend`, `trend_outliers` and `compare` items take
-  `inference: {family: <name>}`: the items naming one family have their p-values
-  corrected together, as one family of every member's tests (the members must agree
-  on one correction other than `none`; other checks reject `inference` when the
-  configuration loads). The runner measures each member with the other checks and
-  judges them once the family is corrected, so splitting or merging items no longer
-  changes the correction family. Results carry `inference` (family, method, family
-  size, member instance ids, the item's adjusted p-values), shown in the HTML report;
-  `qavf explain` lists every family. A selection running only some members corrects
-  over those and reports `selected N of M members`; `run.partial_families: refuse`
-  makes it an error. `qavf migrate` gives the items of a 0.6 `STA-002` or `TMP-002`
-  rule that corrected several comparisons or series together a shared family named
-  after the rule, keeping 0.6's correction. Polars backend.
-- An error raised for the whole configuration is located at the most specific
-  configuration path its message names (`checks[1].inference.family`, not the
-  `checks` list).
-- **`resources:` section.** Run-wide limits in readable units with the names of
-  `ResourceLimits` (`target_memory: 2GiB`, `max_spill: 20GiB`, `temp_dir`,
-  `max_workers`, `evidence_rows`, `wall_time`, ...); each sets its `engine` setting.
-  A limit given in more than one of `resources:`, `engine` and
-  `validate(resources=...)` must have the same value in each, otherwise loading
-  fails naming every place with its file and line. `include`, `vars` and
-  `overrides: {resources: {...}}` work on it, `qavf resolve --origins` shows its
-  origins, and the standalone comparison spec reads its `resources:` with the same
-  model (`ResourceSpec`). The `engine` byte settings accept the same sizes
-  (`engine.memory_budget_bytes: 2GiB`).
-- **`engine.backend: auto | duckdb | polars`** pins the backend, so a configuration
-  runs the same way whatever is installed. `--backend` and `validate(backend=...)`
-  (`explain` too) override it; a pinned `polars` without the extra fails at load.
-  `qavf explain` shows the backend and where it came from (`cli`, `argument`,
-  `config` or `auto`) and every resource limit with its source
-  (`ValidationPlan.backend_source`, `ValidationPlan.limits`; snapshot and
-  borrowed-query staging list the limits they work within); `qavf resolve
-  --origins` and the run report (`metadata.backend`, `metadata.backend_source`,
-  `metadata.resource_usage["limits"]`, the HTML footer) record them too.
-- Docs show how to run one comparison of a project:
-  `qavf run -c project.yaml --only "<compare item name>"` (or `--tags`).
-
-### Changed
-
-- `validate(resources=...)` no longer silently overrides a limit the configuration
-  sets: a different value is an error, the same value is accepted. The `backend`
-  argument of `validate` and `explain`, and `--backend`, default to the
-  configuration's `engine.backend` (then `auto`) instead of `auto`.
-- A relative `engine.temp_directory` in an included file is rebased to that file,
-  like other relative paths.
-
-- `qavf init` writes a minimal starter (project, datasets with their inferred
-  schemas, pointers to `explain`, `list-checks` and the docs) and never pins defaults
-  such as `engine.execution_mode`, so a process limit added later selects isolation.
-  Comparison examples use `decision: material`.
-- Usage and configuration errors print the message and field path without the
-  library file and line (shown with `-v`).
-- `mypy` checks the bodies of unannotated functions too (`check_untyped_defs`).
-- In an included file, a file-path setting written through the file's own
-  `${vars.name}` (or `${ENV}`) is substituted before it is rebased, so it names the
-  same file as the literal text would (it used to resolve against the root
-  configuration's directory). A variable the file does not define, or one the root
-  also defines, still resolves relative to the root, which owns it.
-- A file reached through more than one include path (a diamond) is merged once
-  instead of failing as a duplicate dataset; different files defining one dataset
-  or check name, and include cycles, are still errors.
-- On the Polars backend, a key sample (orphaned keys, repeated keys) evaluated as
-  a lazy plan is ordered by every column, nulls first, as the native backend's
-  is, instead of by the plan's engine-dependent row order. A check on a view
-  (`roads.active`) applies its parent's column contract (types and N/A tokens) to
-  key values.
-
-### Internal
-
-- `DataContext` keeps its public API but now has narrow typed ports in
-  `qavf.engine.ports` (catalog reads, reductions, SQL, observations, work
-  storage, rule sessions, evidence, reporting). mypy checks that the context
-  provides every port, and a test checks that it keeps every public member. The
-  filtered-population count, the evidence row locator, grouped findings, group
-  comparison levels and statistics planning now take the narrowest port they use
-  (see [Writing plugins](docs/plugins.md#narrow-context-ports)).
-- Snapshot coordination (`SnapshotCoordinator`) and verified source execution
-  (`SourceExecution`: eager loads, source operations and fingerprints) have moved
-  out of `DataContext` into their own collaborators. The runner now schedules
-  dataset release itself instead of keeping its plan on the context.
-  `DataContext` is down from 106 methods to 96, and from 1,738 lines to 1,512.
-- Both backends now share some policy. One `RunLimits` reads `engine.*` once, and
-  one `RetryPolicy` decides source retries for the native input reader and the
-  Polars source policy alike. The backend choice is resolved once per run and
-  passed explicitly to report provenance, including across isolated dispatch.
-- The resource-planning tests now use a fixed free-disk figure, so they no longer
-  depend on how much disk the test machine has free.
+- Reuse: `series`, `metrics`, `views`, `defaults`, `vars`, `include`, `overrides`,
+  ranges (`2016..2024`) and `between`.
+- `where` on every dataset check, with `min_applicable_rows`.
+- `--tags`, `--skip-tags`, `--only` and `--dataset`, with per-tag pass/fail policy.
+- `across` repeats a dataset over many sources; `compare`, `totals_match`,
+  `key_sets_match` and `drift` relate any number of datasets (including consensus).
+- Inference families, a `resources:` section and `engine.backend`.
+- `qavf explain` and `qavf resolve`; errors name the file and line of the value.
+- Progress events and cancellation (`on_event=`, `cancel=`, `qavf run --progress`).
+- `settings_from_text()`, `python -m qavf`, and editor hints in the JSON Schema.
 
 ### Performance
 
-- A row expression or `where` condition no longer reads every column of every
-  dataset into one native component. The parser proves the columns it names and the
-  datasets its subqueries read; only those are retained or joined. Unprovable SQL
-  keeps the conservative plan, and `qavf explain` and the report's `resource_usage`
-  say why. The Polars backend releases datasets an expression does not read.
-- A SQL check with evidence counts its failing rows and keeps its first rows by
-  every column in one evaluation that holds only the evidence rows, on both
-  backends, instead of staging every failing row first.
-- `scripts/benchmark_local_performance.py` measures both.
-- A `Query` on a borrowed DuckDB connection is copied into the native backend's
-  owned table one bounded Arrow batch at a time, not as one complete Arrow table.
-  The row budget stays exact, cancellation is checked between batches, the
-  caller's connection is only read, and types are unchanged. `qavf explain` reports
-  it as `staging: bounded_batch_copy`.
-- A coherent database snapshot (`snapshot: true`) streams each member in bounded
-  batches inside its transaction and stages it adaptively: members stay in memory
-  while the group fits the frame cache and `memory_budget_bytes`, so a small
-  snapshot costs what reading it whole did; the first batch past that writes the
-  buffered members to owned spill files and streams the rest straight to spill.
-  The group is published together after commit, and a large group is bounded by
-  spill space, no longer by `memory_budget_bytes`; a failed or cancelled attempt
-  deletes its files and a retry restarts the whole group. `qavf explain` reports
-  `staging: adaptive_snapshot`.
-- `scripts/benchmark_streaming.py` measures both, before and after a change.
+- Expressions keep only the columns they use; SQL evidence is gathered in one pass;
+  borrowed queries and snapshots stream in bounded batches.
 
 ### Fixed
 
-- Settings narrowed by `--dataset`, `--only` or the tag options, or by a profile,
-  keep where each value was written, and a check error raised when the run is
-  planned (a plugin check's invalid setting) names its file and line.
-- A dataset's `source` settings and its named `series` and `metrics` are validated
-  when the configuration loads, without reading data, used or not: `source: {type:
-  file, headre: false}` or an unused `series: {s: {bad_key: 7}}` is a validation
-  error with its field path (`datasets.x.source.headre`) on both backends, where the
-  DuckDB backend reported an INP-001 failure, Polars raised at run time and an
-  unused series passed silently. Built-in source types are checked against their
-  parameter models; a plugin's source type is checked when the run is planned.
-- Accepting a baseline, writing a report or publishing an isolated worker's
-  result no longer fails on Windows when a virus scanner or the search indexer
-  briefly holds the file being replaced: every atomic replace in QAVF goes
-  through one helper (`qavf/file_replace.py`) that retries the rename on a
-  `PermissionError` with a short, bounded backoff (up to about 2 s) on Windows
-  only, then raises. The release scripts share the same helper.
-- `qavf run` prints result labels on a console that is not UTF-8 (e.g. a Windows
-  cp1252 pipe): `·` falls back to `-` instead of showing as `�`.
-- Two unnamed checks of one kind on a dataset no longer share an identity: a
-  failing `expression` could take the other item's tags, and with them a
-  `fail_on: never` tag policy, so the run passed. Every check item now has an
-  instance id, its location (`datasets.d.checks[0]`, `checks[2]`), which results
-  carry in the new `item_ids` field; tags, tag policies and `run.require` follow
-  it. Reports written without `item_ids` still load.
-- A `run.require` entry naming several items (one name in several datasets)
-  requires each of them to be assessed; a disabled one no longer passes unnoticed.
-  A selection still narrows requirements to the items it runs.
-- A required unnamed `expression` with `where` that passed is no longer reported
-  as not assessed.
-- An explicit check name equal to another item's default name in the same list,
-  or to a dataset name, is a configuration error.
-- A view, dataset, `across` copy or derived dataset with the name of another (or a
-  name differing only in case) is a configuration error naming both declarations.
-  A view `roads.active` could silently replace a dataset `roads.active` on the
-  Polars backend while the DuckDB backend read the dataset.
-- Included files rebase only settings typed as file paths (dataset and source
-  paths, connection files, baseline and zone-layer or crosswalk paths,
-  `plugins.paths`). A column named `path` in `rename`, a schema or any other user
-  mapping was rewritten to `modules/path`.
-- `qavf run` no longer writes a report over a file the configuration includes, an
-  accepted baseline or its manifest, a zone layer, crosswalk or plugin file; it
-  had replaced them and reported QA PASSED. The same declared-input check now
-  guards `schema -o`, `init -o` (even with `--force`, also for profiled inputs)
-  and `migrate -o`. `schema -o` needs `--force` to replace an existing file.
-- `qavf migrate -o` writes the format of the output suffix (YAML text went into
-  `.json` files), rebases relative paths when the output is in another directory,
-  and reads its output back before writing.
-- The native DuckDB backend runs dataset views (`"<dataset>.<view>"` in `sql` and
-  `expression` checks) with the Polars backend's rows and columns; it had accepted
-  them and then failed with a missing table.
-- `connections.<name>.snapshot: true` is refused on the native backend before any
-  read; it had been ignored, so related tables could come from different commits.
-- A cancelled native run no longer retries a source: it starts no further attempt
-  and a retry delay ends at cancellation (a loader had run three more times).
-- `qavf run` in `execution_mode: isolated`: `--progress` is a usage error instead
-  of emitting nothing, and Ctrl-C, SIGTERM or Ctrl-Break stops the worker and exits
-  1 with `QA CANCELLED`; it had printed a cancellation notice, let the worker
-  finish and reported QA PASSED.
-- Comparison tolerances resolve `rtol` and `atol` independently (measure, column,
-  level, comparison). A column entry setting only `atol` had dropped the level's
-  `rtol` for the comparison's default, so a group mean within the level's `rtol`
-  failed (or a looser default passed it).
-- The records level describes a `Decimal(38, s)` change that needs 39 digits (e.g.
-  from 10^38-1 to -(10^38-1)) exactly; the overflow had made the whole level not
-  assessed although its counts were complete. A description that still fails is
-  reported as `description_unavailable` beside the counts and verdict.
-- Comparison `tolerances` and `ignore_columns` naming a column neither aligned side
-  has are a configuration error (with suggestions) in `compare_datasets` and the
-  `compare` check; they had been dropped silently, so a typo passed. A measure of
-  an ignored column is refused when the configuration loads.
-- `derive` columns apply in mapping order, so a later one may use an earlier one;
-  every level had been not assessed with a missing column. A reference to a
-  column that does not exist is a configuration error before any row is read.
-- Crosswalks keep temporal zone ids exact: two `Datetime(ns)` ids 1 ns apart, or the
-  two instants of a DST fold, had merged in validation, `compose` and
-  `aggregate_up`, so a valid crosswalk was rejected as not summing to 1.
-- A zone layer `path` obeys the run's memory target: GeoParquet is read through the
-  common input reader (as a path crosswalk is), and an `ST_Read` file's size is
-  checked before the fetch and the file verified unchanged after it. The path form
-  had been read directly, outside admission and source identity.
-- A filtered `expression` is assessed on the rows its `where` selects: its failures
-  read `1 row of 2 matching 'where: x > 0' in d violates 'x < 10'` with those rows
-  as `total_records` and `population_rows`, `applicable_rows` and `excluded_rows`
-  in its metrics, on both backends. It had counted every row of the dataset and
-  shown a compiled `CASE WHEN` expression instead of the configured `expr`.
-- `expression` takes `min_applicable_rows` (with `where`): fewer matching rows leave
-  it not assessed instead of passing vacuously, as for column conditions.
-- `{check: expression, enabled: false}` and `{check: sql, enabled: false}` stubs are
-  accepted like other disabled checks without settings.
-- `where` is documented, advertised in the JSON Schema and accepted only where it is
-  honoured: every dataset check (see Added), `compare`, and plugin checks whose
-  parameters declare it, which now receive it; other top-level checks reject it and
-  point at views.
-- A plugin check placed on dataset `a` that names `dataset: b` is a configuration
-  error; it had run on `b` while reporting on `a`. Plugin results name the dataset
-  they are placed on, and compiling no longer changes the item's settings.
-- Range shorthand (`2016..2024`, `{from, to, step}`) expands only in check settings
-  declared as lists, nested ones included (`key_grid` `dimensions.<c>.values`); a
-  text setting such as an `outliers` `column: 2016..2024` and plugin settings keep
-  the value as written. The JSON Schema offers ranges only on those settings.
-- `across` rejects a repeated connection, copy name or template value (also as text:
-  `2023` and `'2023'`) instead of collapsing the copies into one.
-- Included files sharing YAML anchors merge each pair of shared parts once, and every
-  file is measured before it is merged; a few kilobytes had taken seconds and
-  hundreds of megabytes before the size limit applied.
-- Both editor JSON Schemas (full and DuckDB) accept `${vars.name}` in every setting
-  (column limits, `min_rows`, a check's `enabled` and `severity`, ...), a single
-  `include` string, comparison levels and steps written by name or with their own
-  parameters, a bucket written as text, and a single `datasets` selector list; the
-  documented example configurations validate against them.
-- `$${NAME}` and `$${vars.name}` write a literal `${NAME}` / `${vars.name}` that is
-  never substituted, also when settings are serialized and read back.
-- Booleans are no longer read as counts (`min_rows: true` had meant 1): row counts,
-  budgets and limits reject `true`/`false`. A YAML boolean in a str column's
-  `isin`/`notin` or in `true_values`/`false_values` is rejected with a hint to quote
-  `yes`/`no`/`on`/`off`.
-- File paths in an included file's `defaults` (a `matches_baseline` `path`, ...) are
-  rebased like the same settings on a check item.
-- A records level's `categorical` naming a column neither aligned side has is a
-  configuration error with suggestions, like `tolerances`; it had left the level not
-  assessed during evaluation.
-- A `compare-datasets` spec's `resources` mapping (`{target_memory: 64MiB}`) is read
-  as `ResourceLimits`, and an invalid one is a usage error naming the field (it had
-  crashed with a traceback and exit 1). Relative paths in the spec resolve against
-  its folder.
-- On the Polars backend, a dataset selection no longer converts or consumes an
-  excluded input (a one-shot Arrow stream stays unread; a failing one no longer
-  fails the run).
-- A frame too large for the cache is spilled directly, instead of first spilling
-  every in-memory entry (which could falsely exhaust the spill budget).
-- A native SQL check that keeps no evidence (`max_affected_records: 0`) counts its
-  rows in one query, without a temporary table of every failing row.
-- Rule and source registration rejects a class that is not a concrete `Rule` /
-  `DataSource`, lacks its id or has a non-pydantic `Params`, before registering it;
-  rule and source lookups no longer copy the registry.
-- `from qavf import CheckIdentity` has its type for type checkers.
-- `docs/api.md` names `Dataset(..., checks=)` and `docs/plugins.md` the testing
-  helpers' `checks=` keyword (not the removed `expressions=` / `assertions=`).
-- An invalid dataset setting in `validate`/`explain` names its full path
-  (`datasets.<name>....`).
-
-## [Unreleased]
-
-### Added
-
-- Progress events and cancellation: `validate(..., on_event=..., cancel=...)`
-  reports each step as it runs, and `CancellationToken.cancel()` stops a run from
-  any thread while still returning its report (`metadata.cancelled`).
-- `qavf run --progress` writes progress as JSON lines on stderr; Ctrl-C now
-  cancels the run and still writes its reports.
-- `settings_from_text(text, path)` validates unsaved configuration text as the file
-  it would become, and `python -m qavf` runs the command line.
-- The configuration JSON Schema (`qavf schema`) labels its fields for editors:
-  `ui_group`, `ui_title` and `ui_advanced` on each setting.
+- Reports no longer overwrite baselines, zone layers or crosswalks.
+- Native backend refuses `snapshot: true` instead of ignoring it.
+- Comparison `rtol`/`atol` resolve independently; misspelled comparison columns are errors.
+- Wide decimals, nanosecond crosswalk ids and boolean counts are handled correctly.
+- File replacement on Windows retries when a scanner holds the file.
 
 ## [0.6.2] - 2026-11-02
 
