@@ -7,6 +7,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from typing import Protocol
 
 import duckdb
 
@@ -41,6 +42,37 @@ class RetryPolicy:
         return self.delay_s * 2**attempt
 
 
+class CancellationSignal(Protocol):
+    """Something a retry wait can block on that wakes as soon as work is cancelled
+    (:class:`~qavf.run_control.CancellationToken`,
+    :class:`~qavf.engine.session.RunSession`)."""
+
+    def wait(self, timeout: float) -> bool:
+        """Block up to ``timeout`` seconds; whether cancellation was signalled."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class RetryWait:
+    """The one wait between source attempts, shared by both backends.
+
+    It blocks on ``signal`` so a cancellation ends the wait at once, then lets
+    ``check_cancelled`` raise; without a signal it sleeps the whole delay.
+    """
+
+    signal: CancellationSignal | None = None
+    check_cancelled: Callable[[], None] | None = None
+
+    def __call__(self, seconds: float) -> None:
+        seconds = max(0.0, seconds)
+        if self.signal is None:
+            time.sleep(seconds)
+        else:
+            self.signal.wait(seconds)
+        if self.check_cancelled is not None:
+            self.check_cancelled()
+
+
 class SourceOperations:
     """One run's source policy, including cancellable serialized execution.
 
@@ -49,9 +81,16 @@ class SourceOperations:
     No source is published before both identity checks have completed.
     """
 
-    def __init__(self, *, concurrent: bool, check_cancelled: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        *,
+        concurrent: bool,
+        check_cancelled: Callable[[], None],
+        signal: CancellationSignal | None = None,
+    ) -> None:
         self._lock = None if concurrent else threading.RLock()
         self.check_cancelled = check_cancelled
+        self.retry_wait = RetryWait(signal, check_cancelled)
 
     @contextlib.contextmanager
     def guard(self) -> Iterator[None]:
@@ -76,7 +115,11 @@ class SourceOperations:
     ) -> T:
         with self.guard():
             return execute_with_source_policy(
-                sources, operation, check_cancelled=self.check_cancelled, on_retry=on_retry
+                sources,
+                operation,
+                check_cancelled=self.check_cancelled,
+                on_retry=on_retry,
+                wait=self.retry_wait,
             )
 
 
@@ -99,6 +142,7 @@ def execute_with_source_policy[T](
     *,
     check_cancelled: Callable[[], None] | None = None,
     on_retry: Callable[[int, float, SourceError], None] | None = None,
+    wait: RetryWait | None = None,
 ) -> T:
     """Execute one coherent operation with the strictest participating policy.
 
@@ -106,8 +150,10 @@ def execute_with_source_policy[T](
     For native SQL it includes binding and execution, not separate count/sample
     calls. For eager input it includes conversion and materialization checks.
     Unknown failures and detected identity changes are never implicitly retried.
+    ``wait`` sleeps between attempts (by default without a cancellation signal).
     """
     participants = tuple({id(source): source for source in sources}.values())
+    wait = wait or RetryWait(None, check_cancelled)
     policy = RetryPolicy(
         retries=min((source.params.retries for source in participants), default=0),
         delay_s=max((source.params.retry_delay_s for source in participants), default=0.0),
@@ -134,9 +180,5 @@ def execute_with_source_policy[T](
                 raise _explained(error, participants) from None
             if on_retry is not None:
                 on_retry(attempt + 1, pause, error)
-            until = time.monotonic() + pause
-            while time.monotonic() < until:
-                if check_cancelled is not None:
-                    check_cancelled()
-                time.sleep(min(0.05, max(0.0, until - time.monotonic())))
+            wait(pause)
     raise AssertionError("source operation exhausted without a result or exception")

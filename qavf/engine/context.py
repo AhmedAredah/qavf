@@ -221,7 +221,9 @@ class DataContext:
             self._release_requested: set[str] = set()
             self._session = self._resources.session
             self._operations = SourceOperations(
-                concurrent=concurrent_loads, check_cancelled=self._check_cancelled
+                concurrent=concurrent_loads,
+                check_cancelled=self._check_cancelled,
+                signal=self._session,
             )
             self._sql_connections = SqlConnections(self.env, self._session)
 

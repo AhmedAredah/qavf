@@ -28,16 +28,25 @@ class RunSession:
         self.active: dict[int, Invocation] = {}
         self.connections: dict[object, tuple[int, Any]] = {}
         self._closing = threading.RLock()
+        self._stopped = threading.Condition(self.lock)
 
     def check(self) -> None:
         from qavf.engine.resources import ResourceLimitError
 
+        if self.stopped():
+            raise ResourceLimitError("validation execution was cancelled or its context is closed")
+
+    def stopped(self) -> bool:
+        """Whether the calling invocation is cancelled or the run is closed."""
         with self.lock:
             invocation = self.active.get(threading.get_ident())
-            if self.closed or (invocation is not None and invocation.cancelled.is_set()):
-                raise ResourceLimitError(
-                    "validation execution was cancelled or its context is closed"
-                )
+            return self.closed or (invocation is not None and invocation.cancelled.is_set())
+
+    def wait(self, timeout: float) -> bool:
+        """Wait up to ``timeout`` seconds, returning as soon as the calling invocation
+        is cancelled or the run closes; whether it was (a retry's cancellation signal)."""
+        with self._stopped:
+            return self._stopped.wait_for(self.stopped, max(0.0, timeout))
 
     def begin(self, invocation: Invocation | None = None) -> Invocation:
         invocation = invocation or Invocation()
@@ -59,6 +68,7 @@ class RunSession:
     def cancel(self, invocation: Invocation) -> None:
         with self.lock:
             invocation.cancelled.set()
+            self._stopped.notify_all()
             connections = [
                 connection
                 for owner, connection in self.connections.values()
@@ -90,6 +100,7 @@ class RunSession:
     def request_close(self) -> bool:
         with self.lock:
             self.closed = True
+            self._stopped.notify_all()
             return not self.active
 
     def close_worker_connections(self, owner: int) -> None:

@@ -6,7 +6,6 @@ import functools
 import glob
 import os
 import re
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -32,7 +31,7 @@ from qavf.redaction import redact_text
 from qavf.run_control import CANCELLED_MESSAGE
 from qavf.sources.base import SourceError, SourceNotFoundError
 from qavf.sources.errors import redacted_error, verify_postcondition
-from qavf.sources.execution import RetryPolicy
+from qavf.sources.execution import RetryPolicy, RetryWait
 from qavf.sources.formats import READERS, infer_format, is_remote
 from qavf.sources.local_files import discover_local_files
 from qavf.sources.sql import normalize_sql_paths
@@ -89,11 +88,8 @@ class InputReader:
 
     def _pause(self, seconds):
         """Wait before a retry, returning as soon as the run is cancelled."""
-        if self.control is None:
-            time.sleep(seconds)
-        else:
-            self.control.token.wait(seconds)
-        self._check_cancelled()
+        signal = None if self.control is None else self.control.token
+        RetryWait(signal, self._check_cancelled)(seconds)
 
     def load(self, name, value, spec) -> LoadedDataset:
         from qavf.settings import SourcePolicy
