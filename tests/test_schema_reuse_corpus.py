@@ -140,13 +140,6 @@ def test_the_corpus_is_not_empty():
     assert {"config/qavf.full.yaml", "README.md"} <= {n.replace("\\", "/") for n in names}
 
 
-@pytest.mark.parametrize(("name", "text"), CORPUS, ids=[name for name, _ in CORPUS])
-def test_documented_configurations_the_runtime_accepts_match_the_full_schema(name, text, tmp_path):
-    if not _runtime_accepts(text, tmp_path):
-        pytest.skip("a fragment the runtime needs more context for")
-    assert not _errors(FULL, _document(text)), name
-
-
 def _native_document(text: str) -> bool:
     document = _document(text)
     checks = list(document.get("checks") or [])
@@ -155,10 +148,28 @@ def _native_document(text: str) -> bool:
     return all(isinstance(c, dict) and c.get("check") in ("expression", "sql") for c in checks)
 
 
-@pytest.mark.parametrize(("name", "text"), CORPUS, ids=[name for name, _ in CORPUS])
-def test_documented_row_check_configurations_match_the_native_schema(name, text, tmp_path):
-    if not _native_document(text) or not _runtime_accepts(text, tmp_path):
-        pytest.skip("not a configuration the native backend runs")
+# Validation reads no data, so whether the runtime accepts a document does not
+# depend on where it would live: decide it once, when the tests are collected.
+# Fragments that need more context, and documents the native backend does not
+# run, are left out rather than skipped.
+_PLACE = ROOT / "corpus-configuration.yaml"
+ACCEPTED = [(name, text) for name, text in CORPUS if _runtime_accepts(text, _PLACE.parent)]
+NATIVE_ACCEPTED = [(name, text) for name, text in ACCEPTED if _native_document(text)]
+
+
+def test_the_accepted_corpora_are_not_empty():
+    assert ACCEPTED and NATIVE_ACCEPTED
+
+
+@pytest.mark.parametrize(("name", "text"), ACCEPTED, ids=[name for name, _ in ACCEPTED])
+def test_documented_configurations_the_runtime_accepts_match_the_full_schema(name, text):
+    assert not _errors(FULL, _document(text)), name
+
+
+@pytest.mark.parametrize(
+    ("name", "text"), NATIVE_ACCEPTED, ids=[name for name, _ in NATIVE_ACCEPTED]
+)
+def test_documented_row_check_configurations_match_the_native_schema(name, text):
     assert not _errors(NATIVE, _document(text)), name
 
 

@@ -85,16 +85,23 @@ def test_the_manifest_lists_includes_baselines_and_zone_layers(tmp_path: Path) -
         assert (tmp_path / name).resolve() in protected, name
 
 
-@pytest.mark.parametrize("kind", ALIASES)
-@pytest.mark.parametrize("name", INPUTS)
+# The manifest is written when a baseline is accepted and protected before it
+# exists, so it has no link aliases: a link needs an existing file.
+_NOT_YET_WRITTEN = "baseline/counts.csv.manifest.json"
+ALIASED_INPUTS = [
+    (name, kind)
+    for name in INPUTS
+    for kind in ALIASES
+    if not (name == _NOT_YET_WRITTEN and kind in ("hardlink", "symlink"))
+]
+
+
+@pytest.mark.parametrize(("name", "kind"), ALIASED_INPUTS)
 def test_run_never_writes_a_report_over_a_declared_input(
     tmp_path: Path, name: str, kind: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     config = _project(tmp_path)
     target = tmp_path / name
-    if not target.exists() and kind in ("hardlink", "symlink"):
-        # The manifest is written when a baseline is accepted; it is protected before.
-        pytest.skip("a link needs an existing file")
     destination = _alias(kind, target, tmp_path)
     before = _snapshot(tmp_path)
     assert main(["run", "-c", str(config), "--json", str(destination)]) == EXIT_USAGE
